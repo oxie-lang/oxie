@@ -217,12 +217,18 @@ impl Crate {
     }
     /// The class `name` means when written in `module` (see `type_key_in`).
     pub fn class_in(&self, name: &str, module: &[String]) -> Option<&ClassInfo> {
+        if self.imported_from_outside(name, module) {
+            return None;
+        }
         if !self.same_named.contains(name) {
             return self.class(name);
         }
         self.classes.get(&self.type_key_in(name, module)?)
     }
     pub fn enum_in(&self, name: &str, module: &[String]) -> Option<&EnumInfo> {
+        if self.imported_from_outside(name, module) {
+            return None;
+        }
         if !self.same_named.contains(name) {
             return self.enum_(name);
         }
@@ -232,6 +238,9 @@ impl Crate {
     /// name, or for a name declared in several modules, the one the path leads to.
     pub fn class_at(&self, path: &[String], module: &[String]) -> Option<&ClassInfo> {
         let name = path.last()?;
+        if self.leaves_crate(path, module) || path.len() == 1 && self.imported_from_outside(name, module) {
+            return None;
+        }
         if !self.same_named.contains(name) {
             return self.class(name);
         }
@@ -239,10 +248,25 @@ impl Crate {
     }
     pub fn enum_at(&self, path: &[String], module: &[String]) -> Option<&EnumInfo> {
         let name = path.last()?;
+        if self.leaves_crate(path, module) || path.len() == 1 && self.imported_from_outside(name, module) {
+            return None;
+        }
         if !self.same_named.contains(name) {
             return self.enum_(name);
         }
         self.enums.get(&self.type_key_at(path, module)?)
+    }
+    /// Whether a path written in `module` starts at another crate (`std.thread.Builder`), so it
+    /// names none of this crate's types, whatever their names.
+    pub fn leaves_crate(&self, path: &[String], module: &[String]) -> bool {
+        let Some(first) = path.first().filter(|_| path.len() > 1) else { return false };
+        let other_crate = matches!(first.as_str(), "std" | "core" | "alloc") || self.extern_crates.contains(first);
+        other_crate && !self.modules.contains(first) && !self.imports.contains_key(&(module.to_vec(), first.clone()))
+    }
+    /// Whether `module` imports `name` from another crate (`import alacritty_terminal::Selection`),
+    /// so that the name means that one, not a type or function of this crate.
+    fn imported_from_outside(&self, name: &str, module: &[String]) -> bool {
+        self.imports.get(&(module.to_vec(), name.to_string())).is_some_and(|p| self.leaves_crate(p, module))
     }
     /// The key of the class or enum `name` declared in `module`.
     pub fn decl_key(&self, module: &[String], name: &str) -> String {
@@ -264,7 +288,7 @@ impl Crate {
     }
     /// The function `name` means when written in `module` (as for types, see `type_key_in`).
     pub fn fun_in(&self, name: &str, module: &[String]) -> Option<&FunInfo> {
-        if !self.same_named_funs.contains(name) && self.ambiguous.contains(name) {
+        if !self.same_named_funs.contains(name) && self.ambiguous.contains(name) || self.imported_from_outside(name, module) {
             return None;
         }
         self.funs.get(&self.key_in(Space::Funs, name, module)?)
