@@ -224,6 +224,57 @@ fn language_server_features() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Hover shows a function's `context(...)` clause, and a context used in a method leads to the
+/// clause of its class.
+#[test]
+fn context_parameters_in_hover_and_definition() {
+    const CTX: &str = r#"class Log(var lines: Vec<String> = vec[]) {
+    fun add(line: String) = lines.push(line)
+}
+
+context(log: &mut Log)
+fun record(line: &str) = log.add(line.to_string())
+
+context(log: &mut Log)
+class Cart(var n: i32 = 0) {
+    fun add() {
+        n += 1
+        log.add("added")
+    }
+}
+
+fun main() {
+    var log = Log()
+    record("hi")
+    var cart = Cart()
+    cart.add()
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("oxie-lsp-contexts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file: PathBuf = dir.join("contexts.oxi");
+    std::fs::write(&file, CTX).unwrap();
+    let uri = file_uri(&oxie_compiler::compile::canonicalize(&file).unwrap());
+
+    let mut c = Client::start();
+    let _ = c.request("initialize", json!({"rootUri": file_uri(&dir), "capabilities": {}}));
+    c.notify("initialized", json!({}));
+    c.notify("textDocument/didOpen", json!({"textDocument": {"uri": uri, "languageId": "oxie", "version": 1, "text": CTX}}));
+    let diags = c.wait_diagnostics(&uri);
+    assert_eq!(diags.as_array().unwrap().len(), 0, "{diags}");
+
+    let h = c.request("textDocument/hover", json!({"textDocument": {"uri": uri}, "position": pos(CTX, "record(\"hi\")", 1)}));
+    let text = h["contents"]["value"].as_str().unwrap();
+    assert!(text.contains("context(log: &mut Log) fun record(line: &str)"), "{text}");
+
+    let d = c.request("textDocument/definition", json!({"textDocument": {"uri": uri}, "position": pos(CTX, "log.add(\"added\")", 1)}));
+    assert_eq!(d[0]["range"]["start"]["line"], 7, "{d}");
+
+    let _ = c.request("shutdown", Value::Null);
+    c.notify("exit", Value::Null);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file opened through a symlinked directory (on macOS, any file under /tmp) keeps the editor's
 /// URI in diagnostics and locations.
 #[cfg(unix)]

@@ -69,6 +69,31 @@ fun main() {
 
 Parameters are written `name: Type`, the return type after `:` (Rust's `->` also works).
 
+A value that many functions pass along, such as a configuration, a logger or GPUI's `window` and
+`cx`, can be a *context parameter*: each call passes the variable of that name where it is made,
+so callers don't write it.
+
+```oxie
+class Config(verbose: bool)
+
+context(config: &Config)
+fun log(msg: &str) {
+    if (config.verbose) println(msg)
+}
+
+context(config: &Config)
+fun run_step(n: i32) = log("step $n")     // passes its own `config` on
+
+fun main() {
+    val config = Config(true)
+    run_step(1)                           // run_step(1, &config)
+    run_step(2)
+}
+```
+
+Before a class, `context(...)` gives each method the contexts it uses, also through the methods it
+calls; see [Context parameters](reference.md#context-parameters).
+
 ## Strings
 
 ```oxie

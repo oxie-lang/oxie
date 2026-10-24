@@ -58,6 +58,11 @@ fun main() = println(legacy::answer())
 Any Rust function, type, trait or macro is then used directly. Rust-only syntax can be written
 inline with `rust { ... }`.
 
+Oxie knows the signatures of functions declared in Oxie only, so a call into Rust takes its
+arguments as written: borrows (`&x`), named and default arguments, and
+[context parameters](reference.md#context-parameters) are filled in for Oxie functions. A GPUI
+`cx` goes to GPUI's own methods explicitly (`entity.read(cx)`), and Oxie passes it to yours.
+
 ## Calling Oxie from Rust
 
 Everything Oxie declares is a normal Rust item. In a Rust crate, add Oxie modules with

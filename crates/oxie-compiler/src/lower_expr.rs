@@ -2578,7 +2578,7 @@ impl<'a> Lowerer<'a> {
                 self.arg_list(args, None, TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
-                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, generics: Vec::new() }).collect();
+                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
                 let slots = self.fill_args(args, &params, span);
                 self.e.w(&format!("{} {{ ", path));
                 for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
@@ -2601,9 +2601,11 @@ impl<'a> Lowerer<'a> {
     fn fill_args(&mut self, args: &[Arg], params: &[ParamInfo], span: Span) -> Vec<Option<Expr>> {
         let mut slots: Vec<Option<Expr>> = vec![None; params.len()];
         let mut next = 0;
+        // a context the callee doesn't use is named `_cx`, and still passed as `cx`
+        let named = |p: &ParamInfo, n: &str| p.name.as_deref() == Some(n) || p.context.is_some() && p.name.as_deref().and_then(|x| x.strip_prefix('_')) == Some(n);
         for a in args {
             match &a.name {
-                Some(n) => match params.iter().position(|p| p.name.as_deref() == Some(n.as_str())) {
+                Some(n) => match params.iter().position(|p| named(p, n)) {
                     Some(i) => slots[i] = Some(a.value.clone()),
                     None => self.error(a.value.span, format!("no parameter named `{}`", n)),
                 },
@@ -2622,7 +2624,27 @@ impl<'a> Lowerer<'a> {
         }
         for (i, p) in params.iter().enumerate() {
             if slots[i].is_none() {
-                if let Some(d) = &p.default {
+                if let (Some(fun), Some(d)) = (&p.context, &p.default) {
+                    // a context: the variable of its name where the call is
+                    let n = d.ident().unwrap_or_default().to_string();
+                    if !self.is_local(&n) && self.implicit_field(&n).is_none() {
+                        let ty = crate::symbols::type_text(&p.ty);
+                        // a method of a class with the context, whose call here Oxie couldn't follow
+                        // when it chose the method's contexts
+                        let in_class = self.class.as_ref().and_then(|c| self.class_info(&c.name)).is_some_and(|c| c.contexts.contains(&n));
+                        let d = if in_class {
+                            Diag::error(span, format!("`{}` needs the context `{}`, and Oxie didn't see that this method passes it on", fun, n)).with_help(format!(
+                                "give the method a `context(...)` of its own with `{}: {}` and the other contexts it uses, or pass one: `{}({} = ...)`",
+                                n, ty, fun, n
+                            ))
+                        } else {
+                            Diag::error(span, format!("`{}` needs the context `{}`, and there is no `{}` here", fun, n, n))
+                                .with_help(format!("declare it on the function that makes this call, `context({}: {}) fun ...`, or pass one: `{}({} = ...)`", n, ty, fun, n))
+                        };
+                        self.diags.push(d);
+                    }
+                    slots[i] = Some(Expr::new(d.kind.clone(), span));
+                } else if let Some(d) = &p.default {
                     slots[i] = Some(d.clone());
                 } else {
                     let n = p.name.clone().unwrap_or_else(|| format!("#{}", i + 1));
@@ -2641,7 +2663,7 @@ impl<'a> Lowerer<'a> {
             if self.this_recv.is_none() {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
-            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, generics: Vec::new() });
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new() });
             args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span) });
         }
         (args, params)

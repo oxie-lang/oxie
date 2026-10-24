@@ -1,0 +1,60 @@
+// Mistakes with context parameters, which Oxie reports before rustc runs.
+
+class Log(var lines: Vec<String> = vec[]) {
+    fun add(line: String) = lines.push(line)
+}
+
+context(log: &mut Log)
+fun record(line: &str) = log.add(line.to_string())
+
+fun report() {
+    record("no log here")
+}
+// error: 11: `record` needs the context `log`, and there is no `log` here
+
+context(log: &mut Log)
+class Cart(var items: Vec<String> = vec[]) {
+    fun add(item: &str) {
+        items.push(item.to_string())
+        record("added $item")
+    }
+}
+
+fun fill(cart: &mut Cart) {
+    cart.add("pen")
+}
+// error: 24: `add` needs the context `log`, and there is no `log` here
+
+interface Greeter {
+    context(log: &mut Log)
+    fun greet(): String
+}
+// error: 29: an interface method can't take contexts
+
+class English : Greeter {
+    context(log: &mut Log)
+    override fun greet(): String = "hi"
+}
+// error: 35: `greet` implements an interface method, so its parameters come from the interface
+
+context(log: &mut Log)
+fun twice(log: &mut Log) {}
+// error: 40: `log` is both a parameter and a context of `twice`
+
+context(log: &mut Log)
+enum Color { Red }
+// error: 44: `context(...)` goes before `fun` or `class`
+
+context(log: &mut Log, log: &Log)
+fun duplicate() {}
+// error: 48: `log` is already a context here
+
+context(log: &mut Log = Log())
+fun defaulted() {}
+// error: 52: a context has no default value
+
+context(log: &mut Log)
+fun main() {
+    report()
+}
+// error: 56: `main` can't take contexts

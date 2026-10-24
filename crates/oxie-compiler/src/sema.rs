@@ -19,6 +19,8 @@ pub struct ParamInfo {
     pub name: Option<String>,
     pub ty: Type,
     pub default: Option<Expr>,
+    /// A context parameter: the name of its function, for the error when a call has none to pass.
+    pub context: Option<String>,
     /// Generic parameter names of the declaring function (lambda arguments can't be annotated with them).
     pub generics: Vec<String>,
 }
@@ -65,6 +67,8 @@ pub struct ClassInfo {
     pub is_sync: bool,
     /// Number of lifetime parameters (`data class Token<'a>`).
     pub lifetimes: usize,
+    /// The names in its `context(...)` clause.
+    pub contexts: Vec<String>,
 }
 
 impl ClassInfo {
@@ -78,7 +82,7 @@ impl ClassInfo {
         self.fields
             .iter()
             .filter(|f| f.in_ctor)
-            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), generics: Vec::new() })
+            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new() })
             .collect()
     }
 }
@@ -771,7 +775,7 @@ pub fn params_info(f: &FunDecl) -> Vec<ParamInfo> {
         .collect();
     f.params
         .iter()
-        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), generics: generics.clone() })
+        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone() })
         .collect()
 }
 
@@ -863,6 +867,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         has_generics: !only_lifetimes(&t.generics),
                         type_params: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Type { .. })).count(),
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
+                        contexts: t.contexts.iter().filter_map(|p| p.name().map(String::from)).collect(),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, true) {
                         k.classes.insert(key, info);

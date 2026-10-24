@@ -11,6 +11,7 @@ compiles to Rust. This page maps what you know to Oxie, and lists the Rust ideas
 | mutable | `var x = 1` | `let x = 1` | `var x = 1` |
 | function | `fun f(a: Int): Int = a * 2` | `function f(a: number): number` | `fun f(a: i32): i32 = a * 2` |
 | default / named args | `f(b = 2)` | — | `f(b = 2)` |
+| context parameters | `context(log: Logger) fun f()` (found by type) | — | `context(log: &mut Log) fun f()` (the caller's variable named `log`) |
 | string template | `"hi $name ${a + b}"` | `` `hi ${name}` `` | `"hi $name ${a + b}"` |
 | nullable | `String?` | `string \| null` | `String?` |
 | safe call / default | `a?.b ?: c` | `a?.b ?? c` | `a?.b ?: c` |

@@ -52,7 +52,7 @@ const DERIVABLE: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "Hash"
 const CONTAINERS: &[&str] = &["Box", "Rc", "Arc", "RefCell", "Mutex", "RwLock", "Cell", "Pin", "Weak", "UnsafeCell"];
 
 /// Std trait owning a method name (for assigning `override fun` to a supertype).
-fn std_trait_of_method(m: &str) -> &'static [&'static str] {
+pub(crate) fn std_trait_of_method(m: &str) -> &'static [&'static str] {
     match m {
         "fmt" => &["Display", "Debug"],
         "default" => &["Default"],

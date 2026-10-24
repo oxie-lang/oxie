@@ -155,6 +155,60 @@ fun short(x: i32) = x * 2
   lambdas passed to it are boxed automatically.
 * `fun main() throws` prints the error with its causes and exits with status 1.
 
+### Context parameters
+
+```oxie
+class Log(var lines: Vec<String> = vec[]) {
+    fun add(line: String) = lines.push(line)
+}
+
+// every call passes the `log` where it is made
+context(log: &mut Log)
+fun record(line: &str) = log.add(line.to_string())
+
+// each method takes the contexts it uses
+context(log: &mut Log)
+class Cart(var items: Vec<String> = vec[]) {
+    fun add(item: &str) {
+        items.push(item.to_string())
+        record("added $item")              // passes its own `log`
+    }
+    fun count(): usize = items.len()       // takes none
+}
+
+fun main() {
+    var log = Log()
+    var cart = Cart()
+    cart.add("pen")                        // cart.add("pen", &mut log)
+    record("${cart.count()} item")
+    println(log.lines.join(", "))
+}
+```
+
+* `context(name: Type, ...)` before `fun` declares parameters that calls don't write: each call
+  passes the variable of that name where it is made, which can be a parameter, a local
+  (borrowed like any argument: `&mut log`), a lambda's parameter or the calling function's own
+  context. In the generated Rust they come after the other parameters, where GPUI passes its
+  `window` and `cx`: `fn record(line: &str, log: &mut Log)`.
+* A call can pass another value by name (`record("x", log = &mut other)`), or positionally after
+  the other arguments.
+* Before `class`, `context(...)` gives each method the contexts it uses, directly or through the
+  methods and functions it calls (inferred like receivers): `add` takes `log` because it calls
+  `record`, and `count` takes nothing. Static functions and the methods in the class's `impl`
+  blocks, in any file, take theirs the same way. A method with a `context(...)` of its own takes
+  exactly those instead.
+* A `pub` method takes every context of its class, in order, so that its signature doesn't change
+  with its body; so does a method used as a value (`cx.listener(Self.save)`), whose caller passes
+  every argument. One it doesn't use is named with a `_` (`_window`).
+* A lambda's parameter hides a context of the same name, like any variable: in
+  `entity.update(cx) { e: &mut Editor, cx -> e.save() }`, `save` gets the lambda's `cx`.
+* Contexts are passed only in calls that Oxie resolves to a function declared in Oxie, like named
+  and default arguments. A method called on a value whose type Oxie doesn't know, such as an
+  untyped lambda parameter, or called after `?.`, takes them as written: `e.save(cx)`.
+* A call with no variable of a context's name in reach is an Oxie error, which suggests declaring
+  the context on the calling function. Interface methods, overrides, operators and `main` can't
+  take contexts, since their parameters are fixed.
+
 ## Types
 
 | Oxie | Rust |
@@ -237,6 +291,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
   `Marker.describe()` calls a method on it (static functions are still `Marker.create()`).
 * `union Bits { i: u32, f: f32 }` is a Rust union: built with `Bits { f: 1.0 }`, read in `unsafe`.
 * `shared class` — see [Shared classes](#shared-classes).
+* `context(cx: &mut App) class ...` gives each method the contexts it uses — see
+  [Context parameters](#context-parameters).
 * `object Name { ... }` is a namespace (a Rust module) of constants and functions:
   `Name.function()`.
 * Classes, enums and interfaces declared inside a class body are placed next to the class;
@@ -738,4 +794,4 @@ false null this self Self in is as where async move unsafe dyn mut ref extern pu
 
 Contextual (usable as names elsewhere): `data`, `error`, `shared`, `object`, `companion`, `init`,
 `union`, `override`, `operator`, `private`, `internal`, `public`, `test`, `rust`, `throws`, `to`,
-`until`, `downTo`, `step`, `await`, `it`.
+`until`, `downTo`, `step`, `await`, `it`, `context`.

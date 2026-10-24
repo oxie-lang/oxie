@@ -163,8 +163,16 @@ pub fn param_text(p: &Param) -> String {
     s
 }
 
+/// `context(cx: &mut App) ` before a declaration that has contexts.
+fn contexts_text(ps: &[Param]) -> String {
+    if ps.is_empty() {
+        return String::new();
+    }
+    format!("context({}) ", ps.iter().map(param_text).collect::<Vec<_>>().join(", "))
+}
+
 pub fn fun_signature(f: &FunDecl) -> String {
-    let mut s = String::new();
+    let mut s = contexts_text(&f.contexts);
     if f.mods.is_static {
         s.push_str("static ");
     }
@@ -236,7 +244,7 @@ fn type_decl_signature(t: &TypeDecl) -> String {
         (TypeKind::Class, _) => "class",
         (TypeKind::Union, _) => "union",
     };
-    let mut s = format!("{} {}{}", kw, t.name, generics_text(&t.generics));
+    let mut s = format!("{}{} {}{}", contexts_text(&t.contexts), kw, t.name, generics_text(&t.generics));
     let ctor: Vec<String> = t.fields.iter().filter(|f| f.in_ctor).map(field_text).collect();
     if !ctor.is_empty() {
         s.push_str(&format!("({})", ctor.join(", ")));
@@ -470,7 +478,7 @@ pub fn enclosing_type(file: &File, offset: u32) -> Option<&TypeDecl> {
 /// Bindings declared before `offset` in the enclosing function (later ones shadow earlier ones).
 pub fn locals_at(file: &File, offset: u32) -> Vec<Local> {
     let mut out = Vec::new();
-    let Some((_, f)) = enclosing_fun(file, offset) else {
+    let Some((owner, f)) = enclosing_fun(file, offset) else {
         // test blocks
         for it in &file.items {
             if let ItemKind::Test(t) = &it.kind {
@@ -481,7 +489,9 @@ pub fn locals_at(file: &File, offset: u32) -> Vec<Local> {
         }
         return out;
     };
-    for p in &f.params {
+    // its contexts: those of its own clause, else its class's
+    let contexts = if f.contexts.is_empty() { owner.map(|t| t.contexts.as_slice()).unwrap_or_default() } else { &f.contexts };
+    for p in f.params.iter().chain(contexts) {
         if let Pat::Ident { name, span, .. } = &p.pat {
             out.push(Local { name: name.clone(), span: *span, ty: Some(p.ty.clone()), is_param: true });
         }

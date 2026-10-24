@@ -409,7 +409,7 @@ impl<'a> Parser<'a> {
             matches!(p.tok_at(n), Tok::Ident(s) if matches!(s.as_str(),
                 "fun" | "fn" | "val" | "var" | "class" | "data" | "struct" | "enum" | "interface" | "trait" | "const"
                 | "static" | "typealias" | "type" | "mod" | "object" | "import" | "use" | "async" | "unsafe"
-                | "override" | "operator" | "mut" | "error" | "open" | "abstract" | "sealed" | "inline" | "shared"))
+                | "override" | "operator" | "mut" | "error" | "open" | "abstract" | "sealed" | "inline" | "shared" | "context"))
                 || matches!(p.tok_at(n), Tok::Ident(_)) && matches!(p.tok_at(n + 1), Tok::Punct(":"))
         };
         for (kw, vis) in [("private", Vis::Private), ("internal", Vis::Internal), ("public", Vis::Public), ("protected", Vis::Internal)] {
@@ -441,7 +441,12 @@ impl<'a> Parser<'a> {
     fn item(&mut self) -> PResult<Option<Item>> {
         let start = self.span();
         let (docs, attrs) = self.docs_and_attrs()?;
-        let vis = self.visibility()?;
+        let mut vis = self.visibility()?;
+        let context_span = self.span();
+        let contexts = if self.is_context_clause() { self.context_clause()? } else { Vec::new() };
+        if !contexts.is_empty() && vis == Vis::Default {
+            vis = self.visibility()?;
+        }
         // skip Kotlin modifiers that have no Rust meaning
         while (self.is_kw("open") || self.is_kw("final") || self.is_kw("inline") || self.is_kw("sealed") || self.is_kw("abstract"))
             && matches!(self.tok_at(1), Tok::Ident(_))
@@ -549,13 +554,65 @@ impl<'a> Parser<'a> {
             self.eat_punct(";");
             ItemKind::Macro(text)
         } else {
-            if docs.is_empty() && attrs.is_empty() && vis == Vis::Default {
+            if docs.is_empty() && attrs.is_empty() && vis == Vis::Default && contexts.is_empty() {
                 return Ok(None);
             }
-            return self.expected("a declaration after attributes");
+            return self.expected(if contexts.is_empty() { "a declaration after attributes" } else { "`fun` or `class` after `context(...)`" });
+        };
+        let kind = match kind {
+            _ if contexts.is_empty() => kind,
+            ItemKind::Fun(mut f) => {
+                f.contexts = contexts;
+                ItemKind::Fun(f)
+            }
+            ItemKind::Type(mut t) if matches!(t.kind, TypeKind::Class | TypeKind::Data | TypeKind::TupleStruct) && !t.is_error => {
+                t.contexts = contexts;
+                ItemKind::Type(t)
+            }
+            kind => {
+                self.diags.push(Diag::error(context_span, "`context(...)` goes before `fun` or `class`"));
+                kind
+            }
         };
         self.eat_punct(";");
         Ok(Some(Item { docs, attrs, vis, kind, span: start.to(self.prev_span()) }))
+    }
+
+    /// `context(cx: &mut App)` (Kotlin's context parameters) at the start of a declaration.
+    fn is_context_clause(&self) -> bool {
+        self.is_kw("context") && self.is_punct_at(1, "(") && self.is_ident_at(2) && self.is_punct_at(3, ":")
+    }
+
+    /// The parameters of a `context(...)` clause; the declaration may start on the next line.
+    fn context_clause(&mut self) -> PResult<Vec<Param>> {
+        self.bump();
+        self.expect_punct("(")?;
+        let mut out: Vec<Param> = Vec::new();
+        loop {
+            if self.eat_punct(")") {
+                break;
+            }
+            let span = self.span();
+            let name = self.ident()?;
+            self.expect_punct(":")?;
+            let ty = self.ty()?;
+            if self.is_punct("=") {
+                let at = self.bump().span;
+                self.expr()?;
+                self.diags.push(Diag::error(at, "a context has no default value: each call passes its own"));
+            }
+            if out.iter().any(|p| p.name() == Some(name.as_str())) {
+                self.diags.push(Diag::error(span, format!("`{}` is already a context here", name)));
+            }
+            let pat = Pat::Ident { name, by_ref: false, mutable: false, sub: None, span };
+            out.push(Param { pat, ty, default: None, context: true, span: span.to(self.prev_span()) });
+            if !self.eat_punct(",") {
+                self.expect_punct(")")?;
+                break;
+            }
+        }
+        self.skip_nl_only();
+        Ok(out)
     }
 
     fn item_block(&mut self) -> PResult<Vec<Item>> {
@@ -715,7 +772,7 @@ impl<'a> Parser<'a> {
             self.expect_punct(":")?;
             let ty = self.ty()?;
             let default = if self.eat_punct("=") { Some(self.expr()?) } else { None };
-            params.push(Param { pat, ty, default, span: pstart.to(self.prev_span()) });
+            params.push(Param { pat, ty, default, context: false, span: pstart.to(self.prev_span()) });
             if !self.eat_punct(",") {
                 self.expect_punct(")")?;
                 break;
@@ -742,7 +799,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        Ok(FunDecl { name, name_span, mods, generics, receiver, self_param, params, ret, throws, body })
+        Ok(FunDecl { name, name_span, mods, generics, receiver, self_param, params, contexts: Vec::new(), ret, throws, body })
     }
 
     /// `fun Vec<T>.x()` vs `fun foo<T>()`: scan the `<...>` and see if a `.` follows.
@@ -1219,6 +1276,7 @@ impl<'a> Parser<'a> {
             init: None,
             message: None,
             shared: false,
+            contexts: Vec::new(),
         };
         if self.is_punct("(") {
             // Kotlin primary constructor or Rust tuple struct
@@ -1423,6 +1481,7 @@ impl<'a> Parser<'a> {
             init: None,
             message: None,
             shared: false,
+            contexts: Vec::new(),
         };
         self.skip_nl_only();
         self.expect_punct("{")?;

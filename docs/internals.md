@@ -10,6 +10,9 @@ This document is for people working on Oxie itself.
   ▼
   │ parser.rs     recursive descent → ast.rs; error recovery per statement
   ▼
+  │ contexts.rs   context parameters: `context(...)` clauses become parameters whose default is
+  │               the caller's variable of that name; a class's methods get the ones they use
+  ▼
   │ sema.rs       crate-wide symbol table: classes, enums, traits, functions, modules,
   │               extension traits; receiver inference; automatic derives
   │ fields.rs     methods that take only the fields they use (then sema.rs again)

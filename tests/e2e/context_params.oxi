@@ -1,0 +1,143 @@
+// Context parameters: values a function takes without its callers writing them, like the
+// `window` and `cx` GPUI passes to nearly every function.
+
+class Window(var title: String = "")
+class Ctx(var name: String, var notified: i32 = 0)
+class SaveEvent(path: String)
+
+class Log(var lines: Vec<String> = vec[]) {
+    fun add(line: String) = lines.push(line)
+}
+
+// a function's own contexts: each call passes the `log` where it is made
+context(log: &mut Log)
+fun record(line: &str) = log.add(line.to_string())
+
+fun with_ctx(other: &mut Ctx, f: (&mut Ctx) -> ()) = f(other)
+
+// a class's contexts: each method takes those it uses, also through the methods it calls
+context(window: &mut Window, cx: &mut Ctx)
+class Editor(var text: String = "", var saves: i32 = 0) {
+    fun type_text(s: &str) {
+        text.push_str(s)
+        refresh()
+    }
+    fun refresh() {
+        window.title = "${text.len()} chars"
+        cx.notified += 1
+    }
+    // takes only `cx`
+    fun save() {
+        saves += 1
+        cx.notified += 1
+    }
+    fun save_all(times: i32) {
+        repeat(times) { save() }
+    }
+    // inside the lambda, `cx` is the lambda's own
+    fun refresh_into(spare: &mut Ctx) {
+        with_ctx(spare) { cx -> refresh() }
+    }
+    // used as a value below, so it takes both contexts (`_window`, which it doesn't use)
+    fun on_save(event: &SaveEvent) {
+        println("saving to ${event.path}")
+        save()
+    }
+    fun length(): usize = text.len()
+}
+
+fun dispatch(editor: &mut Editor, event: &SaveEvent, window: &mut Window, cx: &mut Ctx, handler: (&mut Editor, &SaveEvent, &mut Window, &mut Ctx) -> ()) {
+    handler(editor, event, window, cx)
+}
+
+context(log: &mut Log)
+class Store(var items: Vec<String> = vec[]) {
+    static fun open(): Store {
+        record("open")
+        Store()
+    }
+    fun add_all(xs: &[&str]) {
+        for (x in xs) add(x)
+    }
+    fun add(x: &str) {
+        items.push(x.to_string())
+        record("added $x")
+    }
+    fun countdown(n: i32) {
+        if (n > 0) {
+            record("$n")
+            countdown(n - 1)
+        }
+    }
+    // a clause of its own replaces the class's
+    context(out: &mut Vec<String>)
+    fun export() {
+        for (x in items) out.push(x.to_uppercase())
+    }
+}
+
+// calls through a loop variable, an element, a function's result and a null-checked parameter
+// pass contexts too
+context(log: &mut Log)
+class Tab(name: String) {
+    fun close() = record("closed $name")
+}
+
+fun scratch_tab(): Tab = Tab("scratch")
+
+context(log: &mut Log)
+class Pane(var tabs: Vec<Tab> = vec[]) {
+    fun close_all() {
+        for (t in tabs) t.close()
+    }
+    fun close_first() = tabs[0].close()
+    fun close_scratch() {
+        val t = scratch_tab()
+        t.close()
+    }
+    fun close_maybe(t: Tab?) {
+        if (t != null) t.close()
+    }
+}
+
+interface Titled {
+    fun title(): String
+}
+
+// `title` implements the interface (without `override`), so its parameters stay the interface's
+context(log: &mut Log)
+class Note(text: String) : Titled {
+    fun title(): String = text.to_uppercase()
+    fun publish() = record("published ${title()}")
+}
+
+fun main() {
+    var window = Window()
+    var cx = Ctx("main")
+    var editor = Editor()
+    editor.type_text("hello")
+    editor.save_all(2)
+    var spare = Ctx("spare")
+    editor.refresh_into(&mut spare)
+    editor.save(cx = &mut spare)
+    dispatch(&mut editor, &SaveEvent("a.txt"), &mut window, &mut cx, Editor.on_save)
+    println("${editor.length()} chars, ${editor.saves} saves, title \"${window.title}\"")
+    println("${cx.name} notified ${cx.notified}, ${spare.name} notified ${spare.notified}")
+
+    var log = Log()
+    var store = Store.open()
+    store.add_all(&["ink", "pen"])
+    store.countdown(2)
+    var out: Vec<String> = vec[]
+    store.export()
+    println(out.join(", "))
+    val pane = Pane(vec[Tab("a"), Tab("b")])
+    pane.close_all()
+    pane.close_first()
+    pane.close_scratch()
+    pane.close_maybe(Tab("maybe"))
+    pane.close_maybe(null)
+    val note = Note("memo")
+    note.publish()
+    println("${note.title()}: ${log.lines.join("; ")}")
+}

@@ -121,6 +121,8 @@ pub struct Param {
     pub pat: Pat,
     pub ty: Type,
     pub default: Option<Expr>,
+    /// A context parameter (`context(cx: &mut App)`): its default is the caller's own `cx`.
+    pub context: bool,
     pub span: Span,
 }
 
@@ -157,6 +159,9 @@ pub struct FunDecl {
     pub receiver: Option<Type>,
     pub self_param: Option<SelfParam>,
     pub params: Vec<Param>,
+    /// `context(cx: &mut App) fun ...`: parameters that calls fill with their own variable of the
+    /// name (`contexts.rs` appends them to `params`).
+    pub contexts: Vec<Param>,
     pub ret: Option<Type>,
     pub throws: Throws,
     pub body: Option<FunBody>,
@@ -224,6 +229,8 @@ pub struct TypeDecl {
     pub message: Option<Expr>,
     /// `shared class`: values are shared handles (`Rc<RefCell<..>>`, or `Arc<Mutex<..>>` with `@sync`).
     pub shared: bool,
+    /// `context(cx: &mut App) class ...`: the contexts its methods may take; each takes those it uses.
+    pub contexts: Vec<Param>,
 }
 
 #[derive(Clone, Debug)]

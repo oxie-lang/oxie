@@ -71,6 +71,11 @@
   },
   {
     "file": "docs/guide.md",
+    "output": "step 1\nstep 2\n",
+    "source": "class Config(verbose: bool)\n\ncontext(config: &Config)\nfun log(msg: &str) {\n    if (config.verbose) println(msg)\n}\n\ncontext(config: &Config)\nfun run_step(n: i32) = log(\"step $n\")     // passes its own `config` on\n\nfun main() {\n    val config = Config(true)\n    run_step(1)                           // run_step(1, &config)\n    run_step(2)\n}\n"
+  },
+  {
+    "file": "docs/guide.md",
     "output": "Oxie 1.2\nnext: 2\ndebug: [1, 2]\nHello, Oxie!\nRoses are red,\n  Oxie is new.\na dollar: $5\n",
     "source": "fun main() {\n    val name = \"Oxie\"\n    val version = 1.25\n    println(\"$name ${version:.1}\")       // format spec after `:` (Rust format syntax)\n    println(\"next: ${version + 0.75}\")\n    println(\"debug: ${listOf(1, 2):?}\")  // `:?` is Debug formatting\n\n    val greeting = \"Hello, \" + name + \"!\"  // `+` with strings builds a String\n    println(greeting)\n\n    val poem = \"\"\"\n        Roses are red,\n          $name is new.\n        \"\"\"                                // indentation is trimmed automatically\n    println(poem)\n    println(\"a dollar: \\$5\")\n}\n"
   },
@@ -163,6 +168,11 @@
     "file": "docs/guide.md",
     "output": "25 8\nplain Rust macro: 2\n",
     "source": "macro_rules! square {\n    ($x:expr) => { $x * $x };\n}\n\nrust {\n    fn rust_only(x: u32) -> u32 {\n        x.rotate_left(3)\n    }\n}\n\nfun main() {\n    println(\"${square!(5)} ${rust_only(1)}\")\n    println!(\"plain Rust macro: {}\", 1 + 1)\n}\n"
+  },
+  {
+    "file": "docs/reference.md",
+    "output": "added pen, 1 item\n",
+    "source": "class Log(var lines: Vec<String> = vec[]) {\n    fun add(line: String) = lines.push(line)\n}\n\n// every call passes the `log` where it is made\ncontext(log: &mut Log)\nfun record(line: &str) = log.add(line.to_string())\n\n// each method takes the contexts it uses\ncontext(log: &mut Log)\nclass Cart(var items: Vec<String> = vec[]) {\n    fun add(item: &str) {\n        items.push(item.to_string())\n        record(\"added $item\")              // passes its own `log`\n    }\n    fun count(): usize = items.len()       // takes none\n}\n\nfun main() {\n    var log = Log()\n    var cart = Cart()\n    cart.add(\"pen\")                        // cart.add(\"pen\", &mut log)\n    record(\"${cart.count()} item\")\n    println(log.lines.join(\", \"))\n}\n"
   },
   {
     "file": "docs/reference.md",

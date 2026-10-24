@@ -69,6 +69,7 @@ fun main() {
 |---|---|
 | `val x = 1`, `var y = 2`, `val z: i64 = 3` | `let`, `let mut`, typed `let` |
 | `fun f(a: i32, b: i32 = 0): i32 { }`, `fun g(x: i32) = x * 2` | functions; defaults, named arguments `f(1, b = 2)` |
+| `context(log: &mut Log) fun f()`, `context(cx: &mut Ctx) class C { }` | context parameters: each call passes the caller's variable named `log`; a class's methods take the ones they use |
 | `"$name is ${age + 1}"`, `"${x:.2}"`, `"${list:?}"` | templates, format specs, Debug |
 | `if (c) a else b`, `when (x) { 1, 2 -> a; in 3..=9 -> b; else -> c }`, `when { c -> a; else -> b }` | expressions; `when` is `match` (or an if chain without a subject) |
 | `for (x in xs)`, `for ((i, x) in xs.iter().enumerate())`, `while`, `do { } while ()`, `loop`, `repeat(n) { }` | loops |
@@ -158,6 +159,9 @@ fun main() {
   aren't unwrapped: write `if (val v = &a.field)`, `a.field?.foo()`, or `val v = a.field ?:
   return`. `if (val x = x)` takes the value out of `x`; to use `x` again afterwards, unwrap a
   reference: `if (val v = &x)`.
+* **Context parameters are found by name**, not by type: a call to `context(log: &mut Log) fun
+  f()` passes the variable named `log` where the call is (a local, a parameter, a lambda's
+  parameter or the caller's own context), or one given by name, `f(log = &mut other)`.
 * **Lambdas** are Rust closures. `return` in a lambda returns from the lambda, not from the
   enclosing function. In predicates (`filter`, `find`, `any`, `count`, ...) the element is a
   reference: comparing it with a literal reads through it (`filter { it > 2 }`), but to pass
@@ -361,6 +365,38 @@ fun main() {
 * A lambda returned from a function, stored in a field, or run on another thread must own what
   it captures: `move { ... }`, or a capture list `{ [handle] -> ... }` that clones a shared
   handle or channel sender into it.
+
+**Values every function passes on** (GPUI's `window` and `cx`, a logger, a configuration).
+
+```oxie
+class Ctx(var notified: i32 = 0)
+
+context(cx: &mut Ctx)
+class Editor(var text: String = "") {
+    fun type_text(s: &str) {
+        text.push_str(s)
+        refresh()                           // passes `cx`
+    }
+    fun refresh() {
+        cx.notified += 1
+    }
+    fun length(): usize = text.len()        // takes no context
+}
+
+fun main() {
+    var cx = Ctx()
+    var editor = Editor()
+    editor.type_text("hi")                  // editor.type_text("hi", &mut cx)
+    println("${editor.length()} ${cx.notified}")
+}
+```
+
+* `context(...)` on a class gives each method the contexts it uses, also through the methods it
+  calls; don't add `cx` parameters to the methods yourself. `pub` methods and methods used as
+  values (`cx.listener(Self.save)`) take all of them.
+* Oxie fills contexts in only where it knows the function called. A method called on an untyped
+  lambda parameter needs them written out: `entity.update(cx) { e, cx -> e.save(cx) }`, or type
+  the parameter (`e: &mut Editor`) and let Oxie pass them.
 
 **Tests.** `test "name" { assert_eq(f(2), 4) }` blocks sit next to the code; `oxie test` runs
 them, and `oxie test "name"` runs one.

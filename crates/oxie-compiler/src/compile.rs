@@ -128,6 +128,11 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         let (module, is_root) = module_of(&input.rel_path);
         parsed.push(Parsed { input, module, is_root, file, diags });
     }
+    // context parameters first: every later pass sees them as parameters
+    let context_diags = crate::contexts::add_contexts(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>());
+    for (i, d) in context_diags {
+        parsed[i].diags.push(d);
+    }
     sema::auto_type_lifetimes(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>());
     let param_notes = crate::params::borrow_params(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>());
     let has_lib = parsed.iter().any(|p| p.is_root && p.input.rel_path.file_stem().is_some_and(|s| s == "lib"));

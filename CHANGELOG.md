@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+* Context parameters: `context(log: &mut Log) fun record(line: &str)` takes `log` without its
+  callers writing it. Each call passes the variable named `log` where it is made, or one given by
+  name (`record("x", log = &mut other)`). Before a class,
+  `context(window: &mut Window, cx: &mut Context<Self>)` gives each method the contexts it uses,
+  also through the methods it calls, so GPUI code declares `window` and `cx` once. In the
+  generated Rust they are ordinary parameters after the others.
 * A null check unwraps a local variable or parameter of type `T?`: in `if (x != null) { ... }`
   (also in an `&&` chain) `x` is the value, and after `if (x == null) return` (or `throw`,
   `continue`, `break`) it is the value for the rest of the block. Fields aren't unwrapped; their
