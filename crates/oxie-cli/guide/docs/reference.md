@@ -750,7 +750,9 @@ optimizer treat them like private Rust functions; mark library APIs `pub`.
 `@name` and `@name(args)` become `#[name]` / `#[name(args)]`: `@derive(Serialize)`,
 `@serde(rename_all = "camelCase")`, `@inline`, `@cfg(test)`, `@tokio::main`, ... Rust's `#[...]`
 syntax works too. Oxie-specific: `@no_auto_derive` (classes/enums), `@from` (error enum cases).
-Attributes also work on statements (see [Statements](#statements)).
+Attributes also work on statements (see [Statements](#statements)). A class property that exists
+only in some builds (`@cfg(test) var built: usize`) is no constructor parameter: it starts with
+its default value, or the type's `Default`.
 
 `#![...]` at the top of a file:
 

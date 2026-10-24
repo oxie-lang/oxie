@@ -1317,7 +1317,9 @@ impl<'a> Parser<'a> {
                     self.expect_punct(":")?;
                     let ty = self.ty()?;
                     let default = if self.eat_punct("=") { Some(self.expr()?) } else { None };
-                    decl.fields.push(Field { docs, attrs, vis, name, ty, default, in_ctor: true, span: fstart.to(self.prev_span()) });
+                    // a field that exists only in some builds (`@cfg(test)`) can't be an argument
+                    let in_ctor = !attrs.iter().any(|a| a.name() == "cfg");
+                    decl.fields.push(Field { docs, attrs, vis, name, ty, default, in_ctor, span: fstart.to(self.prev_span()) });
                     if !self.eat_punct(",") {
                         self.expect_punct(")")?;
                         break;
@@ -1382,7 +1384,8 @@ impl<'a> Parser<'a> {
             self.expect_punct(":")?;
             let ty = self.ty()?;
             let default = if self.eat_punct("=") { Some(self.expr()?) } else { None };
-            decl.fields.push(Field { docs, attrs, vis, name, ty, default, in_ctor: true, span: fstart.to(self.prev_span()) });
+            let in_ctor = !attrs.iter().any(|a| a.name() == "cfg");
+            decl.fields.push(Field { docs, attrs, vis, name, ty, default, in_ctor, span: fstart.to(self.prev_span()) });
         }
         Ok(())
     }

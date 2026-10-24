@@ -294,6 +294,19 @@ pub struct Lowerer<'a> {
     pub(crate) local_imports: Vec<(String, Vec<String>)>,
 }
 
+/// The `#[cfg(..)]` attributes among `attrs`, each followed by a space.
+fn cfg_attrs(attrs: &[Attr]) -> String {
+    let mut out = String::new();
+    for a in attrs.iter().filter(|a| a.name() == "cfg") {
+        match a {
+            Attr::Oxie { name, args: Some(args), .. } => out.push_str(&format!("#[{}({})] ", name, args)),
+            Attr::Raw(s) => out.push_str(&format!("#[{}] ", s)),
+            Attr::Oxie { .. } => {}
+        }
+    }
+    out
+}
+
 pub fn esc(name: &str) -> String {
     if name.starts_with("r#") {
         return name.to_string();
@@ -2057,6 +2070,8 @@ impl<'a> Lowerer<'a> {
             let saved = self.class.take();
             for (f, ty) in fields {
                 self.e.nl();
+                // a field that exists only in some builds (`@cfg(test)`) is set only there
+                self.e.w(&cfg_attrs(&f.attrs));
                 if f.in_ctor {
                     self.e.w(&format!("{},", esc(&f.name)));
                 } else {
