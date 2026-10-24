@@ -271,7 +271,10 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
   that function as `self::name(x)` (Rust's path to the module's own items).
 * **Receivers** are inferred:
   * `&mut self` if the method assigns a field, calls a mutating method on a field (`push`,
-    `insert`, `clear`, `entry`, ...), takes `&mut` of a field, or calls a `&mut self` method;
+    `insert`, `clear`, `entry`, ...), takes `&mut` of a field, calls a `&mut self` method, or
+    calls a `&mut self` method of an Oxie class through a field of that type (`c.add(1)` for
+    `var c: Counter`, also generic classes like `Entity<Counter>`; not a `shared class`, whose
+    handle `&self` reaches);
   * static if it never uses `self` and returns `Self`/the class, or is named `new`, `default`,
     `from`, `from_str`, `try_from` or `from_iter`;
   * `&self` otherwise.
