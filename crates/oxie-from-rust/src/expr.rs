@@ -584,7 +584,12 @@ impl Printer<'_> {
                     syn::UnOp::Neg(_) => "-",
                     _ => "",
                 };
-                format!("{}{}", op, self.expr(&u.expr))
+                let v = self.expr(&u.expr);
+                // `!matches!(x, P)` is `!(x is P)`: `!x is P` would negate `x`
+                if matches!(&*u.expr, syn::Expr::Macro(m) if m.mac.path.is_ident("matches")) && v.contains(" is ") {
+                    return format!("{}({})", op, v);
+                }
+                format!("{}{}", op, v)
             }
             syn::Expr::Unsafe(u) => {
                 if let Some(e) = self.single_expr(&u.block) {
