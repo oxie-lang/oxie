@@ -851,7 +851,7 @@ impl Printer<'_> {
                 if p.path.leading_colon.is_none()
                     && self.cx.type_fns.contains(name)
                     && !self.cx.bound.contains(name)
-                    && (self.info.free_fns.contains(name) || self.info.modules.contains(name))
+                    && (self.info.free_fns.contains(name) || self.info.modules.contains(name) || self.krate.free_fns.contains(name))
                 {
                     func = Some(format!("self::{}", self.postfix(&c.func)));
                 }
@@ -861,8 +861,34 @@ impl Printer<'_> {
             Some(f) => f,
             None => self.postfix(&c.func),
         };
-        let args: Vec<&syn::Expr> = c.args.iter().collect();
+        let mut args: Vec<&syn::Expr> = c.args.iter().collect();
+        // `Self::open(path, window, cx)` → `Self.open(path)`
+        if let syn::Expr::Path(p) = &*c.func {
+            let segs = &p.path.segments;
+            if p.qself.is_none() && p.path.leading_colon.is_none() && segs.len() == 2 {
+                let owner = segs[0].ident.to_string();
+                let class = if owner == "Self" { self.cx.ctx_class.clone() } else { Some(owner) };
+                let name = segs[1].ident.to_string();
+                let static_fn = class.as_deref().and_then(|c| self.krate.class(c)).and_then(|c| c.methods.get(&name)).is_some_and(|m| m.sig.receiver().is_none());
+                if let (Some(class), true) = (class, static_fn) {
+                    let n = self.ctx_args(&class, &name, &args);
+                    args.truncate(args.len() - n);
+                }
+            }
+        }
         format!("{}{}", f, self.args(&args, &expects))
+    }
+
+    /// How many of the last arguments of a call to method `name` of `class` Oxie fills in as
+    /// contexts: those that name the variable the context is named after (`window, cx`).
+    fn ctx_args(&self, class: &str, name: &str, args: &[&syn::Expr]) -> usize {
+        let Some(takes) = self.krate.takes(class, name) else { return 0 };
+        if args.len() < takes.len() || self.fixes.ctx_calls.contains(&(self.cx.fn_path.clone(), name.to_string())) {
+            return 0;
+        }
+        let tail = &args[args.len() - takes.len()..];
+        // an argument kept stands for the first contexts, so only the last ones can go
+        tail.iter().zip(takes).rev().take_while(|(a, t)| is_path(a, t) && self.cx.it_rename.as_deref() != Some(t.as_str())).count()
     }
 
     /// `(a, b)`, `(a) { x -> ... }`, ` { x -> ... }`.
@@ -952,7 +978,11 @@ impl Printer<'_> {
             prefix = ".".into();
         }
         let turbofish = m.turbofish.as_ref().map(|t| self.generic_args(t)).unwrap_or_default();
-        let args: Vec<&syn::Expr> = m.args.iter().collect();
+        let mut args: Vec<&syn::Expr> = m.args.iter().collect();
+        if let (true, Some(class)) = (is_path(&m.receiver, "self"), self.cx.ctx_class.clone()) {
+            let n = self.ctx_args(&class, &name, &args);
+            args.truncate(args.len() - n);
+        }
         // zero-argument closures for these may get an argument added by Oxie
         let rust_closures = matches!(name.as_str(), "unwrap_or_else" | "or_else" | "map_or_else" | "or_insert_with" | "get_or_insert_with");
         let a = if rust_closures && args.iter().any(|a| matches!(a, syn::Expr::Closure(c) if c.inputs.is_empty())) {

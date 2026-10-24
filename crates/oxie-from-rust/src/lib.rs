@@ -8,8 +8,13 @@
 //! Every translation is checked by compiling it back to Rust with the Oxie compiler: method
 //! receivers and derives that Oxie would infer differently are written out explicitly, and
 //! items Oxie rejects are kept as Rust.
+//!
+//! Code that passes the same values down most calls (GPUI's `window` and `cx`) gets context
+//! parameters; [`translate_crate`] decides them for all the files of a crate at once, since a
+//! class's methods may be spread over many files (see `contexts`).
 
 mod comments;
+mod contexts;
 mod expr;
 mod facts;
 mod fmtstr;
@@ -32,22 +37,121 @@ pub struct Translation {
 
 /// Translates a Rust source file into Oxie.
 pub fn translate(src: &str) -> Result<Translation, String> {
-    let mut file = syn::parse_file(src).map_err(|e| {
-        let s = e.span().start();
-        format!("{}:{}: {}", s.line, s.column + 1, e)
-    })?;
-    oxie_aux::preprocess(&mut file);
-    let info = collect_info(&file);
-    let orig = facts::collect(&file);
+    translate_crate(&[src]).pop().unwrap()
+}
+
+/// Translates the Rust files of one crate into Oxie, one translation per file. The classes
+/// get their contexts from all the files: a method in another file's `impl` block drops the
+/// same parameters as one declared next to the class.
+pub fn translate_crate(srcs: &[&str]) -> Vec<Result<Translation, String>> {
+    let parsed: Vec<Result<syn::File, String>> = srcs
+        .iter()
+        .map(|src| {
+            let mut file = syn::parse_file(src).map_err(|e| {
+                let s = e.span().start();
+                format!("{}:{}: {}", s.line, s.column + 1, e)
+            })?;
+            oxie_aux::preprocess(&mut file);
+            Ok(file)
+        })
+        .collect();
+    let empty = syn::File { shebang: None, attrs: Vec::new(), items: Vec::new() };
+    let files: Vec<&syn::File> = parsed.iter().map(|p| p.as_ref().unwrap_or(&empty)).collect();
+    let mut krate = contexts::scan(&files);
+    let mut out = Vec::new();
+    // a method kept as Rust takes its contexts as written, which the files that call it must
+    // know: translate again until nothing more is kept
+    for _pass in 0..8 {
+        out.clear();
+        let mut kept = Vec::new();
+        for (i, (src, file)) in srcs.iter().zip(&parsed).enumerate() {
+            match file {
+                Ok(file) => {
+                    let (t, k) = translate_file(src, file, &krate, i);
+                    out.push(Ok(t));
+                    kept.extend(k);
+                }
+                Err(e) => out.push(Err(e.clone())),
+            }
+        }
+        let mut changed = false;
+        for k in &kept {
+            changed |= k.apply(&mut krate);
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+/// A part of the crate's classes that a file kept as Rust.
+#[derive(Clone, Debug)]
+enum Kept {
+    Class(String),
+    Method(String, String),
+}
+
+impl Kept {
+    /// Whether this changes what `krate` gives contexts to.
+    fn apply(&self, krate: &mut contexts::Crate) -> bool {
+        match self {
+            Kept::Class(c) => krate.drop_class(c),
+            Kept::Method(c, m) => krate.keep_method(c, m),
+        }
+    }
+}
+
+/// The classes and methods of `file` that `fixes` keep as Rust.
+fn kept_as_rust(file: &syn::File, fixes: &Fixes) -> Vec<Kept> {
+    let methods = |imp: &syn::ItemImpl, only: Option<usize>| -> Vec<Kept> {
+        if imp.trait_.is_some() {
+            return Vec::new();
+        }
+        let ty = facts::type_name(&imp.self_ty);
+        imp.items
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| only.is_none_or(|o| o == *j))
+            .filter_map(|(_, ii)| if let syn::ImplItem::Fn(f) = ii { Some(Kept::Method(ty.clone(), f.sig.ident.to_string())) } else { None })
+            .collect()
+    };
+    let mut out = Vec::new();
+    for &i in fixes.raw_items.keys() {
+        match file.items.get(i) {
+            Some(syn::Item::Struct(s)) => out.push(Kept::Class(s.ident.to_string())),
+            Some(syn::Item::Impl(imp)) => out.extend(methods(imp, None)),
+            _ => {}
+        }
+    }
+    for &(i, j) in fixes.raw_methods.keys() {
+        if let Some(syn::Item::Impl(imp)) = file.items.get(i) {
+            out.extend(methods(imp, Some(j)));
+        }
+    }
+    out
+}
+
+/// Translates file `idx` of a crate; also returns what it kept as Rust of the crate's classes
+/// with contexts.
+fn translate_file(src: &str, file: &syn::File, krate: &contexts::Crate, idx: usize) -> (Translation, Vec<Kept>) {
+    let info = collect_info(file);
+    let orig = facts::collect(file);
     let mut fixes = Fixes::default();
     let mut warnings = Vec::new();
     let mut text = String::new();
+    let mut kept = Vec::new();
+    let mentioned = idents(src);
     // a rejected method of an inherent impl is kept as Rust on its own, so this can take more
     // rounds than one per item
-    for _round in 0..16 {
-        let (t, ranges, methods, todos) = print(src, &file, &info, &fixes);
+    for _round in 0..24 {
+        // what this file keeps as Rust takes its contexts as written
+        let mut local = krate.clone();
+        kept = kept_as_rust(file, &fixes).into_iter().filter(|k| k.apply(&mut local)).collect();
+        let (t, ranges, methods, todos) = print(src, file, &info, &fixes, &local);
         text = t;
-        let (rust, map, diags) = compile(&text);
+        let stub = local.stub(idx, &mentioned, &Printer::new(info.clone(), &fixes, &local, Vec::new()));
+        let (rust, map, diags) = compile(&text, &stub);
         let errors: Vec<&oxie_compiler::Diag> = diags.iter().filter(|d| d.severity == oxie_compiler::Severity::Error).collect();
         if !errors.is_empty() {
             if std::env::var_os("OXIE_FROM_RUST_DEBUG").is_some() {
@@ -92,7 +196,7 @@ pub fn translate(src: &str) -> Result<Translation, String> {
             }
         };
         let got = facts::collect(&gen);
-        let mut changed = false;
+        let mut changed = compare_contexts(&orig, &got, &local, &mut fixes);
         for (k, r) in &orig.receivers {
             if let Some(g) = got.receivers.get(k) {
                 if g != r {
@@ -119,7 +223,34 @@ pub fn translate(src: &str) -> Result<Translation, String> {
             break;
         }
     }
-    Ok(Translation { oxie: drop_unused_module_imports(&text), warnings })
+    (Translation { oxie: drop_unused_module_imports(&text), warnings }, kept)
+}
+
+/// Methods whose parameters and calls whose arguments come out of Oxie unlike the Rust's,
+/// because Oxie gave a method other contexts than planned or didn't follow a call: the method
+/// gets a `context(...)` of its own, and the call passes its contexts as written.
+fn compare_contexts(orig: &facts::Facts, got: &facts::Facts, krate: &contexts::Crate, fixes: &mut Fixes) -> bool {
+    let mut changed = false;
+    let class_of = |ty: &str| ty.split('<').next().unwrap_or("").rsplit("::").next().unwrap_or("").to_string();
+    for (k, ps) in &orig.params {
+        if got.params.get(k).is_some_and(|g| g != ps) && k.1.is_empty() && krate.takes(&class_of(&k.0), &k.2).is_some() {
+            changed |= fixes.ctx_clause.insert(k.clone());
+        }
+    }
+    let watched: HashSet<&str> = krate.classes.values().filter(|c| !c.contexts.is_empty()).flat_map(|c| c.methods.iter()).filter(|(_, m)| m.takes.as_ref().is_some_and(|t| !t.is_empty())).map(|(n, _)| n.as_str()).collect();
+    for (f, calls) in &orig.calls {
+        for (name, counts) in calls {
+            if watched.contains(name.as_str()) && got.calls.get(f).and_then(|c| c.get(name)) != Some(counts) {
+                changed |= fixes.ctx_calls.insert((f.clone(), name.clone()));
+            }
+        }
+    }
+    changed
+}
+
+/// The identifiers in a source text.
+fn idents(src: &str) -> HashSet<String> {
+    src.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| w.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')).map(String::from).collect()
 }
 
 /// Removes `import std::fmt` and similar lines whose (lowercase, so not a trait) name is no
@@ -198,20 +329,26 @@ fn keep_as_rust(fixes: &mut Fixes, items: &Ranges, methods: &MethodRanges, pos: 
     }
 }
 
-/// Compiles Oxie text as a single-file script: generated Rust, its source map, diagnostics.
-fn compile(text: &str) -> (String, Option<oxie_compiler::SourceMap>, Vec<oxie_compiler::Diag>) {
-    let input = oxie_compiler::Input { rel_path: "main.oxi".into(), abs_path: "main.oxi".into(), text: text.to_string() };
+/// Compiles Oxie text as a single-file script, with `stub` (the contexts of the crate's other
+/// files, see `contexts`) as a second file: the generated Rust, its source map, diagnostics.
+fn compile(text: &str, stub: &str) -> (String, Option<oxie_compiler::SourceMap>, Vec<oxie_compiler::Diag>) {
+    let main = std::path::PathBuf::from("main.oxi");
+    let mut inputs = vec![oxie_compiler::Input { rel_path: main.clone(), abs_path: main.clone(), text: text.to_string() }];
+    if !stub.is_empty() {
+        let path = std::path::PathBuf::from("__contexts.oxi");
+        inputs.push(oxie_compiler::Input { rel_path: path.clone(), abs_path: path, text: stub.to_string() });
+    }
     let opts = oxie_compiler::Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: "/oxie".into(), script: true };
-    let out = oxie_compiler::compile(vec![input], &opts);
-    let diags = out.diags.into_iter().next().map(|d| d.2).unwrap_or_default();
-    match out.files.into_iter().next() {
+    let out = oxie_compiler::compile(inputs, &opts);
+    let diags = out.diags.into_iter().find(|d| d.0 == main).map(|d| d.2).unwrap_or_default();
+    match out.files.into_iter().find(|f| f.rel_path.file_stem() == main.file_stem()) {
         Some(f) => (f.text, f.map, diags),
         None => (String::new(), None, diags),
     }
 }
 
-fn print(src: &str, file: &syn::File, info: &Info, fixes: &Fixes) -> (String, Ranges, MethodRanges, Vec<String>) {
-    let mut p = Printer::new(info.clone(), fixes, comments::scan(src));
+fn print(src: &str, file: &syn::File, info: &Info, fixes: &Fixes, krate: &contexts::Crate) -> (String, Ranges, MethodRanges, Vec<String>) {
+    let mut p = Printer::new(info.clone(), fixes, krate, comments::scan(src));
     let text = p.file(file);
     (text, p.item_ranges, p.method_ranges, p.todos)
 }

@@ -5,17 +5,25 @@ fn check(rust: &str, oxie: &str) {
     assert_eq!(t.oxie, oxie, "\n--- got\n{}\n--- expected\n{}", t.oxie, oxie);
 }
 
-/// The example in docs/tooling.md ("Translating Rust") shows the real output.
+/// The examples in docs/tooling.md ("Translating Rust") show the real output.
 #[test]
-fn tooling_doc_example_is_current() {
+fn tooling_doc_examples_are_current() {
     let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/tooling.md")).unwrap();
-    let section = doc.split("### Translating Rust").nth(1).unwrap();
-    let block = |lang: &str| -> String {
-        let start = section.find(&format!("```{}\n", lang)).unwrap() + lang.len() + 4;
+    let mut section = doc.split("### Translating Rust").nth(1).unwrap().split("\n## ").next().unwrap();
+    // each ```rust block and the ```oxie block after it
+    let mut block = |lang: &str| -> Option<String> {
+        let start = section.find(&format!("```{}\n", lang))? + lang.len() + 4;
         let end = start + section[start..].find("```").unwrap();
-        section[start..end].to_string()
+        let text = section[start..end].to_string();
+        section = &section[end..];
+        Some(text)
     };
-    check(&block("rust"), &block("oxie"));
+    let mut pairs = 0;
+    while let (Some(rust), Some(oxie)) = (block("rust"), block("oxie")) {
+        check(&rust, &oxie);
+        pairs += 1;
+    }
+    assert_eq!(pairs, 2);
 }
 
 #[test]
@@ -748,6 +756,209 @@ fun main() {
     val found = if (v.len() > 1) find(&v, 2) else null
     val home = if (v.len() > 5) std.env.var_os("OXIE_UNSET") else None
     println("${px(8.)} ${shift(1..3, 1):?} ${found:?} ${home:?}")
+}
+"#,
+    );
+}
+
+#[test]
+fn context_parameters_of_a_class() {
+    check(
+        r#"
+pub struct Editor {
+    text: String,
+}
+
+impl Editor {
+    pub fn insert(&mut self, s: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.text.push_str(s);
+        self.refresh(window, cx);
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.text.clear();
+        self.notify(cx);
+    }
+
+    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.invalidate();
+        self.notify(cx);
+    }
+
+    fn notify(&self, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+
+    fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    fn on_key(&mut self, key: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.defer(|this, cx| this.clear(cx));
+        let n = self.len();
+        Self::log(n, cx);
+    }
+
+    fn log(n: usize, cx: &mut Context<Self>) {
+        cx.note(n);
+    }
+}
+"#,
+        r#"context(window: &mut Window, cx: &mut Context<Self>)
+pub class Editor(text: String) {
+    pub fun insert(s: &str) {
+        text.push_str(s)
+        refresh()
+    }
+
+    pub fun clear() {
+        text.clear()
+        notify()
+    }
+
+    fun refresh(&mut self) {
+        window.invalidate()
+        notify()
+    }
+
+    fun notify() {
+        cx.notify()
+    }
+
+    fun len(): usize = text.len()
+
+    fun on_key(&mut self, key: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.defer { r#this, cx -> r#this.clear(cx) }
+        val n = len()
+        Self.log(n)
+    }
+
+    static fun log(n: usize) {
+        cx.note(n)
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn context_parameters_across_files() {
+    let workspace = r#"
+mod saving;
+
+pub struct Workspace {
+    tabs: Vec<String>,
+}
+
+impl Workspace {
+    pub fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.push(path.to_string());
+        self.save(window, cx);
+    }
+
+    pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.pop();
+        self.save(window, cx);
+    }
+}
+"#;
+    let saving = r#"
+use super::*;
+
+impl Workspace {
+    pub(super) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.set_title("saved");
+        self.saved(cx);
+    }
+
+    fn saved(&self, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+}
+"#;
+    let out: Vec<String> = oxie_from_rust::translate_crate(&[workspace, saving]).into_iter().map(|t| t.unwrap().oxie).collect();
+    assert_eq!(
+        out[0],
+        r#"// TODO(from-rust): remove this line if saving.rs is translated to saving.oxi too
+mod saving
+
+context(window: &mut Window, cx: &mut Context<Self>)
+pub class Workspace(tabs: Vec<String>) {
+    pub fun open(path: &str) {
+        tabs.push(path.to_string())
+        self.save()
+    }
+
+    pub fun close() {
+        tabs.pop()
+        self.save()
+    }
+}
+"#
+    );
+    assert_eq!(
+        out[1],
+        r#"import super::*;
+
+impl Workspace {
+    pub(super) fun save(&mut self) {
+        window.set_title("saved")
+        self.saved()
+    }
+
+    fun saved() {
+        cx.notify()
+    }
+}
+"#
+    );
+}
+
+#[test]
+fn public_method_takes_the_contexts_it_uses() {
+    check(
+        r#"
+pub struct Pane {
+    items: Vec<String>,
+}
+
+impl Pane {
+    pub fn add(&mut self, item: String, cx: &mut Context<Self>) {
+        self.items.push(item);
+        self.changed(cx);
+    }
+
+    pub fn remove(&mut self, cx: &mut Context<Self>) {
+        self.items.pop();
+        self.changed(cx);
+    }
+
+    fn changed(&self, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+}
+"#,
+        r#"context(cx: &mut Context<Self>)
+pub class Pane(items: Vec<String>) {
+    pub fun add(item: String) {
+        items.push(item)
+        changed()
+    }
+
+    pub fun remove() {
+        items.pop()
+        changed()
+    }
+
+    fun changed() {
+        cx.notify()
+    }
+
+    pub fun len(): usize = items.len()
 }
 "#,
     );

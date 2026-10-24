@@ -1,9 +1,11 @@
 //! `oxie from-rust <file.rs> [-o out.oxi]`: translates Rust to Oxie.
+//! `oxie from-rust <dir> -o <out dir>`: translates every `.rs` file under `dir` as one crate.
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 pub fn run(args: &[String]) -> Result<ExitCode, String> {
-    let usage = "usage: oxie from-rust <file.rs> [-o out.oxi]";
+    let usage = "usage: oxie from-rust <file.rs> [-o out.oxi]\n       oxie from-rust <dir> -o <out dir>";
     let mut input = None;
     let mut output = None;
     let mut i = 0;
@@ -19,6 +21,10 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
         i += 1;
     }
     let input = input.ok_or(usage)?;
+    if Path::new(&input).is_dir() {
+        let output = output.ok_or("give the directory to write the translations to: oxie from-rust <dir> -o <out dir>")?;
+        return translate_dir(Path::new(&input), Path::new(&output));
+    }
     let src = if input == "-" {
         let mut s = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map_err(|e| e.to_string())?;
@@ -36,4 +42,47 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
         None => print!("{}", t.oxie),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Translates the `.rs` files under `dir` together, so that the contexts of a class are the
+/// same in every file that has methods of it, into `.oxi` files at the same places under `out`.
+fn translate_dir(dir: &Path, out: &Path) -> Result<ExitCode, String> {
+    let mut files = Vec::new();
+    collect(dir, &mut files)?;
+    files.sort();
+    let srcs: Vec<String> = files.iter().map(|f| std::fs::read_to_string(f).map_err(|e| format!("{}: {}", f.display(), e))).collect::<Result<_, _>>()?;
+    let refs: Vec<&str> = srcs.iter().map(String::as_str).collect();
+    let mut failed = false;
+    for (f, t) in files.iter().zip(oxie_from_rust::translate_crate(&refs)) {
+        let name = f.display();
+        match t {
+            Ok(t) => {
+                for w in &t.warnings {
+                    eprintln!("warning: {}: {}", name, w);
+                }
+                let dest = out.join(f.strip_prefix(dir).unwrap_or(f)).with_extension("oxi");
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {}", parent.display(), e))?;
+                }
+                std::fs::write(&dest, &t.oxie).map_err(|e| format!("{}: {}", dest.display(), e))?;
+            }
+            Err(e) => {
+                eprintln!("error: {}:{}", name, e);
+                failed = true;
+            }
+        }
+    }
+    Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    for e in std::fs::read_dir(dir).map_err(|e| format!("{}: {}", dir.display(), e))? {
+        let p = e.map_err(|e| e.to_string())?.path();
+        if p.is_dir() {
+            collect(&p, out)?;
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+    Ok(())
 }

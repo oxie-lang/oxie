@@ -6,6 +6,7 @@ use quote::ToTokens;
 use syn::spanned::Spanned;
 
 use crate::comments::Comment;
+use crate::contexts::{self, Crate};
 use crate::facts::{self, MethodKey, Recv};
 use crate::fmtstr;
 use crate::types::{id, is_any_error, tok};
@@ -22,6 +23,11 @@ pub struct Fixes {
     /// Methods of top-level inherent impls (item index, index in the impl) emitted as Rust in
     /// an `impl` block of their own after the item, with the reason. The rest stays Oxie.
     pub raw_methods: HashMap<(usize, usize), String>,
+    /// Methods whose contexts Oxie infers differently than they are declared: they get a
+    /// `context(...)` of their own.
+    pub ctx_clause: HashSet<MethodKey>,
+    /// Calls (function by `Cx::fn_path`, callee name) that pass their contexts as written.
+    pub ctx_calls: HashSet<(String, String)>,
 }
 
 /// Starts a line that marks where a top-level item (`i3`) or a method that can be kept as Rust
@@ -95,11 +101,14 @@ pub struct Cx {
     /// the functions of the type whose method this is: in Oxie a bare `name()` there calls
     /// one of them, so a free function of that name is called as `self::name()`
     pub type_fns: HashSet<String>,
+    /// the class whose method this is, when it has contexts (see `contexts`)
+    pub ctx_class: Option<String>,
 }
 
 pub struct Printer<'a> {
     pub info: Info,
     pub fixes: &'a Fixes,
+    pub krate: &'a Crate,
     pub comments: Vec<Comment>,
     pub cx: Cx,
     /// Warnings with line numbers (for the command line).
@@ -142,10 +151,11 @@ pub fn end_line_of<T: Spanned>(t: &T) -> usize {
 const AUTO_STATIC: &[&str] = &["new", "default", "from", "from_str", "try_from", "from_iter"];
 
 impl<'a> Printer<'a> {
-    pub fn new(info: Info, fixes: &'a Fixes, comments: Vec<Comment>) -> Self {
+    pub fn new(info: Info, fixes: &'a Fixes, krate: &'a Crate, comments: Vec<Comment>) -> Self {
         Printer {
             info,
             fixes,
+            krate,
             comments,
             cx: Cx::default(),
             todos: Vec::new(),
@@ -859,6 +869,9 @@ impl<'a> Printer<'a> {
         if !data && !derives.is_empty() {
             lines.push(format!("@derive({})", derive_list(&s.attrs).join(", ")));
         }
+        if let Some(c) = self.krate.class(&name) {
+            lines.push(self.context_clause(&c.contexts));
+        }
         let params: Vec<String> = fields
             .named
             .iter()
@@ -1113,8 +1126,44 @@ impl<'a> Printer<'a> {
             syn::Item::Enum(e) => e.ident.to_string(),
             _ => String::new(),
         };
-        cx.type_fns = self.info.type_fns.get(&name).cloned().unwrap_or_default();
+        cx.type_fns = self.type_fns(&name);
+        cx.ctx_class = self.krate.class(&name).map(|_| name);
         cx
+    }
+
+    /// The functions of type `name`, in this file and (for a class) the rest of the crate.
+    fn type_fns(&self, name: &str) -> HashSet<String> {
+        let mut fns = self.info.type_fns.get(name).cloned().unwrap_or_default();
+        if let Some(c) = self.krate.classes.get(name) {
+            fns.extend(c.methods.keys().cloned());
+        }
+        fns
+    }
+
+    /// `context(window: &mut Window, cx: &mut Context<Self>)`
+    pub fn context_clause(&self, contexts: &[(String, syn::Type)]) -> String {
+        let ps: Vec<String> = contexts.iter().map(|(n, t)| format!("{}: {}", n, self.ty(t))).collect();
+        format!("context({})", ps.join(", "))
+    }
+
+    /// How a method of a class with contexts gets those it takes (see `contexts`): Oxie infers
+    /// them (it uses them, or it is used as a value and takes them all), or it gets a
+    /// `context(...)` of its own.
+    fn ctx_decl(&self, sig: &syn::Signature, block: Option<&syn::Block>, kind: FunKind) -> CtxDecl {
+        let mut d = CtxDecl::default();
+        let (FunKind::Method { overrides: false, .. }, Some((ty, tr))) = (kind, &self.cx.impl_key) else { return d };
+        let Some(class) = self.cx.ctx_class.as_deref().and_then(|c| self.krate.class(c)) else { return d };
+        let Some(m) = class.methods.get(&sig.ident.to_string()).filter(|_| tr.is_empty()) else { return d };
+        let Some(takes) = m.takes.as_ref().filter(|t| !t.is_empty()) else { return d };
+        d.drop = takes.len();
+        let key = (ty.clone(), String::new(), sig.ident.to_string());
+        let all: Vec<String> = class.contexts.iter().map(|(n, _)| n.clone()).collect();
+        let used = block.map(|b| contexts::uses(b, &all)).unwrap_or_default();
+        let inferred: Vec<String> = all.into_iter().filter(|n| m.value || used.contains(n)).collect();
+        if inferred != *takes || self.fixes.ctx_clause.contains(&key) {
+            d.clause = Some(class.contexts.iter().filter(|(n, _)| takes.contains(n)).cloned().collect());
+        }
+        d
     }
 
     // ------------------------------------------------------------------ enums
@@ -1240,7 +1289,8 @@ impl<'a> Printer<'a> {
                     let saved = std::mem::take(&mut self.cx);
                     self.cx.bound = bound_names(&f.sig, &f.block);
                     self.cx.impl_key = Some((tkey.clone(), trait_key.clone()));
-                    self.cx.type_fns = self.info.type_fns.get(&facts::type_name(&imp.self_ty)).cloned().unwrap_or_default();
+                    self.cx.type_fns = self.type_fns(&facts::type_name(&imp.self_ty));
+                    self.cx.ctx_class = Some(facts::type_name(&imp.self_ty)).filter(|n| self.krate.class(n).is_some());
                     s.push_str(&self.fun(&f.attrs, &f.vis, &f.sig, Some(&f.block), FunKind::Method { class: false, overrides: false }));
                     self.cx = saved;
                     method = true;
@@ -1372,6 +1422,10 @@ impl<'a> Printer<'a> {
         let key: Option<MethodKey> = self.cx.impl_key.as_ref().map(|(t, tr)| (t.clone(), tr.clone(), sig.ident.to_string()));
         let explicit = key.as_ref().is_some_and(|k| self.fixes.explicit_recv.contains(k));
         let is_method = !matches!(kind, FunKind::Free | FunKind::Operator);
+        let ctx = self.ctx_decl(sig, block, kind);
+        if let Some(c) = &ctx.clause {
+            lines.push(self.context_clause(c));
+        }
         let mut prefix = self.vis(vis);
         if let FunKind::Method { overrides: true, .. } = kind {
             prefix = "override ".into();
@@ -1416,7 +1470,7 @@ impl<'a> Printer<'a> {
                 Recv::Value | Recv::Typed => write_recv = true,
             }
         }
-        for (i, a) in sig.inputs.iter().enumerate() {
+        for (i, a) in sig.inputs.iter().enumerate().take(sig.inputs.len() - ctx.drop) {
             match a {
                 syn::FnArg::Receiver(r) => {
                     if write_recv && i == 0 {
@@ -1709,6 +1763,15 @@ pub enum Member {
     Trait(usize, String),
     ToString(usize, String),
     Operator(usize, String),
+}
+
+/// See [`Printer::ctx_decl`].
+#[derive(Default)]
+struct CtxDecl {
+    /// How many trailing parameters become contexts.
+    drop: usize,
+    /// A `context(...)` of its own.
+    clause: Option<Vec<(String, syn::Type)>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
