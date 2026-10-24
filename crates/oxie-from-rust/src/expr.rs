@@ -738,6 +738,17 @@ impl Printer<'_> {
                 return format!("{}?", self.ex(&syn::Expr::MethodCall(m2), &Ctx::value()));
             }
         }
+        // `x.ok_or_else(|| e)?` is `x ?: throw e`, which also leaves `e.into()` its target
+        if let syn::Expr::MethodCall(m) = e {
+            let err = match (m.method.to_string().as_str(), m.args.first()) {
+                ("ok_or", Some(err)) if m.args.len() == 1 => Some(err.clone()),
+                ("ok_or_else", Some(syn::Expr::Closure(c))) if m.args.len() == 1 && c.inputs.is_empty() => Some((*c.body).clone()),
+                _ => None,
+            };
+            if let Some(err) = err {
+                return format!("{} ?: throw {}", self.postfix(&m.receiver), self.thrown(&err));
+            }
+        }
         let s = self.ex(e, &Ctx::value());
         if is_postfix_safe(e) && !matches!(e, syn::Expr::Try(_)) {
             format!("{}?", s)
