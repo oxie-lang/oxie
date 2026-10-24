@@ -125,6 +125,9 @@ pub struct FunInfo {
     pub params: Vec<ParamInfo>,
     pub throws: bool,
     pub ret: Option<Type>,
+    /// Written in Rust (in a `rust { }` block): Oxie doesn't know its signature, only that it
+    /// hides functions of other modules with its name.
+    pub raw: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -291,7 +294,7 @@ impl Crate {
         if !self.same_named_funs.contains(name) && self.ambiguous.contains(name) || self.imported_from_outside(name, module) {
             return None;
         }
-        self.funs.get(&self.key_in(Space::Funs, name, module)?)
+        self.funs.get(&self.key_in(Space::Funs, name, module)?).filter(|f| !f.raw)
     }
     /// The function a path written in `module` names (`util.total`), if the module the path
     /// leads to declares it.
@@ -299,7 +302,7 @@ impl Crate {
         if !self.same_named_funs.contains(path.last()?) && self.ambiguous.contains(path.last()?) {
             return None;
         }
-        self.funs.get(&self.key_at(Space::Funs, path, module)?)
+        self.funs.get(&self.key_at(Space::Funs, path, module)?).filter(|f| !f.raw)
     }
     /// Whether some module declares a function `name`.
     pub fn is_fun_name(&self, name: &str) -> bool {
@@ -742,6 +745,59 @@ fn type_key_for(k: &mut Crate, name: &str, module: &[String], is_class: bool) ->
     (!taken).then_some(key)
 }
 
+/// The functions a `rust { }` block declares at its top level (`fn total(..)`, `pub(crate) fn ..`).
+fn raw_fn_names(text: &str) -> Vec<String> {
+    let b = text.as_bytes();
+    let ident = |i: usize| b[i].is_ascii_alphanumeric() || b[i] == b'_';
+    let mut out = Vec::new();
+    let (mut i, mut depth) = (0, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => i = text[i..].find('\n').map_or(b.len(), |n| i + n),
+            b'/' if b.get(i + 1) == Some(&b'*') => i = text[i + 2..].find("*/").map_or(b.len(), |n| i + n + 4),
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'r' if (i == 0 || !ident(i - 1)) && b[i + 1..].iter().find(|&&c| c != b'#') == Some(&b'"') => {
+                let hashes = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
+                let close = format!("\"{}", "#".repeat(hashes));
+                let open = i + 1 + hashes + 1;
+                i = text.get(open..).and_then(|t| t.find(&close)).map_or(b.len(), |n| open + n + close.len());
+            }
+            // a char literal (not a lifetime): `'{'`, `'\''`
+            b'\'' if b.get(i + 2) == Some(&b'\'') && b.get(i + 1) != Some(&b'\\') => i += 3,
+            b'\'' if b.get(i + 1) == Some(&b'\\') => i = text[i + 2..].find('\'').map_or(b.len(), |n| i + n + 3),
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                while i < b.len() && ident(i) {
+                    i += 1;
+                }
+                if depth == 0 && &text[start..i] == "fn" {
+                    let rest = text[i..].trim_start();
+                    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                    if !name.is_empty() {
+                        out.push(name);
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
 /// The key for a new function `name` declared in `module`, as `type_key_for` does for types.
 fn fun_key_for(k: &mut Crate, name: &str, module: &[String]) -> Option<String> {
     if !k.same_named_funs.contains(name) {
@@ -847,9 +903,17 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
         }
         match &it.kind {
             ItemKind::Fun(f) if f.receiver.is_none() => {
-                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone() };
+                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), raw: false };
                 if let Some(key) = fun_key_for(k, &f.name, module) {
                     k.funs.insert(key, info);
+                }
+            }
+            ItemKind::Raw(text) => {
+                for name in raw_fn_names(text) {
+                    let info = FunInfo { module: module.to_vec(), params: Vec::new(), throws: false, ret: None, raw: true };
+                    if let Some(key) = fun_key_for(k, &name, module) {
+                        k.funs.insert(key, info);
+                    }
                 }
             }
             ItemKind::Fun(f) => {
