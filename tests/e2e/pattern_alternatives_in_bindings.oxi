@@ -1,0 +1,13 @@
+// Alternatives after `@` or `&` keep their parentheses.
+fun kind(c: Option<&u8>): String = when (c) {
+    Some(&q @ (b'"' | b'\'')) -> "quote ${q as char}"
+    Some(&(b' ' | b'\t')) -> "space"
+    Some(n @ &(b'0'..=b'9')) -> "digit ${*n as char}"
+    _ -> "other"
+}
+
+fun main() {
+    for (c in [b'\'', b' ', b'7', b'x']) {
+        println(kind(Some(&c)))
+    }
+}

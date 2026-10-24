@@ -994,6 +994,16 @@ impl<'a> Lowerer<'a> {
 
     // ------------------------------------------------------------------ patterns
 
+    /// A pattern after `@` or `&`, where alternatives need parentheses (`q @ (b'"' | b'\'')`), and
+    /// after `&` ranges too (`&(b'0'..=b'9')`).
+    fn pat_operand(&mut self, p: &Pat, after_ref: bool) -> String {
+        match p {
+            Pat::Or(_) => format!("({})", self.pat(p)),
+            Pat::Range { .. } if after_ref => format!("({})", self.pat(p)),
+            _ => self.pat(p),
+        }
+    }
+
     pub(crate) fn pat(&mut self, p: &Pat) -> String {
         match p {
             Pat::Wild => "_".into(),
@@ -1010,7 +1020,7 @@ impl<'a> Lowerer<'a> {
                 s.push_str(&esc(name));
                 if let Some(sub) = sub {
                     s.push_str(" @ ");
-                    s.push_str(&self.pat(sub));
+                    s.push_str(&self.pat_operand(sub, false));
                 }
                 s
             }
@@ -1029,7 +1039,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Pat::Slice(v) => format!("[{}]", v.iter().map(|p| self.pat(p)).collect::<Vec<_>>().join(", ")),
-            Pat::Ref { mutable, pat } => format!("&{}{}", if *mutable { "mut " } else { "" }, self.pat(pat)),
+            Pat::Ref { mutable, pat } => format!("&{}{}", if *mutable { "mut " } else { "" }, self.pat_operand(pat, true)),
             Pat::Or(v) => v.iter().map(|p| self.pat(p)).collect::<Vec<_>>().join(" | "),
             Pat::Typed { pat, ty } => format!("{}: {}", self.pat(pat), self.ty(ty, TyPos::Local)),
             Pat::Raw(s) => s.clone(),
