@@ -3182,7 +3182,8 @@ impl<'a> Parser<'a> {
             let sp = b.span;
             Expr::new(ExprKind::Block(b), sp)
         } else {
-            self.expr()?
+            // as in Rust, `|n| total += n` assigns in the body
+            self.expr_stmt_like()?
         };
         let sp = start.to(body.span);
         Ok(Expr::new(ExprKind::Lambda { params, ret, body: Box::new(body), is_move, implicit_it: false, is_async: false }, sp))
