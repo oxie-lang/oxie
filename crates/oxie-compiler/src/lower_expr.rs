@@ -2311,6 +2311,31 @@ impl<'a> Lowerer<'a> {
 
     // ------------------------------------------------------------------ calls
 
+    /// Whether the field `name` of the class being lowered may hold something callable: a
+    /// function type, `Box<dyn Fn(..)>`, a type parameter, or a type Oxie can't see into.
+    fn field_callable(&self, name: &str) -> bool {
+        fn callable(t: &Type, generics: &[GenericParam]) -> bool {
+            match t {
+                Type::Ref { inner, .. } | Type::Ptr { inner, .. } => callable(inner, generics),
+                Type::Path { segs, .. } => {
+                    let last = segs.last().unwrap();
+                    match last.name.as_str() {
+                        _ if last.fn_sugar.is_some() => true,
+                        "Fn" | "FnMut" | "FnOnce" => true,
+                        "Box" | "Rc" | "Arc" => match last.generics.as_deref() {
+                            Some([GenericArg::Type(inner)]) => callable(inner, generics),
+                            _ => true,
+                        },
+                        n => segs.len() == 1 && generics.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if name == n)),
+                    }
+                }
+                Type::Option(_) | Type::Tuple(_) | Type::Array(..) | Type::Slice(_) | Type::Never => false,
+                _ => true,
+            }
+        }
+        self.class.as_ref().and_then(|c| c.fields.get(name).map(|t| callable(t, &c.generics))).unwrap_or(true)
+    }
+
     pub(crate) fn is_builtin_call(&self, name: &str) -> bool {
         !self.is_local(name) && !self.k.fun_in_scope(name, &self.module) && self.class.as_ref().is_none_or(|c| !c.methods.contains_key(name))
     }
@@ -2424,8 +2449,9 @@ impl<'a> Lowerer<'a> {
                     self.arg_list(args, Some(&params), TyPos::Param, span);
                     return;
                 }
-                // calling a function-typed property
-                if let Some(f) = self.implicit_field(&name) {
+                // calling a function-typed property (a field of another type leaves the name to a
+                // function: `list(..)` with a `list: ListState` field)
+                if let Some(f) = self.implicit_field(&name).filter(|_| self.field_callable(&name)) {
                     self.e.w(&format!("({})", f));
                     self.arg_list(args, None, TyPos::Param, span);
                     return;

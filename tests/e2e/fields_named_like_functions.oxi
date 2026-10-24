@@ -1,0 +1,17 @@
+// A call of a name that is a field of another type calls the function of that name; a field
+// holding a function is still called.
+fun lines(text: &str): usize = text.lines().count()
+
+fun scale(n: usize): usize = n * 10
+
+class Doc(text: String, lines: usize, scale: Box<dyn Fn(usize) -> usize>) {
+    fun recount(): usize = lines(&text) + lines
+    fun scaled(): usize = scale(lines)
+}
+
+fun main() {
+    val d = Doc("a\nb\nc".into(), 1, Box.new { it + 1 })
+    println(d.recount())
+    println(d.scaled())
+    println(scale(2))
+}
