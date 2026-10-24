@@ -1248,7 +1248,16 @@ impl<'a> Lowerer<'a> {
                 self.tests.push((it.attrs.clone(), t.clone()));
             }
             ItemKind::Raw(s) => {
-                // `mod name` refers to `name.rs` next to the .oxi file, not to the generated code
+                // `mod name` refers to `name.rs` next to the .oxi file, not to the generated code;
+                // with a `name.oxi`, Oxie declares the module itself
+                let declared = s.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')).map(|name| {
+                    let mut path = self.module.clone();
+                    path.push(name.to_string());
+                    path
+                });
+                if declared.is_some_and(|path| self.k.module_paths.contains(&path)) {
+                    return;
+                }
                 let text = match (s.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')), &self.src_dir) {
                     (Some(name), Some(dir)) if name.chars().all(|c| c.is_alphanumeric() || c == '_') => {
                         let file = if dir.join(format!("{}.rs", name)).exists() { dir.join(format!("{}.rs", name)) } else { dir.join(name).join("mod.rs") };

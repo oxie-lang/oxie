@@ -150,6 +150,8 @@ pub struct Crate {
     pub globs: HashMap<Vec<String>, Vec<Vec<String>>>,
     /// Top-level module names (children of the crate root).
     pub modules: HashSet<String>,
+    /// The path of every module that has an .oxi file.
+    pub module_paths: HashSet<Vec<String>>,
     /// External crate names from Cargo.toml.
     pub extern_crates: HashSet<String>,
     /// (module path, trait name) for every extension-function trait.
@@ -435,6 +437,7 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
         if let Some(first) = u.module.first() {
             k.modules.insert(first.clone());
         }
+        k.module_paths.insert(u.module.clone());
     }
     // pass 1: traits (needed for impl receivers)
     for u in units {
