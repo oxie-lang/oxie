@@ -103,6 +103,8 @@ pub struct Cx {
     pub type_fns: HashSet<String>,
     /// the class whose method this is, when it has contexts (see `contexts`)
     pub ctx_class: Option<String>,
+    /// a closure's parameter keeps its name: its body is kept as Rust, which can't say `it`
+    pub no_it: bool,
 }
 
 pub struct Printer<'a> {

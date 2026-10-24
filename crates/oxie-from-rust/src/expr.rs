@@ -1040,10 +1040,11 @@ impl Printer<'_> {
             return format!("rust {{ {} }}", self.rust_expr_inline(&syn::Expr::Closure(c.clone())));
         }
         let kotlin = kotlin && self.kotlin_lambda_ok(c);
+        let (todos, pending) = (self.todos.len(), self.pending.len());
         let saved = self.enter_closure();
         let saved_it = self.cx.it_rename.clone();
         let mut it_name = None;
-        if kotlin && c.inputs.len() == 1 {
+        if kotlin && c.inputs.len() == 1 && !self.cx.no_it {
             if let syn::Pat::Ident(pi) = &c.inputs[0] {
                 if pi.mutability.is_none()
                     && pi.by_ref.is_none()
@@ -1088,6 +1089,15 @@ impl Printer<'_> {
         }
         self.cx.it_rename = saved_it;
         self.leave_closure(saved);
+        // a body kept as Rust still names the parameter, so it keeps its name
+        if it_name.is_some() && body_text.contains("rust {") {
+            self.todos.truncate(todos);
+            self.pending.truncate(pending);
+            self.cx.no_it = true;
+            let s = self.closure(c, true);
+            self.cx.no_it = false;
+            return s;
+        }
         let mv = if c.capture.is_some() { "move " } else { "" };
         if kotlin {
             let params: Vec<String> = c.inputs.iter().map(|p| self.pat(p)).collect();
@@ -1161,7 +1171,9 @@ impl Printer<'_> {
             let dot = first.chars().next().is_some_and(|c| c.is_uppercase())
                 || ["std", "core", "alloc"].contains(&first.as_str())
                 || (self.info.modules.contains(&first) && !self.cx.bound.contains(&first) && !self.implicit_field(&first));
-            if dot && !(first == "Self" && segs.len() > 2) {
+            // `NSURL::fileURLWithPath`: Oxie reads an all-caps name before `.` as a constant
+            let const_like = first.len() > 1 && first.chars().all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit());
+            if dot && !const_like && !(first == "Self" && segs.len() > 2) {
                 let v: Vec<String> = segs.iter().map(|s| self.path_segment(s)).collect();
                 return v.join(".");
             }
