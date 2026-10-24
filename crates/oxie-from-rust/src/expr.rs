@@ -557,9 +557,6 @@ impl Printer<'_> {
             }
             syn::Expr::Reference(r) => format!("&{}{}", if r.mutability.is_some() { "mut " } else { "" }, self.expr(&r.expr)),
             syn::Expr::Repeat(r) => format!("[{}; {}]", self.expr(&r.expr), self.expr(&r.len)),
-            // Oxie drops `return` from a branch whose value is used (`val x = when { else -> return v }`
-            // becomes `v`); Rust's own `return` keeps its meaning there
-            syn::Expr::Return(r) if !ctx.stmt && !ctx.fn_tail && !(self.cx.throws && r.expr.as_deref().is_some_and(|v| call_of(v, "Err").is_some())) => format!("rust {{ {} }}", self.rust_expr_inline(e)),
             syn::Expr::Return(r) => self.return_expr(r),
             syn::Expr::Struct(s) => self.struct_lit(s),
             syn::Expr::Try(t) => {

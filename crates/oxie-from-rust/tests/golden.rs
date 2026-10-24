@@ -963,3 +963,25 @@ pub class Pane(items: Vec<String>) {
 "#,
     );
 }
+
+#[test]
+fn returns_inside_values() {
+    // a `return` in a branch whose value is used returns from the function, in Oxie too
+    check(
+        r#"
+fn name(n: i32) -> Option<String> {
+    Some(match n {
+        1 => "one",
+        _ => return None,
+    }.to_string())
+}
+"#,
+        r#"fun name(n: i32): String? {
+    Some((when (n) {
+        1 -> "one"
+        else -> return null
+    }).to_string())
+}
+"#,
+    );
+}
