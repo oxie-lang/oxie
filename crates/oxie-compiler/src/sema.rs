@@ -310,6 +310,16 @@ impl Crate {
     pub fn is_fun_name(&self, name: &str) -> bool {
         self.funs.contains_key(name) || self.same_named_funs.contains(name)
     }
+    /// Whether a function `name` of the crate can be called by that name in `module`: declared
+    /// there, or imported by name or with `*`.
+    pub fn fun_in_scope(&self, name: &str, module: &[String]) -> bool {
+        if let Some(path) = self.imports.get(&(module.to_vec(), name.to_string())) {
+            return self.key_at(Space::Funs, path, module).is_some();
+        }
+        let Some(key) = self.key_in(Space::Funs, name, module) else { return false };
+        let Some(home) = self.module_of(Space::Funs, &key) else { return false };
+        home.as_slice() == module || self.globs.get(module).into_iter().flatten().any(|g| self.module_path(g, module, true).as_ref() == Some(home))
+    }
     /// The module declaring the type (or function) under `key`.
     fn module_of(&self, space: Space, key: &str) -> Option<&Vec<String>> {
         match space {

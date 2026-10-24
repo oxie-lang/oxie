@@ -2312,7 +2312,7 @@ impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ calls
 
     pub(crate) fn is_builtin_call(&self, name: &str) -> bool {
-        !self.is_local(name) && !self.k.is_fun_name(name) && self.class.as_ref().is_none_or(|c| !c.methods.contains_key(name))
+        !self.is_local(name) && !self.k.fun_in_scope(name, &self.module) && self.class.as_ref().is_none_or(|c| !c.methods.contains_key(name))
     }
 
     /// The element type of a list, array or slice expression.
