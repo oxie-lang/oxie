@@ -44,6 +44,8 @@ class Editor(var text: String = "", var saves: i32 = 0) {
         save()
     }
     fun length(): usize = text.len()
+    // `pub` methods too take only the contexts they use
+    pub fun words(): usize = text.split_whitespace().count()
 }
 
 fun dispatch(editor: &mut Editor, event: &SaveEvent, window: &mut Window, cx: &mut Ctx, handler: (&mut Editor, &SaveEvent, &mut Window, &mut Ctx) -> ()) {
@@ -121,7 +123,7 @@ fun main() {
     editor.refresh_into(&mut spare)
     editor.save(cx = &mut spare)
     dispatch(&mut editor, &SaveEvent("a.txt"), &mut window, &mut cx, Editor.on_save)
-    println("${editor.length()} chars, ${editor.saves} saves, title \"${window.title}\"")
+    println("${editor.length()} chars, ${editor.words()} word, ${editor.saves} saves, title \"${window.title}\"")
     println("${cx.name} notified ${cx.notified}, ${spare.name} notified ${spare.notified}")
 
     var log = Log()

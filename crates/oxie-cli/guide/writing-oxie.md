@@ -392,7 +392,7 @@ fun main() {
 ```
 
 * `context(...)` on a class gives each method the contexts it uses, also through the methods it
-  calls; don't add `cx` parameters to the methods yourself. `pub` methods and methods used as
+  calls (`pub` ones too); don't add `cx` parameters to the methods yourself. Methods used as
   values (`cx.listener(Self.save)`) take all of them.
 * Oxie fills contexts in only where it knows the function called. A method called on an untyped
   lambda parameter needs them written out: `entity.update(cx) { e, cx -> e.save(cx) }`, or type

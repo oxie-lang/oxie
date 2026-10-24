@@ -3,9 +3,8 @@
 //! a local, a lambda's parameter, or the caller's own context). On a class, `context(...)` gives
 //! each method the contexts it uses, directly or through the methods and functions it calls (a
 //! fixpoint over the crate, as for receivers), so code that passes `window` and `cx` everywhere
-//! (GPUI) declares them once. A `pub` method, or one used as a value (`cx.listener(Self.save)`),
-//! takes all of them, since its signature mustn't depend on its body; it names those it doesn't
-//! use `_window`.
+//! (GPUI) declares them once. A method used as a value (`cx.listener(Self.save)`) takes all of
+//! them, since its caller passes every argument; it names those it doesn't use `_window`.
 //!
 //! Runs on the parsed crate before symbols are collected: each context becomes a parameter whose
 //! default is the variable of its name, so calls fill it in like a default argument (`fill_args`
@@ -24,7 +23,6 @@ struct Fun<'a> {
     /// The class it is a method of (in the class body or an `impl` block).
     class: Option<usize>,
     decl: &'a FunDecl,
-    public: bool,
     /// Implements an interface method or an operator: its parameters are the interface's.
     fixed: bool,
 }
@@ -58,7 +56,7 @@ enum Owner<'a> {
     /// a module: the function is called by its name
     Top,
     /// a class's body (with the interfaces it implements) or one of its `impl` blocks
-    Class { class: usize, public: bool, trait_impl: bool, supers: &'a [Type] },
+    Class { class: usize, trait_impl: bool, supers: &'a [Type] },
     /// an enum, or an `impl` block of a type Oxie doesn't declare
     Other,
 }
@@ -176,7 +174,7 @@ fn plan(files: &[(&[String], &File)]) -> (Adds, Vec<(usize, Diag)>) {
         let params: Vec<Param> = if !f.decl.contexts.is_empty() {
             f.decl.contexts.iter().map(|p| context_param(p, p.ty.clone(), false)).collect()
         } else if let Some(used) = uses.get(&i) {
-            let all = f.public || values.contains(&i);
+            let all = values.contains(&i);
             let class = &d.classes[f.class.unwrap()];
             class
                 .contexts
@@ -391,20 +389,19 @@ impl<'a> Decls<'a> {
             match &it.kind {
                 ItemKind::Fun(f) => {
                     let i = self.funs.len();
-                    let (class, public, fixed) = match owner {
-                        // members of a `pub` class are `pub` unless marked otherwise; one named like
-                        // a method of an interface the class implements goes to that interface's
-                        // `impl` (`split_members`)
-                        Owner::Class { class, public, trait_impl, supers } => {
+                    let (class, fixed) = match owner {
+                        // a method named like one of an interface the class implements goes to that
+                        // interface's `impl` (`split_members`)
+                        Owner::Class { class, trait_impl, supers } => {
                             let of_iface = supers.iter().filter_map(|t| t.last_name()).any(|n| {
                                 self.traits.get(n).is_some_and(|ms| ms.contains(f.name.as_str())) || crate::lower::std_trait_of_method(&f.name).contains(&n)
                             });
-                            (Some(class), it.vis == Vis::Public || (it.vis == Vis::Default && public), trait_impl || of_iface)
+                            (Some(class), trait_impl || of_iface)
                         }
-                        _ => (None, it.vis == Vis::Public, false),
+                        _ => (None, false),
                     };
                     let fixed = fixed || f.mods.is_override || f.mods.is_operator;
-                    self.funs.push(Fun { file, module, class, decl: f, public, fixed });
+                    self.funs.push(Fun { file, module, class, decl: f, fixed });
                     match owner {
                         Owner::Top => self.free.entry(&f.name).or_default().push(i),
                         Owner::Class { class, trait_impl: false, .. } => {
@@ -416,7 +413,7 @@ impl<'a> Decls<'a> {
                 ItemKind::Type(t) => {
                     let owner = match t.kind {
                         TypeKind::Class | TypeKind::Data | TypeKind::TupleStruct => match self.class_at(&t.name, module) {
-                            Some(class) => Owner::Class { class, public: it.vis == Vis::Public, trait_impl: false, supers: &t.supertypes },
+                            Some(class) => Owner::Class { class, trait_impl: false, supers: &t.supertypes },
                             None => Owner::Other,
                         },
                         _ => Owner::Other,
@@ -425,7 +422,7 @@ impl<'a> Decls<'a> {
                 }
                 ItemKind::Impl(i) => {
                     let owner = match i.self_ty.last_name().and_then(|n| self.class_at(n, module)) {
-                        Some(class) => Owner::Class { class, public: false, trait_impl: i.trait_.is_some(), supers: &[] },
+                        Some(class) => Owner::Class { class, trait_impl: i.trait_.is_some(), supers: &[] },
                         None => Owner::Other,
                     };
                     self.gather_funs(file, module, &i.members, owner);
@@ -527,7 +524,7 @@ impl<'a> Decls<'a> {
             return f.decl.contexts.iter().filter_map(|p| p.name().map(String::from)).collect();
         }
         let Some(used) = uses.get(&g) else { return Vec::new() };
-        let all = f.public || values.contains(&g);
+        let all = values.contains(&g);
         let class = &self.classes[f.class.unwrap()];
         class.contexts.iter().filter_map(|p| p.name()).filter(|n| all || used.contains(*n)).map(String::from).collect()
     }
@@ -974,16 +971,17 @@ class Editor(var text: String) {
     }
 
     #[test]
-    fn public_methods_and_handlers_take_every_context() {
+    fn handlers_take_every_context_and_pub_methods_those_they_use() {
         let src = "context(window: &mut Window, cx: &mut App)
 class View(var n: i32) {
     pub fun reset() { n = 0 }
+    pub fun refresh() { cx.notify() }
     fun on_click(e: &Click) { cx.notify() }
     fun render() { cx.listener(Self.on_click) }
 }";
         assert_eq!(
             contexts(&[("", src)]),
-            ["reset: [_window: &mut Window, _cx: &mut App]", "on_click: [_window: &mut Window, cx: &mut App]", "render: [cx: &mut App]"]
+            ["reset: []", "refresh: [cx: &mut App]", "on_click: [_window: &mut Window, cx: &mut App]", "render: [cx: &mut App]"]
         );
     }
 

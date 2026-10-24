@@ -197,9 +197,10 @@ fun main() {
   `record`, and `count` takes nothing. Static functions and the methods in the class's `impl`
   blocks, in any file, take theirs the same way. A method with a `context(...)` of its own takes
   exactly those instead.
-* A `pub` method takes every context of its class, in order, so that its signature doesn't change
-  with its body; so does a method used as a value (`cx.listener(Self.save)`), whose caller passes
-  every argument. One it doesn't use is named with a `_` (`_window`).
+* A method used as a value (`cx.listener(Self.save)`) takes every context of its class, in order,
+  since its caller passes every argument; one it doesn't use is named with a `_` (`_window`).
+* Like its receiver, a method's contexts follow its body, `pub` methods' too. To keep a `pub`
+  method's signature fixed whatever its body uses, give it a `context(...)` of its own.
 * A lambda's parameter hides a context of the same name, like any variable: in
   `entity.update(cx) { e: &mut Editor, cx -> e.save() }`, `save` gets the lambda's `cx`.
 * Contexts are passed only in calls that Oxie resolves to a function declared in Oxie, like named
