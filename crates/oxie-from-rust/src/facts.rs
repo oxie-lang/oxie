@@ -1,7 +1,8 @@
 //! Facts about a Rust file that the translation must preserve: how each method receives
-//! `self`, and which traits each type derives. The translated Oxie is compiled back to Rust
-//! and its facts compared with the original's; differences become explicit receivers and
-//! derives in the Oxie output.
+//! `self`, which traits each type derives, the parameters of methods and the arguments of
+//! calls. The translated Oxie is compiled back to Rust and its facts compared with the
+//! original's; differences become explicit receivers and derives in the Oxie output, and
+//! contexts written out (see `contexts`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,10 +21,16 @@ pub enum Recv {
 /// (self type, trait or "", method name)
 pub type MethodKey = (String, String, String);
 
+/// For each function (by `Cx::fn_path`), the argument counts of its calls to each name.
+pub type Calls = BTreeMap<String, BTreeMap<String, Vec<usize>>>;
+
 #[derive(Default, Debug)]
 pub struct Facts {
     pub receivers: BTreeMap<MethodKey, Recv>,
     pub derives: BTreeMap<String, BTreeSet<String>>,
+    /// The types of each method's parameters after the receiver, without paths.
+    pub params: BTreeMap<MethodKey, Vec<String>>,
+    pub calls: Calls,
 }
 
 pub fn recv_of(sig: &syn::Signature) -> Recv {
@@ -124,7 +131,10 @@ fn collect_items(items: &[syn::Item], prefix: &str, f: &mut Facts) {
                 let tr = i.trait_.as_ref().map(|(_, p, _)| trait_key(p)).unwrap_or_default();
                 for ii in &i.items {
                     if let syn::ImplItem::Fn(m) = ii {
-                        f.receivers.insert((ty.clone(), tr.clone(), m.sig.ident.to_string()), recv_of(&m.sig));
+                        let key = (ty.clone(), tr.clone(), m.sig.ident.to_string());
+                        f.params.insert(key.clone(), m.sig.inputs.iter().filter_map(|a| if let syn::FnArg::Typed(pt) = a { Some(type_text(&pt.ty)) } else { None }).collect());
+                        calls(&m.block, format!("{}::{}()::", ty, m.sig.ident), &mut f.calls);
+                        f.receivers.insert(key, recv_of(&m.sig));
                         collect_items(&nested_items(&m.block), &format!("{}::{}()::", ty, m.sig.ident), f);
                     }
                 }
@@ -140,7 +150,11 @@ fn collect_items(items: &[syn::Item], prefix: &str, f: &mut Facts) {
                     }
                 }
             }
-            syn::Item::Fn(func) => collect_items(&nested_items(&func.block), &format!("{}{}()::", prefix, func.sig.ident), f),
+            syn::Item::Fn(func) => {
+                let path = format!("{}{}()::", prefix, func.sig.ident);
+                calls(&func.block, path.clone(), &mut f.calls);
+                collect_items(&nested_items(&func.block), &path, f)
+            }
             syn::Item::Mod(m) => {
                 if let Some((_, items)) = &m.content {
                     if m.ident != "__oxie" {
@@ -150,5 +164,54 @@ fn collect_items(items: &[syn::Item], prefix: &str, f: &mut Facts) {
             }
             _ => {}
         }
+    }
+}
+
+/// A type's text without paths and spaces: `&mut gpui::Context<Self>` → `&mutContext<Self>`.
+fn type_text(t: &syn::Type) -> String {
+    let s = t.to_token_stream().to_string().replace(' ', "");
+    let mut out = String::new();
+    let mut ident = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            ident.push(c);
+            continue;
+        }
+        if c == ':' && chars.peek() == Some(&':') {
+            chars.next();
+            ident.clear();
+            continue;
+        }
+        out.push_str(&std::mem::take(&mut ident));
+        out.push(c);
+    }
+    out.push_str(&ident);
+    out
+}
+
+/// The calls in a function body (not in the items declared in it) by the called name.
+fn calls(b: &syn::Block, path: String, out: &mut Calls) {
+    use syn::visit::Visit;
+    struct V<'a>(&'a mut BTreeMap<String, Vec<usize>>);
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            self.0.entry(m.method.to_string()).or_default().push(m.args.len());
+            syn::visit::visit_expr_method_call(self, m);
+        }
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(p) = &*c.func {
+                if let Some(s) = p.path.segments.last() {
+                    self.0.entry(s.ident.to_string()).or_default().push(c.args.len());
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let entry = out.entry(path).or_default();
+    V(entry).visit_block(b);
+    for v in entry.values_mut() {
+        v.sort_unstable();
     }
 }

@@ -70,6 +70,7 @@ it to the checkout it runs in.
 | `oxie fmt [--check] [paths]` | Format `.oxi` files (the project's `src/` by default) |
 | `oxie emit file.oxi [--annotate]` | Print the Rust generated for a file; `--annotate` puts a `// file.oxi:line` comment above each statement and says why at each choice Oxie made (see [What Oxie decided](#what-oxie-decided)) |
 | `oxie from-rust file.rs [-o out.oxi]` | Translate Rust to Oxie (`-` reads stdin); see [Translating Rust](#translating-rust) |
+| `oxie from-rust dir -o out_dir` | Translate the `.rs` files under `dir` as one crate, into `.oxi` files at the same places under `out_dir` |
 | `oxie guide [topic]` | Print the guide to writing this version of Oxie, or a page of this documentation (`oxie guide topics` lists them); see [AI coding agents](#ai-coding-agents) |
 | `oxie lsp` | Start the language server on stdin/stdout |
 | `oxie clean` | `cargo clean` |
@@ -290,6 +291,86 @@ fun parse_point(s: &str): Point throws {
   on a block's value or on a `vec!` element) is kept as Rust with a TODO.
 * Comments are kept. A `Box<dyn Error>` becomes `AnyError` (`Box<dyn Error + Send + Sync>`), so a
   failing `main` prints `error: ...` instead of Rust's `Error: ...` debug output.
+
+Values that most methods of a class pass down to the next call, like GPUI's `window` and `cx`,
+become [context parameters](reference.md#context-parameters):
+
+```rust
+pub struct Editor {
+    text: String,
+    dirty: bool,
+}
+
+impl Editor {
+    pub fn insert(&mut self, s: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.text.push_str(s);
+        self.layout(window, cx);
+    }
+
+    pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.text.clear();
+        self.layout(window, cx);
+    }
+
+    fn layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dirty = true;
+        window.request_layout();
+        self.changed(cx);
+    }
+
+    fn changed(&self, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+}
+```
+
+becomes
+
+```oxie
+context(window: &mut Window, cx: &mut Context<Self>)
+pub class Editor(text: String, dirty: bool) {
+    pub fun insert(s: &str) {
+        text.push_str(s)
+        layout()
+    }
+
+    pub fun clear() {
+        text.clear()
+        layout()
+    }
+
+    fun layout() {
+        dirty = true
+        window.request_layout()
+        changed()
+    }
+
+    fun changed() {
+        cx.notify()
+    }
+}
+```
+
+* A `&mut` parameter becomes a context of its class when at least three methods, and a
+  quarter of them, end their parameters with it (with the same name and type), next to the
+  class's other contexts. Methods drop those last parameters, and calls that Oxie follows
+  (`self.layout(window, cx)`, `Self::open(path, cx)`) drop the arguments that name them.
+* Each method keeps the parameters it had in Rust: where Oxie would infer other contexts for it
+  than the ones it declared (it passes one on through a call Oxie doesn't follow), it gets a
+  `context(...)` of its own. A method with an unused one (`_cx`) keeps its parameters, unless
+  it is used as a value (`cx.listener(Self::save)`) and takes them all, as Oxie then gives it.
+* Calls on values whose class Oxie doesn't know, like a GPUI listener's `this`, pass their
+  contexts as written, and so do calls whose arguments are other values than the contexts'
+  variables.
+* A class gets no contexts if a method used as a value takes none of them, since Oxie would give
+  that method all of them.
+
+Translating a directory (`oxie from-rust src -o oxie-src`) translates its files as one crate. A
+class's methods may be spread over the `impl` blocks of many files, as GPUI apps do with their
+workspace; translated together, the class gets its `context(...)` where it is declared, and its
+methods in the other files drop the same parameters. Each file is still compiled and checked on
+its own, next to declarations of the other files' methods that take contexts. A single file is a
+crate of its own: an `impl` block of a class declared in another file keeps its parameters.
 
 ## Project layout
 

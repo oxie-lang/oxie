@@ -8,6 +8,14 @@
   `context(window: &mut Window, cx: &mut Context<Self>)` gives each method the contexts it uses,
   also through the methods it calls, so GPUI code declares `window` and `cx` once. In the
   generated Rust they are ordinary parameters after the others.
+* `oxie from-rust` turns the values that most methods of a class pass down to the next call, like
+  GPUI's `window: &mut Window, cx: &mut Context<Self>`, into the class's context parameters: its
+  methods drop them, and so do the calls that pass them along. Each method keeps the parameters
+  it had in Rust: where Oxie would infer other contexts, it gets a `context(...)` of its own.
+  `oxie from-rust <dir> -o <out dir>` translates a directory as one crate,
+  so that methods in the `impl` blocks of other files drop them too. On the 752k tokens of
+  Kuana's `src/`, the translation drops 12.6k more: 9.4% fewer tokens than the Rust instead of
+  7.7%.
 * A null check unwraps a local variable or parameter of type `T?`: in `if (x != null) { ... }`
   (also in an `&&` chain) `x` is the value, and after `if (x == null) return` (or `throw`,
   `continue`, `break`) it is the value for the rest of the block. Fields aren't unwrapped; their

@@ -36,6 +36,8 @@ COMMANDS:
                            each statement with the .oxi line it came from
     from-rust <file.rs> [-o out.oxi]
                            Translate Rust to Oxie (`-` reads stdin)
+    from-rust <dir> -o <out dir>
+                           Translate the .rs files under a directory as one crate
     guide [topic]          Print the guide to writing this version of Oxie (`topics` lists the rest)
     lsp                    Start the language server (stdio)
     clean                  Remove build artifacts
