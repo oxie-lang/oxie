@@ -143,7 +143,8 @@ fun main() {
   Share behavior with interfaces (they can have default methods) and composition; use an
   `enum` with data where Kotlin would use a sealed class. Constructor parameters are fields
   (no `val`/`var` needed), there are no getters or setters, and `this.` is only needed when a
-  parameter has the field's name.
+  parameter has the field's name. A method hides a function of the module with its name:
+  call that function as `self::name(x)`.
 * **No exceptions.** `throws`, `throw`, `try`/`catch` and `?` work on `Result` values, and a
   function that can fail says so in its signature. Calling a throwing function (or a Rust call
   that returns a `Result`, like `fs.write(path, text)`) as a statement inside another throwing
@@ -262,9 +263,12 @@ fun main() {
 * `?.let { }` on a variable or field borrows it, so `it` is a reference: `v?.let { Celsius(*it) }`
   for a number, or `it.clone()`. On the result of a call, `it` is the value itself:
   `mean(xs)?.let { Celsius(it) }`.
-* `map.get(key)` gives an optional reference. `?:` with a literal reads the value for you
-  (`counts.get(word) ?: 0` is a number), but with `return` or `throw` on the right you get the
-  reference: `val n = *(stock.get(item) ?: throw ...)`, or `stock.get(item).copied() ?: throw ...`.
+* `map.get(key)` gives an optional reference. `?:` with a literal, a constant or a variable
+  reads the value for you (`counts.get(word) ?: 0` is a number), but with `return` or `throw`
+  on the right you get the reference: `val n = *(stock.get(item) ?: throw ...)`, or
+  `stock.get(item).copied() ?: throw ...`.
+* `if (c) x else null` makes `x` optional. When `x` comes from a Rust function and is optional
+  already, the compiler asks for the type: declare it, `val v: T? = if (c) x else null`.
 * `a ?: b` takes `a`: for an optional field you use again later, write `a.clone() ?: b`.
 * `?.` followed by a method that itself returns an optional gives a nested optional
   (`T??`); use `.and_then { }` instead.

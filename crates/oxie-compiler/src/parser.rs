@@ -300,6 +300,19 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Recovery after a broken `when` arm that started at token `arm_pos`: skips the rest of
+    /// it, including a `)` or `]` it opened before the error, and always moves on.
+    fn recover_arm(&mut self, arm_pos: usize) {
+        self.recover_stmt();
+        while self.is_punct(")") || self.is_punct("]") {
+            self.bump();
+            self.recover_stmt();
+        }
+        if self.pos == arm_pos {
+            self.bump();
+        }
+    }
+
     // ------------------------------------------------------------------ file & items
 
     fn file(&mut self) -> File {
@@ -2574,6 +2587,8 @@ impl<'a> Parser<'a> {
                     self.bump();
                     Ok(Expr::new(ExprKind::Null, start))
                 }
+                // `self::helper(x)`: this module's `helper`, also where a method has its name
+                "self" if self.is_punct_at(1, "::") => self.path_expr(),
                 "this" | "self" => {
                     self.bump();
                     Ok(Expr::new(ExprKind::SelfValue, start))
@@ -2799,7 +2814,7 @@ impl<'a> Parser<'a> {
         }
         let global = self.eat_punct("::");
         let first = match self.tok().clone() {
-            Tok::Ident(s) if s == "Self" || s == "super" || s == "crate" || !is_reserved(&s) => {
+            Tok::Ident(s) if s == "Self" || s == "super" || s == "crate" || (s == "self" && self.is_punct_at(1, "::")) || !is_reserved(&s) => {
                 self.bump();
                 s
             }
@@ -3313,6 +3328,7 @@ impl<'a> Parser<'a> {
                 return self.expected("`}`");
             }
             let astart = self.span();
+            let arm_pos = self.pos;
             let r: PResult<WhenArm> = (|| {
                 let attrs = self.arm_attrs()?;
                 let mut conds = Vec::new();
@@ -3355,12 +3371,7 @@ impl<'a> Parser<'a> {
             })();
             match r {
                 Ok(arm) => arms.push(arm),
-                Err(()) => {
-                    self.recover_stmt();
-                    if self.is_punct("}") {
-                        // recovered to end of when
-                    }
-                }
+                Err(()) => self.recover_arm(arm_pos),
             }
             self.eat_punct(",");
         }
@@ -3407,6 +3418,7 @@ impl<'a> Parser<'a> {
                 return self.expected("`}`");
             }
             let astart = self.span();
+            let arm_pos = self.pos;
             let r: PResult<WhenArm> = (|| {
                 let attrs = self.arm_attrs()?;
                 let pat = if self.eat_kw("else") { None } else { Some(self.pattern()?) };
@@ -3430,7 +3442,7 @@ impl<'a> Parser<'a> {
             })();
             match r {
                 Ok(a) => arms.push(a),
-                Err(()) => self.recover_stmt(),
+                Err(()) => self.recover_arm(arm_pos),
             }
             self.eat_punct(",");
         }

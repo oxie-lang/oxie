@@ -1,0 +1,31 @@
+// References inside `impl Trait` and `dyn Trait` parameters get named lifetimes: Rust doesn't
+// accept them elided there.
+
+data class Patch(delta: isize)
+
+// fn total<'a>(patches: impl Iterator<Item = &'a Patch>) -> isize
+fun total(patches: impl Iterator<Item = &Patch>): isize = patches.map { it.delta }.sum()
+
+// the result can borrow from the iterator's items too: one `'a` for all of them
+fun longest(a: &str, b: &str, extra: impl Iterator<Item = &str>): &str {
+    var best = if (a.len() >= b.len()) a else b
+    for (s in extra) if (s.len() > best.len()) best = s
+    best
+}
+
+fun first_word(words: impl Iterator<Item = &str>): &str = words.into_iter().next() ?: ""
+
+fun last_of(a: &str, rest: Box<dyn Iterator<Item = &str>>): &str = rest.last() ?: a
+
+// `Fn(&str)` stays as it is
+fun count_with(f: impl Fn(&str) -> usize, words: impl IntoIterator<Item = &String>): usize = words.into_iter().map { f(it) }.sum()
+
+fun main() {
+    val patches = vec[Patch(2), Patch(-5)]
+    println(total(patches.iter()))
+    println(longest("ab", "abc", vec["x", "abcdef"].into_iter()))
+    println(first_word(vec["hi", "there"].into_iter()))
+    println(last_of("none", Box.new(vec["a", "b"].into_iter())))
+    val words = vec["one".to_string(), "three".to_string()]
+    println(count_with({ it.len() }, &words))
+}

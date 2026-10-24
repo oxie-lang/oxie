@@ -1338,14 +1338,21 @@ impl<'a> Lowerer<'a> {
 
     /// After the return type: why the signature got a lifetime that the source doesn't name
     /// (`orig_lifetimes` were written), tying the result to every reference parameter.
-    fn lifetime_decision(&mut self, f: &FunDecl, orig_lifetimes: usize) {
-        let lifetimes: Vec<&str> = f.generics.params.iter().filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(name.as_str()) } else { None }).collect();
-        if lifetimes.len() <= orig_lifetimes {
+    fn lifetime_decision(&mut self, f: &FunDecl, orig_lifetimes: &[String]) {
+        let mentions = |t: &str, lt: &str| t.match_indices(lt).any(|(i, _)| !t[i + lt.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_'));
+        let ret = f.ret.as_ref().map(|r| self.ty(r, TyPos::Ret)).unwrap_or_default();
+        // the one the result got (an `impl Trait` parameter's own isn't explained)
+        let Some(lt) = f
+            .generics
+            .params
+            .iter()
+            .filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(format!("'{}", name)) } else { None })
+            .find(|l| !orig_lifetimes.iter().any(|o| *l == format!("'{}", o)) && mentions(&ret, l))
+        else {
             return;
-        }
+        };
         // the parameters it was given to (not those with lifetimes of their own)
-        let lt = format!("'{}", lifetimes[0]);
-        let has_lt = |t: &str| t.match_indices(&lt).any(|(i, _)| !t[i + lt.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_'));
+        let has_lt = |t: &str| mentions(t, &lt);
         let tied: Vec<String> = f.params.iter().filter(|p| has_lt(&self.ty(&p.ty, TyPos::Param))).filter_map(|p| p.name().map(|n| format!("`{}`", n))).collect();
         if !tied.is_empty() {
             self.e.decide(f.name_span, lt, format!("the result borrows from {}", tied.join(" or ")), None);
@@ -1401,7 +1408,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn free_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {
-        let lifetimes = f.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count();
+        let lifetimes: Vec<String> = f.generics.params.iter().filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(name.clone()) } else { None }).collect();
         let f = &auto_lifetimes(&self.with_inferred_ret(f, None), false, &|n| self.k.type_lifetimes_in(n, &self.module));
         let f = &crate::bounds::with_inferred_bounds(f, &[], &[]);
         let is_main = f.name == "main" && ctx == ItemCtx::Top && self.is_root && self.module.is_empty();
@@ -1426,7 +1433,7 @@ impl<'a> Lowerer<'a> {
         if let Some(r) = &ret {
             self.e.w(&format!(" -> {}", r));
         }
-        self.lifetime_decision(f, lifetimes);
+        self.lifetime_decision(f, &lifetimes);
         self.e.w(&wc);
         self.bind_params(f);
         match &f.body {
@@ -1576,7 +1583,7 @@ impl<'a> Lowerer<'a> {
     /// Emits a method inside an impl/trait block.
     pub(crate) fn method(&mut self, it: &Item, f: &FunDecl, recv: Recv, vis_allowed: bool, rename: Option<&str>) {
         let trait_ret = self.pending_trait_ret.take();
-        let lifetimes = f.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count();
+        let lifetimes: Vec<String> = f.generics.params.iter().filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(name.clone()) } else { None }).collect();
         // an inferred `&mut self` says why
         let recv_why = (recv == Recv::RefMut && f.self_param.is_none() && !f.mods.is_mut).then(|| self.class.as_ref()?.methods.get(&f.name)?.recv_why.clone()).flatten();
         let by_ref = match &f.self_param {
@@ -1632,7 +1639,7 @@ impl<'a> Lowerer<'a> {
         if let Some(r) = &ret {
             self.e.w(&format!(" -> {}", r));
         }
-        self.lifetime_decision(f, lifetimes);
+        self.lifetime_decision(f, &lifetimes);
         self.e.w(&wc);
         self.bind_params(f);
         let saved_static = self.class.as_ref().map(|c| c.is_static);
@@ -2651,10 +2658,82 @@ pub(crate) fn ends_diverging(stmts: &[Stmt]) -> bool {
     }
 }
 
+/// The lifetimes Rust can't elide in a signature: those of a returned reference
+/// ([`ret_lifetimes`]) and of references inside an `impl Trait` parameter
+/// ([`impl_trait_lifetimes`]).
+pub(crate) fn auto_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> usize) -> FunDecl {
+    impl_trait_lifetimes(&ret_lifetimes(f, self_ref, lt))
+}
+
+/// `patches: impl Iterator<Item = &Patch>`: Rust wants a name for a reference lifetime inside
+/// an `impl Trait` parameter, so each such parameter gets a lifetime of its own.
+fn impl_trait_lifetimes(f: &FunDecl) -> FunDecl {
+    /// Names the elided reference lifetimes in `t` `l` (not in `Fn(&T)` sugar, where Rust
+    /// accepts them); true if there were any.
+    fn name(t: &mut Type, l: &str) -> bool {
+        match t {
+            Type::Ref { lifetime, inner, .. } => {
+                let elided = lifetime.as_deref().is_none_or(|x| x == "_");
+                if elided {
+                    *lifetime = Some(l.to_string());
+                }
+                name(inner, l) | elided
+            }
+            Type::Ptr { inner, .. } | Type::Slice(inner) | Type::Array(inner, _) | Type::Option(inner) => name(inner, l),
+            Type::Tuple(v) | Type::Impl(v) | Type::Dyn(v) | Type::Bounds(v) => v.iter_mut().fold(false, |any, t| name(t, l) | any),
+            Type::Path { segs, .. } => {
+                let mut any = false;
+                for g in segs.iter_mut().filter(|s| s.fn_sugar.is_none()).filter_map(|s| s.generics.as_mut()).flatten() {
+                    match g {
+                        GenericArg::Type(t) | GenericArg::Binding(_, t) => any |= name(t, l),
+                        GenericArg::Lifetime(x) if x == "_" => {
+                            *x = l.to_string();
+                            any = true;
+                        }
+                        _ => {}
+                    }
+                }
+                any
+            }
+            _ => false,
+        }
+    }
+    /// Names the lifetimes inside the `impl Trait`s of parameter type `t`.
+    fn in_impls(t: &mut Type, l: &str) -> bool {
+        match t {
+            Type::Impl(bounds) => bounds.iter_mut().fold(false, |any, b| name(b, l) | any),
+            Type::Ref { inner, .. } | Type::Ptr { inner, .. } | Type::Slice(inner) | Type::Array(inner, _) | Type::Option(inner) => in_impls(inner, l),
+            Type::Tuple(v) => v.iter_mut().fold(false, |any, t| in_impls(t, l) | any),
+            Type::Path { segs, .. } => segs.iter_mut().filter_map(|s| s.generics.as_mut()).flatten().fold(false, |any, g| match g {
+                GenericArg::Type(t) | GenericArg::Binding(_, t) => in_impls(t, l) | any,
+                _ => any,
+            }),
+            _ => false,
+        }
+    }
+    let mut used: Vec<String> = f.generics.params.iter().filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(name.clone()) } else { None }).collect();
+    let mut f2 = f.clone();
+    let mut added = Vec::new();
+    for p in &mut f2.params {
+        let l = ('a'..='z').map(String::from).find(|c| !used.contains(c)).unwrap_or_else(|| format!("oxie{}", used.len()));
+        if in_impls(&mut p.ty, &l) {
+            used.push(l.clone());
+            added.push(GenericParam::Lifetime { name: l, bounds: Vec::new() });
+        }
+    }
+    if added.is_empty() {
+        return f.clone();
+    }
+    // lifetimes come first in Rust's generic parameters
+    let at = f2.generics.params.iter().take_while(|g| matches!(g, GenericParam::Lifetime { .. })).count();
+    f2.generics.params.splice(at..at, added);
+    f2
+}
+
 /// Rust can't elide the lifetime of a returned reference when there are several reference
 /// parameters (or none). Oxie ties the result to all of them (or `'static` when there are none).
 /// `lt` gives the lifetime parameters of a type written without them (`Token` for `Token<'a>`).
-pub(crate) fn auto_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> usize) -> FunDecl {
+fn ret_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> usize) -> FunDecl {
     fn count(t: &Type, n: &mut usize, lt: &dyn Fn(&str) -> usize) {
         match t {
             Type::Ref { lifetime: None, inner, .. } => {
@@ -2666,7 +2745,7 @@ pub(crate) fn auto_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> u
                 count(inner, n, lt);
             }
             Type::Ref { inner, .. } | Type::Ptr { inner, .. } | Type::Slice(inner) | Type::Array(inner, _) | Type::Option(inner) => count(inner, n, lt),
-            Type::Tuple(v) => v.iter().for_each(|t| count(t, n, lt)),
+            Type::Tuple(v) | Type::Impl(v) | Type::Dyn(v) | Type::Bounds(v) => v.iter().for_each(|t| count(t, n, lt)),
             Type::Path { segs, .. } => {
                 if let [s] = segs.as_slice() {
                     if s.generics.is_none() {
@@ -2677,7 +2756,7 @@ pub(crate) fn auto_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> u
                     if let Some(g) = &s.generics {
                         for a in g {
                             match a {
-                                GenericArg::Type(t) => count(t, n, lt),
+                                GenericArg::Type(t) | GenericArg::Binding(_, t) => count(t, n, lt),
                                 GenericArg::Lifetime(l) if l == "_" => *n += 1,
                                 _ => {}
                             }
@@ -2697,7 +2776,7 @@ pub(crate) fn auto_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> u
                 set(inner, l, lt);
             }
             Type::Ptr { inner, .. } | Type::Slice(inner) | Type::Array(inner, _) | Type::Option(inner) => set(inner, l, lt),
-            Type::Tuple(v) => v.iter_mut().for_each(|t| set(t, l, lt)),
+            Type::Tuple(v) | Type::Impl(v) | Type::Dyn(v) | Type::Bounds(v) => v.iter_mut().for_each(|t| set(t, l, lt)),
             Type::Path { segs, .. } => {
                 if let [s] = segs.as_mut_slice() {
                     let n = lt(&s.name);
@@ -2709,7 +2788,7 @@ pub(crate) fn auto_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> u
                     if let Some(g) = &mut s.generics {
                         for a in g {
                             match a {
-                                GenericArg::Type(t) => set(t, l, lt),
+                                GenericArg::Type(t) | GenericArg::Binding(_, t) => set(t, l, lt),
                                 GenericArg::Lifetime(x) if x == "_" => *x = l.to_string(),
                                 _ => {}
                             }
@@ -2730,7 +2809,21 @@ pub(crate) fn auto_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> u
     for p in &f.params {
         count(&p.ty, &mut in_params, lt);
     }
-    if in_params == 1 {
+    // Rust elides a single one, but not inside an `impl Trait` parameter
+    fn in_impl(t: &Type, lt: &dyn Fn(&str) -> usize) -> bool {
+        match t {
+            Type::Impl(_) => {
+                let mut n = 0;
+                count(t, &mut n, lt);
+                n > 0
+            }
+            Type::Ref { inner, .. } | Type::Ptr { inner, .. } | Type::Slice(inner) | Type::Array(inner, _) | Type::Option(inner) => in_impl(inner, lt),
+            Type::Tuple(v) => v.iter().any(|t| in_impl(t, lt)),
+            Type::Path { segs, .. } => segs.iter().filter_map(|s| s.generics.as_ref()).flatten().any(|g| matches!(g, GenericArg::Type(t) | GenericArg::Binding(_, t) if in_impl(t, lt))),
+            _ => false,
+        }
+    }
+    if in_params == 1 && !f.params.iter().any(|p| in_impl(&p.ty, lt)) {
         return f.clone();
     }
     let mut f2 = f.clone();

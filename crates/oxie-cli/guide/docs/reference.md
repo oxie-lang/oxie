@@ -33,7 +33,7 @@ Contents: [Lexical structure](#lexical-structure) · [Declarations](#declaration
 
 * **Identifiers** are Rust identifiers. Rust keywords that Oxie does not reserve (`type`,
   `match`, `loop`, ...) can be field and method names; `r#name` works as in Rust.
-* **Numbers**: Rust literals (`1_000`, `0xff`, `1e-3`, `5u8`, `2.0f32`) plus Kotlin's `10L` (`i64`).
+* **Numbers**: Rust literals (`1_000`, `0xff`, `1e-3`, `8.`, `5u8`, `2.0f32`) plus Kotlin's `10L` (`i64`).
 * **Characters**: `'a'`, `'\n'`, `'\u{1F600}'`, byte `b'a'`.
 * **Strings**: see [Strings](#strings). Raw strings `r"..."`, `r#"..."#` and byte strings
   `b"..."` are Rust's.
@@ -145,7 +145,10 @@ fun short(x: i32) = x * 2
   (`fun longest(a: &str, b: &str): &str` → `fn longest<'a>(a: &'a str, b: &'a str) -> &'a str`).
   With no reference parameters the result is `'static`. Types with lifetime parameters get
   `<'_>` in signatures, and count as references here (`fun first(p: &Parser): Token` →
-  `fn first<'a>(p: &'a Parser<'a>) -> Token<'a>`).
+  `fn first<'a>(p: &'a Parser<'a>) -> Token<'a>`). A reference inside an `impl Trait`
+  parameter, which Rust doesn't let you leave unnamed, gets a lifetime of its own
+  (`patches: impl Iterator<Item = &Patch>` → `fn total<'a>(patches: impl Iterator<Item = &'a Patch>)`),
+  or the result's when the function returns a reference.
 * **Function-typed parameters**: `f: (i32) -> i32` becomes `impl FnMut(i32) -> i32` (or
   `impl Fn` when the function is called from inside a closure); as a field, a return value
   stored in a variable, or a generic argument it becomes `Box<dyn Fn(i32) -> i32>`, and
@@ -209,7 +212,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
   mutability belongs to the variable holding the object, as in Rust.
 * **Implicit `this`**: inside methods, fields and methods of the class (and default methods of
   its interfaces) can be used without `this.`; a parameter or local with the same name wins.
-  `this` and `self` are the same.
+  `this` and `self` are the same. A method hides a function of the module with its name: call
+  that function as `self::name(x)` (Rust's path to the module's own items).
 * **Receivers** are inferred:
   * `&mut self` if the method assigns a field, calls a mutating method on a field (`push`,
     `insert`, `clear`, `entry`, ...), takes `&mut` of a field, or calls a `&mut self` method;
@@ -445,7 +449,13 @@ the declared type of a variable, field, parameter or return value:
 
 ## Null safety
 
-* `T?` is `Option<T>`, `null` is `None`.
+* `T?` is `Option<T>`, `null` is `None`. `x == null` and `x != null` are `x.is_none()` and
+  `x.is_some()`, so the value's type needn't support `==`.
+* A branch next to a `null` one is optional too: `val v = if (c) x else null` is
+  `if c { Some(x) } else { None }`, and the same goes for `when` arms. For a value from Rust
+  whose type Oxie doesn't know (a function of a Rust module), it is `x.into()`, which is
+  `Some(x)` when `x` isn't optional; when it already is, rustc asks for the type: declare it
+  (`val v: T? = ...`).
 * `a?.b`, `a?.m()`, `a?.b?.c` — **safe navigation** when `a` is optional: the result is
   `None` if `a` is. Chains flatten like Kotlin (`?.` on a `T?` property continues the chain;
   `?.` after a non-optional property acts like `.`). Reading a field through a borrowed value
@@ -456,9 +466,10 @@ the declared type of a variable, field, parameter or return value:
   `Result` and navigates otherwise. To navigate an optional value of unknown type there,
   declare its type first: `val v: String? = lookup(k)`, then `v?.len()`.
 * `a ?: b` — `a` if present (`Some`/`Ok`), else `b`, evaluated only when needed. `b` may be
-  `return`, `throw`, `break`, `continue` or `panic(...)`. For a literal `b`, `Option<&T> ?: 0`
-  yields `T`, `Option<String> ?: "text"` yields `String` and `Option<&String> ?: "text"` yields
-  `&str`. So through a borrowed value (`u: &User`), `u.address?.city ?: "unknown"` is borrowed
+  `return`, `throw`, `break`, `continue` or `panic(...)`. When `b` is a literal or a value that
+  costs nothing to read (a constant, an enum variant, a variable, a field), `Option<&T> ?: b`
+  yields `T` for a `Copy` `T` (`server?.encoding ?: Encoding.Utf16`), `Option<String> ?: "text"`
+  yields `String` and `Option<&String> ?: "text"` yields `&str`. So through a borrowed value (`u: &User`), `u.address?.city ?: "unknown"` is borrowed
   text; where a `String` is needed, copy the field explicitly, as for any field read through a
   reference: `u.address?.city.clone() ?: "unknown"`. The compiler error offers this fix.
 * `x!!` — unwrap.

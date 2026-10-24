@@ -19,6 +19,18 @@ pub struct Fixes {
     pub explicit_derives: HashSet<String>,
     /// Top-level items (by index) emitted as Rust in a `rust { }` block, with the reason.
     pub raw_items: HashMap<usize, String>,
+    /// Methods of top-level inherent impls (item index, index in the impl) emitted as Rust in
+    /// an `impl` block of their own after the item, with the reason. The rest stays Oxie.
+    pub raw_methods: HashMap<(usize, usize), String>,
+}
+
+/// Starts a line that marks where a top-level item (`i3`) or a method that can be kept as Rust
+/// on its own (`m3:5`) begins, or where it ends (`/`); see [`Printer::strip_marks`].
+const MARK: char = '\u{1}';
+
+/// A method's text between marks.
+fn mark_method(item: usize, index: usize, text: &str) -> String {
+    format!("{MARK}m{item}:{index}\n{text}\n{MARK}/")
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +55,12 @@ pub struct Info {
     pub traits: HashSet<String>,
     /// free functions → parameter types
     pub fns: HashMap<String, Vec<syn::Type>>,
+    /// free functions that return an `Option`
+    pub option_fns: HashSet<String>,
+    /// every free function's name, in any module of the file
+    pub free_fns: HashSet<String>,
+    /// the functions of each type's impls (`Counter`) and of each trait (`trait Shape`)
+    pub type_fns: HashMap<String, HashSet<String>>,
     /// functions and methods that are translated to `throws`
     pub throwing: HashSet<String>,
     /// lowercase names usable as module paths with `.` (`fs.read_to_string`)
@@ -74,6 +92,9 @@ pub struct Cx {
     pub in_trait: bool,
     /// prefix for items declared inside the current function (matches `facts`)
     pub fn_path: String,
+    /// the functions of the type whose method this is: in Oxie a bare `name()` there calls
+    /// one of them, so a free function of that name is called as `self::name()`
+    pub type_fns: HashSet<String>,
 }
 
 pub struct Printer<'a> {
@@ -87,7 +108,13 @@ pub struct Printer<'a> {
     pub pending: Vec<String>,
     /// Byte ranges of top-level items in the output, for mapping Oxie diagnostics back.
     pub item_ranges: Vec<(usize, std::ops::Range<usize>)>,
+    /// Byte ranges of the methods [`Fixes::raw_methods`] can keep as Rust.
+    pub method_ranges: Vec<((usize, usize), std::ops::Range<usize>)>,
     pub mod_prefix: String,
+    /// Printing the file's own items (not those of a module inside it).
+    top_level: bool,
+    /// `rust { impl .. }` blocks of methods kept as Rust, printed after the current item.
+    after_item: Vec<String>,
 }
 
 pub fn indent(s: &str) -> String {
@@ -116,7 +143,19 @@ const AUTO_STATIC: &[&str] = &["new", "default", "from", "from_str", "try_from",
 
 impl<'a> Printer<'a> {
     pub fn new(info: Info, fixes: &'a Fixes, comments: Vec<Comment>) -> Self {
-        Printer { info, fixes, comments, cx: Cx::default(), todos: Vec::new(), pending: Vec::new(), item_ranges: Vec::new(), mod_prefix: String::new() }
+        Printer {
+            info,
+            fixes,
+            comments,
+            cx: Cx::default(),
+            todos: Vec::new(),
+            pending: Vec::new(),
+            item_ranges: Vec::new(),
+            method_ranges: Vec::new(),
+            mod_prefix: String::new(),
+            top_level: false,
+            after_item: Vec::new(),
+        }
     }
 
     /// Records something kept as Rust: a warning, and a `TODO(from-rust)` comment.
@@ -127,6 +166,51 @@ impl<'a> Printer<'a> {
         }
         self.todos.push(w);
         self.pending.push(format!("// TODO(from-rust): {}", msg));
+    }
+
+    /// Removes the marks of items and methods from the printed text, recording where they are.
+    fn strip_marks(&mut self, text: &str) -> String {
+        enum Open {
+            Item(usize, usize),
+            Method((usize, usize), usize),
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut open = Vec::new();
+        for line in text.split_inclusive('\n') {
+            let Some(m) = line.trim_start().strip_prefix(MARK) else {
+                out.push_str(line);
+                continue;
+            };
+            let m = m.trim_end();
+            if m == "/" {
+                match open.pop() {
+                    Some(Open::Item(i, start)) => self.item_ranges.push((i, start..out.len())),
+                    Some(Open::Method(k, start)) => self.method_ranges.push((k, start..out.len())),
+                    None => {}
+                }
+            } else if let Some(Ok(i)) = m.strip_prefix('i').map(str::parse) {
+                open.push(Open::Item(i, out.len()));
+            } else if let Some((Ok(i), Ok(j))) = m.strip_prefix('m').and_then(|k| k.split_once(':')).map(|(a, b)| (a.parse(), b.parse())) {
+                open.push(Open::Method((i, j), out.len()));
+            }
+        }
+        out
+    }
+
+    /// The methods of `imp` kept as Rust (`raw`: index, reason, comments before and inside),
+    /// in an `impl` block of their own.
+    fn raw_methods(&mut self, imp: &syn::ItemImpl, raw: Vec<(usize, String, Vec<String>)>) -> String {
+        let mut only = imp.clone();
+        only.items = raw.iter().map(|(j, ..)| imp.items[*j].clone()).collect();
+        let mut lines = Vec::new();
+        for (j, reason, comments) in raw {
+            lines.extend(comments);
+            let msg = format!("kept as Rust: {}", reason);
+            self.todos.push(format!("line {}: {}", line_of(&imp.items[j]), msg));
+            lines.push(format!("// TODO(from-rust): {}", msg));
+        }
+        lines.push(format!("rust {{\n{}\n}}", indent(&rust_item(&syn::Item::Impl(only)))));
+        lines.join("\n")
     }
 
     // ------------------------------------------------------------------ comments
@@ -172,12 +256,7 @@ impl<'a> Printer<'a> {
         if !out.is_empty() && !body.is_empty() {
             out.push('\n');
         }
-        let base = out.len();
         out.push_str(&body);
-        for (_, r) in self.item_ranges.iter_mut() {
-            r.start += base;
-            r.end += base;
-        }
         let rest = self.take_comments(0, usize::MAX);
         if !rest.is_empty() {
             out.push('\n');
@@ -189,12 +268,13 @@ impl<'a> Printer<'a> {
         if !out.ends_with('\n') {
             out.push('\n');
         }
-        out
+        self.strip_marks(&out)
     }
 
     /// A list of items (file or module body). Inherent impls of structs and enums declared in
     /// the same list are merged into them.
     pub fn items(&mut self, items: &[syn::Item], lo: usize, top: bool) -> String {
+        let outer_top = std::mem::replace(&mut self.top_level, top);
         let plan = self.plan(items, top);
         let mut out = String::new();
         let mut first = true;
@@ -220,6 +300,19 @@ impl<'a> Printer<'a> {
                 let todo: Vec<String> = self.pending.drain(pending..).collect();
                 text = format!("{}\n{}", todo.join("\n"), text);
             }
+            if !text.is_empty() {
+                if let Some(tc) = self.trailing_comment(end_line_of(it)) {
+                    text.push(' ');
+                    text.push_str(&tc);
+                }
+            }
+            // its methods kept as Rust follow it
+            for raw in std::mem::take(&mut self.after_item) {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&raw);
+            }
             if text.is_empty() {
                 continue;
             }
@@ -234,16 +327,13 @@ impl<'a> Printer<'a> {
                 out.push_str(&c);
                 out.push('\n');
             }
-            let s = out.len();
-            out.push_str(&text);
-            if let Some(tc) = self.trailing_comment(end_line_of(it)) {
-                out.push(' ');
-                out.push_str(&tc);
-            }
             if top {
-                self.item_ranges.push((i, s..out.len()));
+                out.push_str(&format!("{MARK}i{i}\n{text}\n{MARK}/"));
+            } else {
+                out.push_str(&text);
             }
         }
+        self.top_level = outer_top;
         out
     }
 
@@ -548,7 +638,7 @@ impl<'a> Printer<'a> {
             }
             syn::Item::Struct(s) => self.struct_item(s, plan.members.get(&idx).map(|v| v.as_slice()).unwrap_or(&[]), items),
             syn::Item::Enum(e) => self.enum_item(e, plan.members.get(&idx).map(|v| v.as_slice()).unwrap_or(&[]), items),
-            syn::Item::Impl(i) => self.impl_item(i),
+            syn::Item::Impl(i) => self.impl_item(i, idx),
             syn::Item::Trait(t) => self.trait_item(t),
             syn::Item::Use(u) => self.use_item(u),
             syn::Item::Const(c) => {
@@ -829,9 +919,11 @@ impl<'a> Printer<'a> {
             if let Some(syn::Item::Impl(imp)) = all.get(i) {
                 items.insert(i, imp);
                 if let Member::Inherent(_) | Member::Trait(..) = m {
-                    for ii in &imp.items {
+                    for (j, ii) in imp.items.iter().enumerate() {
                         if let syn::ImplItem::Fn(f) = ii {
-                            if f.sig.receiver().is_some() {
+                            // one kept as Rust is called as `self.name()`: Oxie doesn't know it
+                            let raw = matches!(m, Member::Inherent(_)) && self.top_level && self.fixes.raw_methods.contains_key(&(i, j));
+                            if f.sig.receiver().is_some() && !raw {
                                 methods.insert(f.sig.ident.to_string());
                             }
                         }
@@ -845,12 +937,20 @@ impl<'a> Printer<'a> {
                 Member::Inherent(i) | Member::Trait(i, _) => {
                     let Some(imp) = items.get(i) else { continue };
                     let trait_name = if let Member::Trait(_, t) = m { Some(t.clone()) } else { None };
+                    // the methods of an inherent impl can be kept as Rust one by one
+                    let separable = trait_name.is_none() && self.top_level;
                     let lo = line_of(imp);
-                    for ii in &imp.items {
+                    let mut raw = Vec::new();
+                    for (j, ii) in imp.items.iter().enumerate() {
                         let syn::ImplItem::Fn(f) = ii else { continue };
                         if trait_name.is_none() && f.sig.ident == "new" && self.is_plain_new(decl, f) {
                             // the primary constructor generates it; drop comments inside
                             let _ = self.take_comments(lo, end_line_of(f) + 1);
+                            continue;
+                        }
+                        if let Some(reason) = self.fixes.raw_methods.get(&(*i, j)).filter(|_| separable) {
+                            let reason = reason.clone();
+                            raw.push((j, reason, self.take_comments(lo, end_line_of(f) + 1)));
                             continue;
                         }
                         let cs = self.take_comments(lo, line_of(f));
@@ -869,7 +969,11 @@ impl<'a> Printer<'a> {
                             s.push_str(&tc);
                         }
                         self.cx = saved;
-                        parts.push(s);
+                        parts.push(if separable { mark_method(*i, j, &s) } else { s });
+                    }
+                    if !raw.is_empty() {
+                        let block = self.raw_methods(imp, raw);
+                        self.after_item.push(block);
                     }
                     let tail = self.take_comments(lo, end_line_of(imp));
                     if !tail.is_empty() {
@@ -1004,6 +1108,12 @@ impl<'a> Printer<'a> {
         class.methods = methods.clone();
         cx.class = Some(class);
         cx.bound = bound_names(sig, block);
+        let name = match decl {
+            syn::Item::Struct(s) => s.ident.to_string(),
+            syn::Item::Enum(e) => e.ident.to_string(),
+            _ => String::new(),
+        };
+        cx.type_fns = self.info.type_fns.get(&name).cloned().unwrap_or_default();
         cx
     }
 
@@ -1088,8 +1198,12 @@ impl<'a> Printer<'a> {
 
     // ------------------------------------------------------------------ impls and traits
 
-    fn impl_item(&mut self, imp: &syn::ItemImpl) -> String {
+    /// `idx`: the impl's position among the items of its list.
+    fn impl_item(&mut self, imp: &syn::ItemImpl, idx: usize) -> String {
         let mut lines = self.attrs(&imp.attrs, false);
+        // the methods of an inherent impl can be kept as Rust one by one
+        let separable = imp.trait_.is_none() && self.top_level;
+        let mut raw = Vec::new();
         let mut head = String::new();
         if imp.unsafety.is_some() {
             head.push_str("unsafe ");
@@ -1109,19 +1223,27 @@ impl<'a> Printer<'a> {
         head.push_str(&self.where_clause(&imp.generics));
         let lo = line_of(imp);
         let mut parts = Vec::new();
-        for ii in &imp.items {
+        for (j, ii) in imp.items.iter().enumerate() {
+            if let (syn::ImplItem::Fn(f), Some(reason)) = (ii, self.fixes.raw_methods.get(&(idx, j)).filter(|_| separable)) {
+                let reason = reason.clone();
+                raw.push((j, reason, self.take_comments(lo, end_line_of(f) + 1)));
+                continue;
+            }
             let cs = self.take_comments(lo, line_of(ii));
             let mut s = cs.join("\n");
             if !s.is_empty() {
                 s.push('\n');
             }
+            let mut method = false;
             match ii {
                 syn::ImplItem::Fn(f) => {
                     let saved = std::mem::take(&mut self.cx);
                     self.cx.bound = bound_names(&f.sig, &f.block);
                     self.cx.impl_key = Some((tkey.clone(), trait_key.clone()));
+                    self.cx.type_fns = self.info.type_fns.get(&facts::type_name(&imp.self_ty)).cloned().unwrap_or_default();
                     s.push_str(&self.fun(&f.attrs, &f.vis, &f.sig, Some(&f.block), FunKind::Method { class: false, overrides: false }));
                     self.cx = saved;
+                    method = true;
                 }
                 syn::ImplItem::Type(t) => {
                     let mut l = self.attrs(&t.attrs, false);
@@ -1145,11 +1267,20 @@ impl<'a> Printer<'a> {
                 s.push(' ');
                 s.push_str(&tc);
             }
-            parts.push(s);
+            parts.push(if method && separable { mark_method(idx, j, &s) } else { s });
+        }
+        let all_raw = parts.is_empty() && !raw.is_empty();
+        if !raw.is_empty() {
+            let block = self.raw_methods(imp, raw);
+            self.after_item.push(block);
         }
         let tail = self.take_comments(lo, end_line_of(imp));
         if !tail.is_empty() {
             parts.push(tail.join("\n"));
+        }
+        if all_raw && parts.is_empty() {
+            // nothing left in Oxie: the Rust block is the whole impl
+            return String::new();
         }
         if parts.is_empty() {
             lines.push(format!("{} {{}}", head));
@@ -1184,6 +1315,7 @@ impl<'a> Printer<'a> {
                     }
                     self.cx.impl_key = Some((tkey.clone(), String::new()));
                     self.cx.in_trait = true;
+                    self.cx.type_fns = self.info.type_fns.get(&format!("trait {}", t.ident)).cloned().unwrap_or_default();
                     s.push_str(&self.fun(&f.attrs, &syn::Visibility::Inherited, &f.sig, f.default.as_ref(), FunKind::TraitDecl));
                     self.cx = saved;
                 }
@@ -1540,7 +1672,12 @@ pub fn bound_names(sig: &syn::Signature, block: &syn::Block) -> HashSet<String> 
             self.0.insert(i.ident.to_string());
             syn::visit::visit_pat_ident(self, i);
         }
-        fn visit_item(&mut self, _: &'ast syn::Item) {}
+        // a local `fn` binds its name, but its body isn't part of this function
+        fn visit_item(&mut self, i: &'ast syn::Item) {
+            if let syn::Item::Fn(f) = i {
+                self.0.insert(f.sig.ident.to_string());
+            }
+        }
     }
     let mut v = V(HashSet::new());
     for a in &sig.inputs {

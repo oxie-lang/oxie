@@ -46,6 +46,14 @@ pub fn recv_of(sig: &syn::Signature) -> Recv {
 }
 
 /// Last path segment of a type, with its generic arguments, without spaces: `Wrapper<T>`.
+/// The name of a type without its path or arguments: `Counter` for `crate::a::Counter<T>`.
+pub fn type_name(t: &syn::Type) -> String {
+    match t {
+        syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 pub fn type_key(t: &syn::Type) -> String {
     match t {
         syn::Type::Path(p) if p.qself.is_none() => match p.path.segments.last() {

@@ -200,7 +200,9 @@ impl<'a> Lexer<'a> {
                 c if c.is_ascii_digit() => self.number(),
                 _ => {
                     let rest = self.rest();
-                    if let Some(p) = PUNCTS.iter().find(|p| rest.starts_with(**p)) {
+                    // `a?..b` is `a?` and a range, not `?.` followed by `.`
+                    let p = if rest.starts_with("?..") { Some(&"?") } else { PUNCTS.iter().find(|p| rest.starts_with(**p)) };
+                    if let Some(p) = p {
                         self.pos += p.len();
                         match *p {
                             "(" => self.brackets.push('('),
@@ -288,6 +290,10 @@ impl<'a> Lexer<'a> {
                 is_float = true;
                 self.pos += 1;
                 self.digits();
+            } else if !after_dot && self.peek() == Some('.') && !self.peek_at(1).is_some_and(|c| c == '.' || is_ident_start(c)) {
+                // Rust's `1.` (as in `px(8.)`): a float unless `..`, a field or a method follows
+                is_float = true;
+                self.pos += 1;
             }
             if !after_dot && matches!(self.peek(), Some('e') | Some('E')) {
                 let save = self.pos;
@@ -313,6 +319,10 @@ impl<'a> Lexer<'a> {
             }
         }
         let mut text = self.src[start..self.pos].to_string();
+        if text.ends_with('.') {
+            // `1.0` stays a number when the generated Rust calls a method on it
+            text.push('0');
+        }
         let suffix = &self.src[suffix_start..self.pos];
         if suffix == "L" {
             text = format!("{}i64", &self.src[start..suffix_start]);
@@ -773,6 +783,25 @@ mod tests {
         let t = kinds("x.0.1");
         assert_eq!(t[2], Tok::Int("0".into()));
         assert_eq!(t[4], Tok::Int("1".into()));
+    }
+
+    #[test]
+    fn float_with_trailing_dot() {
+        let t = kinds("px(8.) f(1., 2.)");
+        assert_eq!(t[2], Tok::Float("8.0".into()));
+        assert_eq!(t[6], Tok::Float("1.0".into()));
+        assert_eq!(t[8], Tok::Float("2.0".into()));
+        // still a range, a method call and a field
+        assert_eq!(kinds("1..2")[..3], [Tok::Int("1".into()), Tok::Punct(".."), Tok::Int("2".into())]);
+        assert_eq!(kinds("1.max(2)")[..3], [Tok::Int("1".into()), Tok::Punct("."), Tok::Ident("max".into())]);
+        assert_eq!(kinds("x.0.")[..4], [Tok::Ident("x".into()), Tok::Punct("."), Tok::Int("0".into()), Tok::Punct(".")]);
+    }
+
+    #[test]
+    fn question_mark_before_range() {
+        let t = kinds("a?..b?");
+        assert_eq!(t[..5], [Tok::Ident("a".into()), Tok::Punct("?"), Tok::Punct(".."), Tok::Ident("b".into()), Tok::Punct("?")]);
+        assert_eq!(kinds("a?.b")[1], Tok::Punct("?."));
     }
 
     #[test]

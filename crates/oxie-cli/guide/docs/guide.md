@@ -482,8 +482,8 @@ What Oxie removes is the bookkeeping around it:
   dropped, and unlocked, when the function returns), and a class or `Box<T>` parameter becomes
   `&T` the same way (below);
 * lifetimes are filled in when Rust can't infer them (a function returning a reference gets one
-  lifetime tied to its reference parameters, and a class holding a `&str` gets a lifetime
-  parameter);
+  lifetime tied to its reference parameters, a class holding a `&str` gets a lifetime
+  parameter, and so does a reference inside an `impl Trait` parameter);
 * `&self`/`&mut self` are inferred, and closures that modify captured variables are declared
   `mut` for you;
 * `for (x in xs)` borrows `xs` when it is used after the loop, so iterating doesn't use up the

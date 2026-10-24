@@ -1,0 +1,51 @@
+// Optional values around types without `==` and around calls into Rust, whose types Oxie
+// doesn't know.
+
+class Formatter(project_local: bool)
+class Server(encoding: Encoding)
+enum Encoding { Utf8, Utf16 }
+
+const FALLBACK: Encoding = Encoding.Utf8
+
+rust {
+    fn rust_width(text: &str) -> usize {
+        text.chars().count()
+    }
+}
+
+fun width(text: &str): usize = text.len()
+
+// `x == null` needs no `==` on the class: it is `x.is_none()`
+fun pick(cli: Formatter?, server: Server?): String {
+    val none = cli == null
+    val use_cli = if (val f = &cli) f.project_local || server == null else false
+    "$none $use_cli ${server != null}"
+}
+
+// a branch next to `null` becomes optional, whatever gives its value
+fun measure(text: &str, known: bool): String {
+    val a = if (known) width(text) else null
+    val b = if (known) rust_width(text) else null
+    val c = if (known) text.trim().len() else null
+    val d = when (text) {
+        "" -> null
+        else -> rust_width(text.trim())
+    }
+    "${a:?} ${b:?} ${c:?} ${d:?}"
+}
+
+// `?.` gives a reference; a default that is a constant, a variant or a variable is read as a value
+fun encoding(server: Server?, default: Encoding): String {
+    val a = server?.encoding ?: Encoding.Utf16
+    val b = server?.encoding ?: FALLBACK
+    val c = server?.encoding ?: default
+    "${a:?} ${b:?} ${c:?}"
+}
+
+fun main() {
+    println("${pick(null, null)} ${pick(Formatter(true), null)} ${pick(Formatter(false), Server(Encoding.Utf8))}")
+    println(measure(" héllo ", true))
+    println(measure("", false))
+    println(encoding(null, Encoding.Utf16))
+    println(encoding(Server(Encoding.Utf16), Encoding.Utf8))
+}

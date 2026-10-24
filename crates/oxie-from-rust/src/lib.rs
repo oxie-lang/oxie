@@ -42,8 +42,10 @@ pub fn translate(src: &str) -> Result<Translation, String> {
     let mut fixes = Fixes::default();
     let mut warnings = Vec::new();
     let mut text = String::new();
-    for _round in 0..8 {
-        let (t, ranges, todos) = print(src, &file, &info, &fixes);
+    // a rejected method of an inherent impl is kept as Rust on its own, so this can take more
+    // rounds than one per item
+    for _round in 0..16 {
+        let (t, ranges, methods, todos) = print(src, &file, &info, &fixes);
         text = t;
         let (rust, map, diags) = compile(&text);
         let errors: Vec<&oxie_compiler::Diag> = diags.iter().filter(|d| d.severity == oxie_compiler::Severity::Error).collect();
@@ -58,13 +60,7 @@ pub fn translate(src: &str) -> Result<Translation, String> {
             }
             let mut changed = false;
             for d in &errors {
-                let pos = d.span.start as usize;
-                if let Some((i, _)) = ranges.iter().find(|(_, r)| r.contains(&pos)) {
-                    if !fixes.raw_items.contains_key(i) {
-                        fixes.raw_items.insert(*i, format!("Oxie rejected the translation ({})", d.message));
-                        changed = true;
-                    }
-                }
+                changed |= keep_as_rust(&mut fixes, &ranges, &methods, d.span.start as usize, &format!("Oxie rejected the translation ({})", d.message));
             }
             if changed {
                 continue;
@@ -87,11 +83,8 @@ pub fn translate(src: &str) -> Result<Translation, String> {
                 let src_pos = map.as_ref().and_then(|m| m.lookup(at.line.saturating_sub(1) as u32, at.column as u32));
                 if let Some((l, c)) = src_pos {
                     let off = oxie_compiler::LineIndex::new(&text).offset(&text, l as usize, c as usize);
-                    if let Some((i, _)) = ranges.iter().find(|(_, r)| r.contains(&off)) {
-                        if !fixes.raw_items.contains_key(i) {
-                            fixes.raw_items.insert(*i, "the Oxie compiler produced invalid Rust for the translation".into());
-                            continue;
-                        }
+                    if keep_as_rust(&mut fixes, &ranges, &methods, off, "the Oxie compiler produced invalid Rust for the translation") {
+                        continue;
                     }
                 }
                 warnings.push(format!("the translation compiles to invalid Rust: {}", e));
@@ -183,6 +176,27 @@ fn contains_word(hay: &str, w: &str) -> bool {
 }
 
 type Ranges = Vec<(usize, std::ops::Range<usize>)>;
+type MethodRanges = Vec<((usize, usize), std::ops::Range<usize>)>;
+
+/// Keeps the code at byte `pos` of the translation as Rust from now on: the method of an
+/// inherent impl it is in, or else the top-level item. False when that is Rust already.
+fn keep_as_rust(fixes: &mut Fixes, items: &Ranges, methods: &MethodRanges, pos: usize, reason: &str) -> bool {
+    if let Some((k, _)) = methods.iter().find(|(_, r)| r.contains(&pos)) {
+        // another error of a method this round already keeps as Rust
+        if fixes.raw_methods.contains_key(k) {
+            return false;
+        }
+        fixes.raw_methods.insert(*k, reason.to_string());
+        return true;
+    }
+    match items.iter().find(|(_, r)| r.contains(&pos)) {
+        Some((i, _)) if !fixes.raw_items.contains_key(i) => {
+            fixes.raw_items.insert(*i, reason.to_string());
+            true
+        }
+        _ => false,
+    }
+}
 
 /// Compiles Oxie text as a single-file script: generated Rust, its source map, diagnostics.
 fn compile(text: &str) -> (String, Option<oxie_compiler::SourceMap>, Vec<oxie_compiler::Diag>) {
@@ -196,10 +210,10 @@ fn compile(text: &str) -> (String, Option<oxie_compiler::SourceMap>, Vec<oxie_co
     }
 }
 
-fn print(src: &str, file: &syn::File, info: &Info, fixes: &Fixes) -> (String, Ranges, Vec<String>) {
+fn print(src: &str, file: &syn::File, info: &Info, fixes: &Fixes) -> (String, Ranges, MethodRanges, Vec<String>) {
     let mut p = Printer::new(info.clone(), fixes, comments::scan(src));
     let text = p.file(file);
-    (text, p.item_ranges, p.todos)
+    (text, p.item_ranges, p.method_ranges, p.todos)
 }
 
 fn collect_info(file: &syn::File) -> Info {
@@ -219,6 +233,8 @@ fn collect_items(items: &[syn::Item], info: &mut Info, fn_counts: &mut HashMap<S
     let mut news: HashMap<String, Vec<syn::Type>> = HashMap::new();
     for it in items {
         if let syn::Item::Impl(imp) = it {
+            let fns = info.type_fns.entry(facts::type_name(&imp.self_ty)).or_default();
+            fns.extend(imp.items.iter().filter_map(|ii| if let syn::ImplItem::Fn(f) = ii { Some(f.sig.ident.to_string()) } else { None }));
             if imp.trait_.is_some() {
                 for ii in &imp.items {
                     if let syn::ImplItem::Fn(f) = ii {
@@ -277,6 +293,8 @@ fn collect_items(items: &[syn::Item], info: &mut Info, fn_counts: &mut HashMap<S
             }
             syn::Item::Trait(t) => {
                 info.traits.insert(t.ident.to_string());
+                let fns = info.type_fns.entry(format!("trait {}", t.ident)).or_default();
+                fns.extend(t.items.iter().filter_map(|ti| if let syn::TraitItem::Fn(f) = ti { Some(f.sig.ident.to_string()) } else { None }));
                 for ti in &t.items {
                     if let syn::TraitItem::Fn(f) = ti {
                         if printer::result_parts_of(&f.sig.output) {
@@ -297,6 +315,12 @@ fn collect_items(items: &[syn::Item], info: &mut Info, fn_counts: &mut HashMap<S
                     .collect();
                 *fn_counts.entry(f.sig.ident.to_string()).or_default() += 1;
                 info.fns.insert(f.sig.ident.to_string(), ps);
+                info.free_fns.insert(f.sig.ident.to_string());
+                if let syn::ReturnType::Type(_, t) = &f.sig.output {
+                    if matches!(&**t, syn::Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Option")) {
+                        info.option_fns.insert(f.sig.ident.to_string());
+                    }
+                }
                 if f.sig.ident == "run" {
                     info.run_shadowed = true;
                 }

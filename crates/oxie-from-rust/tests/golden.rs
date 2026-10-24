@@ -526,3 +526,219 @@ fun main() {
 "#,
     );
 }
+
+/// A method Oxie rejects is kept as Rust in an `impl` block of its own; the class keeps the rest.
+/// (Rejected here: a let chain whose first condition ends in a lambda, which Oxie can't parse yet.)
+#[test]
+fn rejected_method_stays_rust_alone() {
+    check(
+        r#"
+fn first(v: &[i32]) -> Option<i32> {
+    v.first().copied()
+}
+
+struct Counter {
+    n: i32,
+}
+
+impl Counter {
+    fn next(&mut self) -> i32 {
+        self.n += 1;
+        self.n
+    }
+
+    fn both(&self, v: &[i32]) -> i32 {
+        // a let chain
+        if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
+            a + b
+        } else {
+            self.n
+        }
+    }
+}
+
+fn main() {
+    let mut c = Counter { n: 2 };
+    println!("{} {}", c.next(), c.both(&[1, 2]));
+}
+"#,
+        r#"fun first(v: &[i32]): i32? = v.first().copied()
+
+class Counter(n: i32) {
+    fun next(): i32 {
+        n += 1
+        n
+    }
+}
+
+// a let chain
+// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected expression, found `val`)
+rust {
+    impl Counter {
+        fn both(&self, v: &[i32]) -> i32 {
+            if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
+                a + b
+            } else {
+                self.n
+            }
+        }
+    }
+}
+
+fun main() {
+    var c = Counter { n: 2 }
+    println("${c.next()} ${c.both(&[1, 2])}")
+}
+"#,
+    );
+}
+
+/// The same for an `impl` of a type that isn't a class (here a tuple struct).
+#[test]
+fn rejected_method_of_an_impl_stays_rust_alone() {
+    check(
+        r#"
+fn first(v: &[i32]) -> Option<i32> {
+    v.first().copied()
+}
+
+struct Meters(i32);
+
+impl Meters {
+    fn get(&self) -> i32 {
+        self.0
+    }
+
+    fn both(&self, v: &[i32]) -> i32 {
+        if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
+            a + b
+        } else {
+            self.0
+        }
+    }
+}
+
+fn main() {
+    let m = Meters(5);
+    println!("{} {}", m.get(), m.both(&[1, 2]));
+}
+"#,
+        r#"fun first(v: &[i32]): i32? = v.first().copied()
+
+struct Meters(i32)
+
+impl Meters {
+    fun get(): i32 = self.0
+}
+
+// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected expression, found `val`)
+rust {
+    impl Meters {
+        fn both(&self, v: &[i32]) -> i32 {
+            if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
+                a + b
+            } else {
+                self.0
+            }
+        }
+    }
+}
+
+fun main() {
+    val m = Meters(5)
+    println("${m.get()} ${m.both(&[1, 2])}")
+}
+"#,
+    );
+}
+
+/// In a method, Oxie calls the type's own function for a bare `helper(..)`, so a free function
+/// of that name is called through its module.
+#[test]
+fn free_function_hidden_by_a_method() {
+    check(
+        r#"
+fn helper(n: usize) -> usize {
+    n * 10
+}
+
+struct Counter {
+    n: usize,
+}
+
+impl Counter {
+    fn helper(&self, k: usize) -> usize {
+        self.n + k
+    }
+
+    fn scaled(&self) -> usize {
+        helper(self.n)
+    }
+}
+
+fn main() {
+    let c = Counter { n: 2 };
+    println!("{} {}", c.helper(1), c.scaled());
+}
+"#,
+        r#"fun helper(n: usize): usize = n * 10
+
+class Counter(n: usize) {
+    fun helper(k: usize): usize = n + k
+
+    fun scaled(): usize = self::helper(n)
+}
+
+fun main() {
+    val c = Counter { n: 2 }
+    println("${c.helper(1)} ${c.scaled()}")
+}
+"#,
+    );
+}
+
+/// GPUI-style code: `px(8.)` floats, `a?..b` ranges, and `None` beside an `Option` Oxie can't see.
+#[test]
+fn rust_literals_ranges_and_none_branches() {
+    check(
+        r#"
+use std::ops::Range;
+
+fn px(v: f32) -> f32 {
+    v * 2.
+}
+
+fn find(v: &[usize], x: usize) -> Option<usize> {
+    v.iter().position(|y| *y == x)
+}
+
+fn shift(r: Range<usize>, d: isize) -> Option<Range<usize>> {
+    Some(r.start.checked_add_signed(d)?..r.end.checked_add_signed(d)?)
+}
+
+fn main() {
+    let v = vec![1, 2, 3];
+    let found = if v.len() > 1 { find(&v, 2) } else { None };
+    let home = if v.len() > 5 { std::env::var_os("OXIE_UNSET") } else { None };
+    println!("{} {:?} {:?} {:?}", px(8.), shift(1..3, 1), found, home);
+}
+"#,
+        r#"import std::ops::Range
+
+fun px(v: f32): f32 = v * 2.
+
+fun find(v: &[usize], x: usize): usize? = v.iter().position { *it == x }
+
+fun shift(r: Range<usize>, d: isize): Range<usize>? {
+    Some(r.start.checked_add_signed(d)?..r.end.checked_add_signed(d)?)
+}
+
+fun main() {
+    val v = vec[1, 2, 3]
+    val found = if (v.len() > 1) find(&v, 2) else null
+    val home = if (v.len() > 5) std.env.var_os("OXIE_UNSET") else None
+    println("${px(8.)} ${shift(1..3, 1):?} ${found:?} ${home:?}")
+}
+"#,
+    );
+}

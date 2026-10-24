@@ -21,6 +21,30 @@ fn escape_braces(s: &str) -> String {
     s.replace('{', "{{").replace('}', "}}")
 }
 
+/// The type of an `if`/`when` value nothing declares: a `T?` when one of its branches is `null`
+/// (`if (c) x else null`), so the other branches become `Some(x)`.
+fn branch_target(e: &Expr) -> Target {
+    fn null_branch(e: &Expr) -> bool {
+        let tail = |b: &Block| match b.stmts.last() {
+            Some(Stmt::Expr { expr, semi: false }) => null_branch(expr),
+            _ => false,
+        };
+        match &e.kind {
+            ExprKind::Null => true,
+            ExprKind::Paren(x) => null_branch(x),
+            ExprKind::Block(b) => tail(b),
+            ExprKind::If { then, else_: Some(el), .. } => tail(then) || null_branch(el),
+            ExprKind::When { arms, .. } => arms.iter().any(|a| null_branch(&a.body)),
+            _ => false,
+        }
+    }
+    if null_branch(e) {
+        Target::ty(&Type::Option(Box::new(Type::Infer)))
+    } else {
+        Target::none()
+    }
+}
+
 fn is_ok_err_call(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Call { callee, .. } => matches!(callee.ident(), Some("Ok") | Some("Err")),
@@ -801,8 +825,24 @@ impl<'a> Lowerer<'a> {
                     self.expr(e, P_POSTFIX);
                     self.e.w(".into()");
                 }
+                // a call whose type Oxie knows (and that isn't `T?`)
+                ExprKind::Call { .. } | ExprKind::MethodCall { .. }
+                    if !has_safe_link(e) && !self.is_option_expr(e) && self.infer_type(e).is_some_and(|t| !matches!(t, Type::Infer)) =>
+                {
+                    self.e.w("Some(");
+                    self.coerce(e, inner, TyPos::Generic);
+                    self.e.w(")");
+                }
                 // a call returning `T` converts to `T?` with `.into()` (identity when it already returns `T?`)
                 ExprKind::MethodCall { name, .. } if !INFERENCE_DEPENDENT.contains(&name.as_str()) && !has_safe_link(e) && !self.is_option_expr(e) => {
+                    self.expr(e, P_POSTFIX);
+                    self.e.w(".into()");
+                }
+                // so does a function call, such as one into a Rust module whose type Oxie doesn't know
+                ExprKind::Call { callee, .. }
+                    if matches!(&callee.kind, ExprKind::Path { segs, .. } if segs.last().is_some_and(|n| n != "Some" && !INFERENCE_DEPENDENT.contains(&n.as_str())))
+                        && !self.is_option_expr(e) =>
+                {
                     self.expr(e, P_POSTFIX);
                     self.e.w(".into()");
                 }
@@ -1266,6 +1306,12 @@ impl<'a> Lowerer<'a> {
                 self.e.w(s);
                 self.expr(x, P_UNARY);
             }
+            // `x == null` is `x.is_none()`: `x == None` would need `PartialEq` on the value
+            Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(r.kind, Null) != matches!(l.kind, Null) => {
+                let x = if matches!(r.kind, Null) { l } else { r };
+                self.expr(x, P_POSTFIX);
+                self.e.w(if *op == BinOp::Eq { ".is_none()" } else { ".is_some()" });
+            }
             Binary(op, l, r) => {
                 if *op == BinOp::Add && self.is_string_concat(e) {
                     self.string_concat(e);
@@ -1432,16 +1478,14 @@ impl<'a> Lowerer<'a> {
                 self.e.w(")");
             }
             If { cond, then, else_ } => {
-                let t = Target::none();
                 if else_.is_some() {
-                    self.if_expr(cond, then, else_.as_deref(), Some(&t));
+                    self.if_expr(cond, then, else_.as_deref(), Some(&branch_target(e)));
                 } else {
                     self.if_expr(cond, then, None, None);
                 }
             }
             When { subject, binding, arms, rust_match } => {
-                let t = Target::none();
-                self.when_with_binding(subject.as_deref(), binding.as_ref(), arms, *rust_match, Some(&t), e.span);
+                self.when_with_binding(subject.as_deref(), binding.as_ref(), arms, *rust_match, Some(&branch_target(e)), e.span);
             }
             Block(b) => self.block_value(b, &Target::none()),
             LabeledBlock { label, block } => {
@@ -3452,10 +3496,21 @@ impl<'a> Lowerer<'a> {
         self.e.w(")");
     }
 
+    /// A default for `?:` that costs nothing to compute (a literal, a constant, a variable, a
+    /// field), so it can be passed to `or_val`, which reads the value behind a `?.` reference.
+    fn is_plain_default(&self, r: &Expr) -> bool {
+        match &r.kind {
+            ExprKind::Path { .. } => true,
+            ExprKind::Field { safe: false, .. } => self.as_path(r).is_some() || self.is_place(r),
+            ExprKind::Paren(x) => self.is_plain_default(x),
+            _ => is_literal(r),
+        }
+    }
+
     fn elvis(&mut self, l: &Expr, r: &Expr) {
         let saved = self.force_safe;
         self.force_safe = true;
-        if is_literal(r) {
+        if self.is_plain_default(r) {
             self.e.w(&format!("{}::ElvisOr::or_val(", RT));
             self.expr(l, P_LOWEST);
             self.force_safe = saved;

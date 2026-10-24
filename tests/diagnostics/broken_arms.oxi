@@ -1,0 +1,19 @@
+// A broken `when` or `match` arm is reported once, and parsing goes on after it.
+
+fun pick(x: i32): i32 {
+    val a = when (x) {
+        1 -> x.pow(x.)
+        else -> 0
+    }
+    // error: 5: expected name, found `)`
+    // not: 5: expected pattern
+    val b = match x {
+        1 => x.pow(x.),
+        _ => 0,
+    }
+    // error: 11: expected name, found `)`
+    // not: 11: expected pattern
+    a + b
+}
+
+fun main() = println(pick(1))

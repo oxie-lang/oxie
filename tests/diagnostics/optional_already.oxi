@@ -1,0 +1,16 @@
+// A value from Rust next to `null` may be optional already; Oxie can't see its type.
+
+rust {
+    fn lookup(key: &str) -> Option<usize> {
+        if key.is_empty() { None } else { Some(key.len()) }
+    }
+}
+
+fun main() {
+    val known = std.env.args().count() > 0
+    val v = if (known) lookup("abc") else null
+    // error: 11: Oxie can't tell whether this value is optional already
+    // error: 11: declare `v` as `usize?`
+    val w: usize? = if (known) lookup("") else null
+    println("${v:?} ${w:?}")
+}

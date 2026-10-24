@@ -17,6 +17,29 @@
 * A loop variable has the type of the list's elements, and a method called on a value of a known
   class gives its declared type, so more of what depends on types works in loops and on such
   values (arguments lent to `&` parameters, shared-object fields after `?.`, null checks).
+* Rust's floats with a trailing dot (`8.`, as in GPUI's `px(8.)`) and a range after `?`
+  (`a?..b?`) read as they do in Rust. Before, `8.` was an error, and inside a `when` arm it made
+  the compiler loop forever.
+* A broken `when` or `match` arm is reported once and parsing goes on after it; some (`f(x.)`)
+  made the compiler loop forever.
+* `x == null` and `x != null` are `x.is_none()` and `x.is_some()`, so they work on classes
+  without `==`.
+* A branch next to `null` is optional without a declared type: `val v = if (c) f() else null`
+  is `Some(f())`, or `f().into()` for a function from Rust whose type Oxie doesn't see. When such
+  a value is optional already, the error says so and offers the type to declare.
+* `?.field ?: b` gives the field's value when `b` is a constant, an enum variant, a variable or
+  a field (`server?.encoding ?: Encoding.Utf16`), as it did when `b` was a literal.
+* A reference inside an `impl Trait` parameter (`impl Iterator<Item = &Patch>`) gets a lifetime,
+  the result's when the function returns a reference. Before, rustc rejected the signature.
+* Inside a class with a method `name`, `self::name(x)` calls the module's function of that name
+  (a bare `name(x)` calls the method), as the path does in Rust.
+* `oxie from-rust` keeps a method Oxie rejects as Rust on its own, in an `impl` block after its
+  class, instead of keeping the whole `impl` as Rust; and a `None` beside a value whose type
+  Oxie doesn't see stays `None`. On a 70,000-line GPUI application every file now translates
+  (17 of 137 made it loop forever) and 7% of the output stays Rust, instead of 43%.
+* `oxie from-rust` writes a call to a free function as `self::name(..)` in the methods of a type
+  that has a method of the same name. Before, the translation called the method: a wrong
+  result, or an error that kept the code as Rust.
 
 ## 0.2.0 - 2026-10-24
 

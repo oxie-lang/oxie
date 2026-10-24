@@ -278,9 +278,12 @@ fun parse_point(s: &str): Point throws {
   for simple one-parameter bodies) and move outside the parentheses when last; `vec![..]`,
   `HashMap::from([(k, v)])` and `HashSet::from([..])` become `vec[..]`, `mapOf(k to v)` and `setOf(..)`.
 * Receivers, `self.`, `Type::new` and literal `.to_string()`s are dropped where Oxie restores
-  them. The translation is compiled with the Oxie compiler before it is printed: receivers and
-  derives Oxie would infer differently are written out, and items Oxie can't express are kept as
-  Rust in `rust { }` blocks with a `// TODO(from-rust)` comment (also reported on stderr).
+  them, and a call to a function that a method of the same name hides in Oxie becomes
+  `self::name(..)`. The translation is compiled with the Oxie compiler before it is printed:
+  receivers and derives Oxie would infer differently are written out, and items Oxie can't
+  express are kept as Rust in `rust { }` blocks with a `// TODO(from-rust)` comment (also
+  reported on stderr). Such a method of an `impl` is kept on its own, in an `impl` block after
+  the class, and the class's other methods are translated.
 * Attributes stay on their statements and `let`s: `#[cfg(test)] v.push(1);` becomes
   `@cfg(test) v.push(1)`, and a doc comment on a statement, which documents nothing, becomes an
   ordinary comment. Oxie has no attributes on expressions, so an expression with one (`#[cfg]`

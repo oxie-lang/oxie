@@ -1,0 +1,23 @@
+// Rust forms that code from crates and `oxie from-rust` uses: `8.` floats (GPUI's `px(8.)`)
+// and `a?..b` ranges.
+
+import std::ops::Range
+
+fun px(v: f32): f32 = v * 2.
+
+fun scale(a: f64, b: f64): f64 = a * b
+
+// a broken arm doesn't hang the parser any more; a float like this one used to
+fun size(n: i32): f32 = when (n) {
+    0 -> px(8.)
+    else -> px(1.)
+}
+
+fun shift(r: Range<usize>, d: isize): Range<usize>? = Some(r.start.checked_add_signed(d)?..r.end.checked_add_signed(d)?)
+
+fun main() {
+    println("${px(8.)} ${scale(1., 2.5)} ${size(0)} ${size(3)}")
+    val xs = [1., 2., 3.]
+    println("${xs:?} ${1.max(4)} ${(0..3).len()}")
+    println("${shift(2..5, -1):?} ${shift(0..2, -1):?}")
+}

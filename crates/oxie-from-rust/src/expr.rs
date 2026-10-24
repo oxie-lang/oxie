@@ -17,6 +17,9 @@ pub struct Ctx {
     pub throws_tail: bool,
     /// the value is what the function returns (its body's tail, or a branch of it)
     pub fn_tail: bool,
+    /// a `None` branch stays `None`: Oxie makes a branch next to `null` optional
+    /// (`if (c) x else null`), which a value that already is an `Option` mustn't be
+    pub keep_none: bool,
 }
 
 impl Ctx {
@@ -417,7 +420,7 @@ impl Printer<'_> {
     /// The tail of a function translated to `throws`.
     pub fn tail_throws(&mut self, e: &syn::Expr) -> String {
         let ret = self.cx.ret.clone();
-        self.ex(e, &Ctx { throws_tail: true, expect: ret, stmt: false, fn_tail: true })
+        self.ex(e, &Ctx { throws_tail: true, expect: ret, fn_tail: true, ..Ctx::default() })
     }
 
     /// The tail of a function returning a value.
@@ -428,6 +431,9 @@ impl Printer<'_> {
     pub fn ex(&mut self, e: &syn::Expr, ctx: &Ctx) -> String {
         if has_expr_attrs(e) {
             return self.attributed_expr(e);
+        }
+        if ctx.keep_none && matches!(e, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("None")) {
+            return "None".into();
         }
         if ctx.throws_tail {
             if let Some(r) = self.throws_tail_expr(e, ctx) {
@@ -507,7 +513,10 @@ impl Printer<'_> {
                 format!("{}for ({} in {}) {}", label, self.pat(&f.pat), self.expr(&f.expr), body)
             }
             syn::Expr::Group(g) => self.ex(&g.expr, ctx),
-            syn::Expr::If(i) => self.if_expr(i, ctx, true),
+            syn::Expr::If(i) => {
+                let ctx = &self.branch_ctx(e, ctx);
+                self.if_expr(i, ctx, true)
+            }
             syn::Expr::Index(i) => format!("{}[{}]", self.postfix(&i.expr), self.expr(&i.index)),
             syn::Expr::Infer(_) => "_".into(),
             syn::Expr::Let(l) => self.let_cond(&l.pat, &l.expr),
@@ -517,7 +526,10 @@ impl Printer<'_> {
                 format!("{}loop {}", label, self.block(&l.body, &Ctx::stmt()))
             }
             syn::Expr::Macro(m) => self.mac(&m.mac, ctx),
-            syn::Expr::Match(m) => self.match_expr(m, ctx),
+            syn::Expr::Match(m) => {
+                let ctx = &self.branch_ctx(e, ctx);
+                self.match_expr(m, ctx)
+            }
             syn::Expr::MethodCall(m) => self.method_call(m),
             syn::Expr::Paren(p) => {
                 // `(self.f)(x)` calls a closure field; Oxie would read `(f)(x)` as a method call
@@ -833,6 +845,15 @@ impl Printer<'_> {
             if p.qself.is_none() && segs.len() == 1 {
                 if let Some(ps) = self.info.fns.get(&segs[0]) {
                     expects = ps.iter().cloned().map(Some).collect();
+                }
+                // in a method, Oxie would call the type's own function of this name
+                let name = &segs[0];
+                if p.path.leading_colon.is_none()
+                    && self.cx.type_fns.contains(name)
+                    && !self.cx.bound.contains(name)
+                    && (self.info.free_fns.contains(name) || self.info.modules.contains(name))
+                {
+                    func = Some(format!("self::{}", self.postfix(&c.func)));
                 }
             }
         }
@@ -1232,6 +1253,46 @@ impl Printer<'_> {
             return format!("val ({},) = ({},)", self.pat(pat), v);
         }
         format!("val {} = {}", self.pat(pat), v)
+    }
+
+    /// The context of the branches of `if` or `match` `e`: their `None`s stay `None` when
+    /// another branch gives an `Option` whose type Oxie may not know (a call into a Rust
+    /// module): `null` beside it would make Oxie wrap it in another `Option`.
+    fn branch_ctx(&self, e: &syn::Expr, ctx: &Ctx) -> Ctx {
+        fn tails<'e>(e: &'e syn::Expr, out: &mut Vec<&'e syn::Expr>) {
+            let block = |b: &'e syn::Block, out: &mut Vec<&'e syn::Expr>| {
+                if let Some(syn::Stmt::Expr(x, None)) = b.stmts.last() {
+                    tails(x, out);
+                }
+            };
+            match e {
+                syn::Expr::If(i) => {
+                    block(&i.then_branch, out);
+                    if let Some((_, el)) = &i.else_branch {
+                        tails(el, out);
+                    }
+                }
+                syn::Expr::Match(m) => m.arms.iter().for_each(|a| tails(&a.body, out)),
+                syn::Expr::Block(b) if b.label.is_none() => block(&b.block, out),
+                syn::Expr::Paren(p) => tails(&p.expr, out),
+                _ => out.push(e),
+            }
+        }
+        let mut ts = Vec::new();
+        tails(e, &mut ts);
+        let is_none = |t: &syn::Expr| matches!(t, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("None"));
+        // values Oxie can tell are optional or not, and branches that leave
+        let known = |t: &syn::Expr| match t {
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) => p.path.is_ident("Some") || p.path.get_ident().is_some_and(|f| self.info.option_fns.contains(&f.to_string())),
+                _ => false,
+            },
+            syn::Expr::Return(_) | syn::Expr::Break(_) | syn::Expr::Continue(_) | syn::Expr::Lit(_) => true,
+            syn::Expr::Macro(m) => ["panic", "unreachable", "todo", "unimplemented"].iter().any(|n| m.mac.path.is_ident(n)),
+            _ => false,
+        };
+        let keep = !ctx.stmt && ts.iter().any(|t| is_none(t)) && ts.iter().any(|t| !is_none(t) && !known(t));
+        Ctx { keep_none: ctx.keep_none || keep, ..ctx.clone() }
     }
 
     fn if_expr(&mut self, i: &syn::ExprIf, ctx: &Ctx, compact: bool) -> String {

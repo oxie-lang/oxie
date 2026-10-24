@@ -86,6 +86,7 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
         "E0277" => trait_missing(d, sources, &lines, &names),
         "E0308" => mismatched(d, src, &lines),
         "E0615" => getter_call(d, &lines, &first),
+        "E0283" if d.notes.iter().any(|n| n.contains("Option<_>: From<Option<")) => optional_already(d, &lines),
         // reported without a code
         _ if d.message.starts_with("future cannot be sent between threads safely") => thread_safety(d, sources, ""),
         _ => {}
@@ -1639,6 +1640,26 @@ fn bound_fix(d: &mut MappedDiag, lines: &[&str]) {
 }
 
 /// `node.next?.value` on a shared class: fields of shared objects are read through getters.
+/// `val v = if (c) x else null` where `x` comes from Rust and is optional already: Oxie makes
+/// it `x.into()`, which could be `Some(x)` or `x` itself. Declaring the type settles it.
+fn optional_already(d: &mut MappedDiag, lines: &[&str]) {
+    let ty = d.notes.iter().find_map(|n| between(n, "Option<_>: From<Option<", ">>`")).map(|t| format!("{}?", t));
+    rewrite(d, "Oxie can't tell whether this value is optional already".to_string());
+    d.notes.clear();
+    d.suggestions.clear();
+    d.notes.push(help(
+        "next to `null` (`if (c) x else null`) a value becomes optional, but this one comes from Rust, where Oxie doesn't see its type, and may be optional already. Declare the variable's type.",
+    ));
+    let line = lines.get(d.line as usize).copied().unwrap_or("");
+    let (Some(ty), Some(at)) = (ty, line.find("val ")) else { return };
+    let name: String = line[at + 4..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    if name.is_empty() || line[at + 4 + name.len()..].trim_start().starts_with(':') {
+        return;
+    }
+    let col = line[..at + 4 + name.len()].chars().count() as u32;
+    d.fixes.push(Fix { title: format!("declare `{}` as `{}`", name, ty), edits: vec![edit(d.line, col, col, &format!(": {}", ty))] });
+}
+
 fn getter_call(d: &mut MappedDiag, lines: &[&str], name: &str) {
     refine(d, lines, name);
     let ty = ticks(&d.message).get(1).cloned().unwrap_or_default();
