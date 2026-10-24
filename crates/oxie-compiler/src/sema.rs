@@ -409,6 +409,13 @@ impl Crate {
             return None;
         }
         let owners = self.variant_owner.get(variant)?;
+        // a name the module imports from elsewhere (`import super::Redo`, a unit struct) is that one
+        if let Some(path) = module.and_then(|m| self.imports.get(&(m.to_vec(), variant.to_string()))) {
+            let owner = path.len().checked_sub(2).map(|i| &path[i]);
+            if !owners.iter().any(|(_, n)| Some(n) == owner) {
+                return None;
+            }
+        }
         let enum_of = |(m, n): &(Vec<String>, String)| if self.same_named.contains(n) { self.enums.get(&scoped_key(m, n)) } else { self.enum_(n) };
         if owners.len() == 1 {
             return enum_of(&owners[0]);

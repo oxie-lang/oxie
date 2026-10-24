@@ -1,0 +1,39 @@
+// A name a module imports is that one, even where an enum of the crate has a variant with the
+// name; a variant imported through its enum stays the variant.
+enum Icon { Redo, Undo, Again }
+
+mod actions {
+    data class Redo(times: u32)
+    class Undo
+
+    rust {
+        /// A unit struct, as `actions!` declares them.
+        #[derive(Debug)]
+        pub struct Again;
+    }
+}
+
+mod editor {
+    import super::actions::{Again, Redo, Undo}
+    import super::Icon
+
+    fun redo(r: &Redo): String = "redo ${r.times}"
+    fun undo(_: &Undo): String = "undo"
+    fun icon(): Icon = Icon.Redo
+    fun again(): String = describe(&Again)
+    fun describe(a: &Again): String = "${a:?}"
+}
+
+mod toolbar {
+    import super::Icon::Undo
+
+    fun first(): super::Icon = Undo
+}
+
+fun main() {
+    println(editor.redo(&actions.Redo(2)))
+    println(editor.undo(&actions.Undo()))
+    println(editor.again())
+    println(match (editor.icon()) { Icon.Redo -> "redo icon", else -> "another icon" })
+    println(match (toolbar.first()) { Icon.Undo -> "undo icon", else -> "another icon" })
+}
