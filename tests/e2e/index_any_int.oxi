@@ -1,0 +1,14 @@
+// A list, array or slice indexed with any integer type: `as usize`
+fun pick(xs: &[String], i: i32): &String = &xs[i]
+fun main() {
+    val xs = vec[10, 20, 30]
+    val i: i32 = 1
+    var grid = vec[vec[0; 3]; 2]
+    val r: i64 = 1
+    grid[r][i + 1] = 7
+    val arr = [5, 6]
+    val k: u8 = 0
+    println("${xs[i]} ${xs[i - 1]} ${grid:?} ${arr[k]} ${xs[2]} ${pick(&vec["a".to_string(), "b".to_string()], 1)}")
+    val n: usize = 0
+    println(xs[n])
+}

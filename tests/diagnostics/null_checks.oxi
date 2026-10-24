@@ -1,20 +1,16 @@
-// Kotlin's `!= null` and `== null` checks don't unwrap a `T?`: the error says how to.
+// A null check unwraps local variables and parameters; a field gets an error that says how to
+// unwrap it.
+
 data class User(name: String, email: String?)
 
-fun size(s: String?): usize {
-    if (s == null) return 0
-    return s.len() // error: 6: fix: unwrap `s` (`?: return`): `val s = s ?: return 0`
-}
-
 fun main() {
-    val name: String? = "x".to_string()
-    if (name != null) println(name.trim()) // error: 11: fix: unwrap `name` (`val name = &name`): `if (val name = &name) println(name.trim())`
     val u = User("a", null)
-    if (u.email != null) println(u.email.to_uppercase()) // error: 13: fix: unwrap `u.email` (`val email = &u.email`): `if (val email = &u.email) println(email.to_uppercase())`
-    println("${size(name)} ${u:?}")
+    if (u.email != null) println(u.email.to_uppercase()) // error: 8: fix: unwrap `u.email` (`val email = &u.email`): `if (val email = &u.email) println(email.to_uppercase())`
+    if (u.email == null) return
+    println(u.email.len()) // error: 10: a null check unwraps only local variables and parameters
 }
 
 fun twice(name: String?) {
     if (val n = name) println(n.len())
-    println("${name:?}") // error: 19: fix: unwrap a reference (`&name`): `if (val n = &name) println(n.len())`
+    println("${name:?}") // error: 15: fix: unwrap a reference (`&name`): `if (val n = &name) println(n.len())`
 }

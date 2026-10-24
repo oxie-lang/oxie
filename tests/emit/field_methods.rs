@@ -37,7 +37,7 @@ impl Inventory {
 
     pub(crate) fn scan(&mut self) {
         for item in &self.items {
-            Self::note(&item, &mut self.count, self.limit, &self.prefix);
+            Self::note(item, &mut self.count, self.limit, &self.prefix);
         }
         self.reset();
     }

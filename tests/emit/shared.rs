@@ -50,17 +50,17 @@ impl Account {
 
     #[allow(dead_code)]
     pub(crate) fn balance(&self) -> i64 {
-        ::std::clone::Clone::clone(&self.0.borrow().balance)
+        ::std::clone::Clone::clone(&self.0.read().balance)
     }
 
     #[allow(dead_code)]
     pub(crate) fn set_balance(&self, value: i64) {
-        self.0.borrow_mut().balance = value;
+        self.0.write().balance = value;
     }
 
     #[allow(dead_code)]
     pub(crate) fn deposit(&self, n: i64) {
-        self.0.borrow_mut().deposit(n)
+        self.0.write().deposit(n)
     }
 
 }
@@ -69,6 +69,6 @@ fn main() {
     let a = Account::new(10);
     let b = a.clone();
     b.deposit(5);
-    { let __value = 1; a.0.borrow_mut().balance += __value; };
+    { let __value = 1; a.0.write().balance += __value; };
     println!("{}", a.balance());
 }

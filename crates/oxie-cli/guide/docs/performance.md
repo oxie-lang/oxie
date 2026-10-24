@@ -18,6 +18,11 @@ Rust: the Oxie compiler produces ordinary Rust source, and `rustc`/LLVM compile 
 * **Allocation only where you'd allocate anyway.** The implicit conversions Oxie adds where Rust
   would reject the code (a `&str` passed as a `String`, a lambda stored in a field) allocate
   exactly like the `.to_string()` / `Box::new` you would otherwise write.
+* **Shared objects cost what they say.** A `shared class` is an `Rc<RefCell<..>>` (`@sync`:
+  `Arc<Mutex<..>>`) handle, so each method call or field access checks its borrow (or takes the
+  lock, and notes it so that a method reaching its own object again panics instead of
+  deadlocking). Reading a whole field from outside (`val h = a.history`) copies it;
+  `a.history.len()` reads it in place.
 * **Optimizer-friendly defaults.** Declarations are `pub(crate)` unless marked `pub`, so the
   compiler can inline and specialize them as freely as private Rust functions.
 

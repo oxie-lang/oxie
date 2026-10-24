@@ -310,8 +310,10 @@ fun main() {
 * Reading a whole field (`val h = a.history`) copies it; `a.history.len()` and
   `a.history.push(x)` work on the object itself.
 * Each method call borrows the object once for the whole call, so methods can call each
-  other freely. A method that reaches the *same* object again through another handle (a node
-  whose `next` is itself) panics with "already borrowed" instead of corrupting memory.
+  other freely, and `this` passed from a method (`child.parent = this`) is a handle to the
+  object. A method that reaches the *same* object again through another handle while it runs
+  (a node whose `next` is itself, a callback that reads it) panics at that line with an
+  explanation, instead of corrupting memory or, for `@sync`, waiting forever.
 
 A lambda that should keep its own handle lists it in a *capture list*: `{ [hits] -> ... }`
 clones the handle into the lambda (and makes it `move`), which is how threads and callbacks get

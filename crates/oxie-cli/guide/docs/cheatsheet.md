@@ -15,7 +15,7 @@ compiles to Rust. This page maps what you know to Oxie, and lists the Rust ideas
 | nullable | `String?` | `string \| null` | `String?` |
 | safe call / default | `a?.b ?: c` | `a?.b ?? c` | `a?.b ?: c` |
 | non-null assert | `a!!` | `a!` | `a!!` |
-| smart cast | `if (a != null) a.b` | `if (a) a.b` | `if (val a = a) a.b` |
+| smart cast | `if (a != null) a.b` | `if (a) a.b` | `if (a != null) a.b` (locals and parameters), `if (val a = a) a.b` |
 | class | `class P(val x: Int)` | `class P { constructor(public x: number) {} }` | `class P(x: i32)` |
 | data class | `data class P(val x: Int)` | — | `data class P(x: i32)` |
 | copy | `p.copy(x = 1)` | `{ ...p, x: 1 }` | `p.copy(x = 1)` |

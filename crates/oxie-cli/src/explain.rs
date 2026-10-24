@@ -1157,10 +1157,11 @@ fn is_optional_receiver(d: &MappedDiag) -> bool {
     d.message.contains("`Option<") || d.notes.iter().any(|n| n.contains("Option::expect"))
 }
 
-/// Explains a method of `T` called on a `T?`. Kotlin's smart casts don't exist, so a value
-/// checked with `!= null` (or `== null` and `return`) is still optional: bind it with
-/// `if (val x = x)` or `val x = x ?: return`, or call through `?.`. rustc's `.expect("REASON")`
-/// would panic, and take the value.
+/// Explains a method of `T` called on a `T?`. A null check unwraps a local variable or
+/// parameter whose type Oxie knows, not a field: such a value checked with `!= null` (or
+/// `== null` and `return`) is still optional, so bind it with `if (val x = &x)` or
+/// `val x = x ?: return`, or call through `?.`. rustc's `.expect("REASON")` would panic, and take
+/// the value.
 fn optional_receiver(d: &mut MappedDiag, lines: &[&str], method: &str) {
     refine(d, lines, method);
     let line = lines.get(d.line as usize).copied().unwrap_or("");
@@ -1184,7 +1185,8 @@ fn optional_receiver(d: &mut MappedDiag, lines: &[&str], method: &str) {
             // borrowed when the value is used after the check, so it stays usable
             let later = lines.iter().skip(l as usize + 1).take_while(|t| find_word(t, "fun", 0).is_none()).any(|t| find_word(t, &short, 0).is_some() || t.contains(&recv));
             let bound = format!("val {} = {}{}", short, if later || !plain { "&" } else { "" }, recv);
-            d.notes.push(help(&format!("`{}` checks the value but doesn't unwrap it: Oxie has no smart casts. Unwrap it in the condition instead: `if ({})`{}.", checked, bound, if plain { String::new() } else { format!(", and use `{}`", short) })));
+            let why = if plain { format!("Oxie couldn't tell the type of `{}` here, so `{}` didn't unwrap it", recv, checked) } else { format!("`{}` checks a field, and a null check unwraps only local variables and parameters", checked) };
+            d.notes.push(help(&format!("{}. Unwrap it in the condition instead: `if ({})`{}.", why, bound, if plain { String::new() } else { format!(", and use `{}`", short) })));
             let col = text[..at + 4].chars().count() as u32;
             let mut edits = vec![edit(l, col, col + checked.chars().count() as u32, &bound)];
             // a field is renamed in the uses on the same line (`u.email` becomes `email`)
@@ -1207,7 +1209,8 @@ fn optional_receiver(d: &mut MappedDiag, lines: &[&str], method: &str) {
         if let Some(at) = text.find(&early) {
             let exit = text[at + early.len()..].trim_end();
             if ["return", "throw", "continue", "break"].iter().any(|k| exit.starts_with(k)) && !exit.contains("//") {
-                d.notes.push(help(&format!("after `if ({} == null) {}`, `{}` is still optional: Oxie has no smart casts. Unwrap it instead: `val {} = {} ?: {}`.", recv, exit, recv, short, recv, exit)));
+                let why = if plain { format!("Oxie couldn't tell the type of `{}` here", recv) } else { "a null check unwraps only local variables and parameters".to_string() };
+                d.notes.push(help(&format!("after `if ({} == null) {}`, `{}` is still optional ({}). Unwrap it instead: `val {} = {} ?: {}`.", recv, exit, recv, why, short, recv, exit)));
                 if plain {
                     let col = text[..at].chars().count() as u32;
                     let end = text.trim_end().chars().count() as u32;

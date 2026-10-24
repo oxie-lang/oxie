@@ -49,7 +49,7 @@ impl Inventory {
         // field_methods.oxi:20
         for item in &self.items /* oxie: &items because `items` belongs to `this` */ {
             // field_methods.oxi:21
-            Self::note(&item /* oxie: & because the parameter is `&str` */, &mut self.count /* oxie: &mut because the parameter is `&mut i32` */, self.limit, &self.prefix /* oxie: & because the parameter is `&str` */);
+            Self::note(item, &mut self.count /* oxie: &mut because the parameter is `&mut i32` */, self.limit, &self.prefix /* oxie: & because the parameter is `&str` */);
         }
         // field_methods.oxi:23
         self.reset();

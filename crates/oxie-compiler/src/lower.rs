@@ -264,6 +264,18 @@ pub struct Lowerer<'a> {
     /// Span starts of `for` iterables that are used again after the loop, with the start of
     /// that use (none when a loop around it runs again; see `visit::reused_loop_iters`).
     pub(crate) reused_iters: HashMap<u32, Option<u32>>,
+    /// Variables a null check in the `if` being lowered unwraps, with their value types.
+    pub(crate) narrowed_types: Vec<(String, Type)>,
+    /// Methods of the shared class being lowered that use `this` as a value, or call one that
+    /// does: their data methods take the handle as `__this` (see `shared.rs`).
+    pub(crate) needs_this: HashSet<String>,
+    /// While lowering such a method: the span starts of the `this` used as receivers, which
+    /// stay `self`; any other `this` is `__this.clone()`.
+    pub(crate) this_recv: Option<HashSet<u32>>,
+    /// A parameter `write_params` adds after the declared ones.
+    pub(crate) extra_param: Option<String>,
+    /// The handle type (`Counter<T>`) of the shared class being lowered.
+    pub(crate) shared_handle_ty: Option<String>,
     /// Lowering a method that takes `self` by value, so its fields can be moved out.
     pub(crate) self_by_value: bool,
     /// The next statement has attributes (`@cfg(test)`), which must cover all of it, so its
@@ -339,6 +351,11 @@ impl<'a> Lowerer<'a> {
             lambda_params: Vec::new(),
             next_lambda_refs: false,
             reused_iters: HashMap::new(),
+            narrowed_types: Vec::new(),
+            needs_this: HashSet::new(),
+            this_recv: None,
+            extra_param: None,
+            shared_handle_ty: None,
             self_by_value: false,
             keep_args: false,
             param_notes: HashMap::new(),
@@ -1310,6 +1327,12 @@ impl<'a> Lowerer<'a> {
                 self.e.decide(f.params[index].span, chosen, why, cause);
             }
         }
+        if let Some(extra) = self.extra_param.take() {
+            if !parts.is_empty() {
+                self.e.w(", ");
+            }
+            self.e.w(&extra);
+        }
         self.e.w(")");
     }
 
@@ -1591,6 +1614,19 @@ impl<'a> Lowerer<'a> {
         let ret = self.ret_type(f, TyPos::Ret);
         let wc = self.where_clause(&f.generics);
         let name = rename.map(|s| s.to_string()).unwrap_or_else(|| esc(&f.name));
+        // a shared class's method that passes `this` on gets the handle
+        let this_handle = (recv != Recv::Static && !f.mods.is_override && self.needs_this.contains(&f.name)).then(|| self.shared_handle_ty.clone()).flatten();
+        let saved_this = self.this_recv.take();
+        if let (Some(h), Some(body)) = (&this_handle, &f.body) {
+            self.extra_param = Some(format!("__this: &{}", h));
+            self.this_recv = Some(visit::this_uses(body).1);
+        }
+        // an interface method's signature is the interface's, so it can't take the handle
+        if let (Some(_), true, Some(body)) = (&self.shared_handle_ty, f.mods.is_override, &f.body) {
+            if !visit::this_uses(body).0.is_empty() {
+                self.error(f.name_span, format!("`{}` implements an interface method, so it can't pass `this` on: the interface's signature has no place for the object's handle. Let the caller pass the object in as a parameter instead", f.name));
+            }
+        }
         self.e.w(&format!("{}{}fn {}{}", vis, header, name, g));
         self.write_params(f, &params, recv_why);
         if let Some(r) = &ret {
@@ -1610,6 +1646,7 @@ impl<'a> Lowerer<'a> {
             }
             None => self.e.w(";"),
         }
+        self.this_recv = saved_this;
         if let (Some(c), Some(s)) = (self.class.as_mut(), saved_static) {
             c.is_static = s;
         }
@@ -1728,6 +1765,11 @@ impl<'a> Lowerer<'a> {
         }
 
         let saved_class = self.class.take();
+        let saved_this = (std::mem::take(&mut self.needs_this), self.shared_handle_ty.take());
+        if t.shared {
+            self.needs_this = needs_this(t);
+            self.shared_handle_ty = Some(format!("{}{}", t.name, gn));
+        }
         self.class = Some(self.class_ctx_for(&t.name, &t.fields, &t.supertypes));
         if let Some(c) = self.class.as_mut() {
             c.generics = t.generics.params.clone();
@@ -1796,6 +1838,7 @@ impl<'a> Lowerer<'a> {
             self.shared_handle(it, t, &fields, &statics, &forwarded, &derives, &g, &gn, &wc);
         }
         self.class = saved_class;
+        (self.needs_this, self.shared_handle_ty) = saved_this;
         self.members_pub = saved_members_pub;
         // nested classes, enums and interfaces live next to their outer class
         for m in nested {
@@ -2732,3 +2775,26 @@ fn rewrite_positional(e: &Expr) -> Expr {
     e
 }
 
+
+/// The methods of a shared class that use `this` as a value, or call (on `this`) one that does:
+/// their data methods take the handle (`__this`), since the data alone isn't the object.
+fn needs_this(t: &TypeDecl) -> HashSet<String> {
+    let methods: Vec<&FunDecl> = t
+        .members
+        .iter()
+        .filter_map(|m| if let ItemKind::Fun(f) = &m.kind { Some(f) } else { None })
+        .filter(|f| !f.mods.is_static && !f.mods.is_override && !f.mods.is_operator && f.body.is_some())
+        .collect();
+    let mut out: HashSet<String> = methods.iter().filter(|f| !visit::this_uses(f.body.as_ref().unwrap()).0.is_empty()).map(|f| f.name.clone()).collect();
+    loop {
+        let before = out.len();
+        for f in &methods {
+            if !out.contains(&f.name) && visit::own_calls(f.body.as_ref().unwrap()).iter().any(|c| out.contains(c)) {
+                out.insert(f.name.clone());
+            }
+        }
+        if out.len() == before {
+            return out;
+        }
+    }
+}

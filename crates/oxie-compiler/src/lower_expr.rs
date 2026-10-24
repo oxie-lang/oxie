@@ -589,6 +589,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn stmt_expr_here(&mut self, e: &Expr) -> bool {
+        if self.narrowing_exit(e) {
+            return true;
+        }
         match &e.kind {
             ExprKind::If { cond, then, else_ } => {
                 self.if_expr(cond, then, else_.as_deref(), None);
@@ -1246,6 +1249,8 @@ impl<'a> Lowerer<'a> {
                 let s = self.ty(t, TyPos::Plain);
                 self.e.w(&s);
             }
+            // in a shared class's method that passes `this` on, `this` as a value is the handle
+            SelfValue if self.this_recv.as_ref().is_some_and(|r| !r.contains(&e.span.start)) => self.e.w("__this.clone()"),
             SelfValue => {
                 let n = self.class.as_ref().map(|c| c.self_name.clone()).unwrap_or_else(|| "self".into());
                 self.e.w(&n);
@@ -1343,7 +1348,15 @@ impl<'a> Lowerer<'a> {
             Index(r, i) => {
                 self.expr(r, P_POSTFIX);
                 self.e.w("[");
-                self.expr(i, P_LOWEST);
+                // a list indexed with another integer type: `as usize` costs nothing, and a
+                // negative index fails the bounds check like one past the end
+                if self.int_index(r, i) {
+                    self.expr(i, P_CAST);
+                    self.e.w(" as usize");
+                    self.e.decide(i.span, "as usize", "indexes are `usize`", None);
+                } else {
+                    self.expr(i, P_LOWEST);
+                }
                 self.e.w("]");
             }
             Try(x) => {
@@ -1572,7 +1585,15 @@ impl<'a> Lowerer<'a> {
                 }
                 self.e.w(" ");
                 self.push_scope();
-                self.bind_pat(pat, None);
+                // the loop variable has the element type: a reference when the loop borrows
+                let elem = match (pat, borrows) {
+                    (Pat::Ident { by_ref: false, sub: None, .. }, Some(copy)) => {
+                        self.elem_type(iter).map(|t| if copy && !writes_elements { t } else { Type::Ref { lifetime: None, mutable: writes_elements, inner: Box::new(t) } })
+                    }
+                    (Pat::Ident { by_ref: false, sub: None, .. }, None) if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
+                    _ => None,
+                };
+                self.bind_pat(pat, elem);
                 if let Some((name, t)) = boxed {
                     self.bind_name(&name, Some(t));
                 }
@@ -1884,6 +1905,13 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&p);
                 }
                 self.bind_pat(pat, None);
+                // a variable a null check unwrapped keeps its type (`narrow_cond`)
+                if let Pat::Ident { name, .. } = pat {
+                    if let Some(i) = self.narrowed_types.iter().position(|(n, _)| n == name) {
+                        let (n, t) = self.narrowed_types.remove(i);
+                        self.bind_name(&n, Some(t));
+                    }
+                }
                 for (i, c) in parts[1..end].iter().enumerate() {
                     self.e.w(if i == 0 { " if " } else { " && " });
                     if let Cond::Expr(x) = c {
@@ -1956,6 +1984,91 @@ impl<'a> Lowerer<'a> {
                 }
             },
         }
+    }
+
+    /// `if (x != null)` (alone or in an `&&` chain) on a local `T?` that the branch doesn't
+    /// assign: `if let Some(x) = &x`, so `x` is the value in the branch. A `Copy` value is
+    /// bound as it is, one the branch changes through `&mut x`. Returns the new condition and
+    /// the types of the unwrapped names.
+    fn narrow_cond(&self, cond: &Cond, then: &Block) -> (Option<Cond>, Vec<(String, Type)>) {
+        let Cond::Expr(e) = cond else { return (None, Vec::new()) };
+        let mut parts = Vec::new();
+        and_operands(e, &mut parts);
+        let mut typed = Vec::new();
+        let mut out = Vec::new();
+        for p in parts {
+            match self.null_check(p, BinOp::Ne).and_then(|x| self.narrowable(x, then).map(|t| (x, t))) {
+                Some((x, inner)) => {
+                    let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+                    let by_value = crate::sema::is_copy_simple(&inner, &copy);
+                    let mutable = !by_value && visit::writes_through(then, x);
+                    let var = Expr::new(ExprKind::Path { segs: vec![x.to_string()], generics: None, global: false }, p.span);
+                    let expr = if by_value { var } else { Expr::new(ExprKind::Unary(if mutable { UnOp::RefMut } else { UnOp::Ref }, Box::new(var)), p.span) };
+                    let ty = if by_value { inner } else { Type::Ref { lifetime: None, mutable, inner: Box::new(inner) } };
+                    typed.push((x.to_string(), ty));
+                    out.push(Cond::Let { pat: Pat::Ident { name: x.to_string(), by_ref: false, mutable: false, sub: None, span: p.span }, expr, implicit_some: true });
+                }
+                None => out.push(Cond::Expr(p.clone())),
+            }
+        }
+        if typed.is_empty() {
+            return (None, Vec::new());
+        }
+        let cond = if out.len() == 1 { out.pop().unwrap() } else { Cond::Chain(out) };
+        (Some(cond), typed)
+    }
+
+    /// `x == null` / `null == x` (or `!=`), for a variable `x`: its name.
+    fn null_check<'e>(&self, e: &'e Expr, op: BinOp) -> Option<&'e str> {
+        let ExprKind::Binary(o, l, r) = &strip_paren(e).kind else { return None };
+        if *o != op {
+            return None;
+        }
+        match (&l.kind, &r.kind) {
+            (_, ExprKind::Null) => l.ident(),
+            (ExprKind::Null, _) => r.ident(),
+            _ => None,
+        }
+    }
+
+    /// The value type of a local `T?` named `x` that `body` doesn't assign, so a null check can
+    /// unwrap it.
+    fn narrowable(&self, x: &str, body: &Block) -> Option<Type> {
+        let t = self.local(x)?.clone()?;
+        let inner = match t {
+            Type::Option(inner) => *inner,
+            Type::Path { ref segs, .. } if segs.len() == 1 && segs[0].name == "Option" => match segs[0].generics.as_deref() {
+                Some([GenericArg::Type(inner)]) => inner.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let mut assigned = false;
+        visit::walk_block(body, &mut |e| {
+            if let ExprKind::Assign(_, place, _) = &e.kind {
+                assigned |= place.ident() == Some(x);
+            }
+            !assigned
+        });
+        (!assigned).then_some(inner)
+    }
+
+    /// `if (x == null) return` (or `throw`, `continue`, `break`) on a local `T?`: `x` is the
+    /// value after it, `let Some(x) = x else { return };`. Returns false if `e` isn't one.
+    fn narrowing_exit(&mut self, e: &Expr) -> bool {
+        let ExprKind::If { cond, then, else_: None } = &e.kind else { return false };
+        let Cond::Expr(c) = &**cond else { return false };
+        let Some(x) = self.null_check(c, BinOp::Eq) else { return false };
+        let exits = matches!(then.stmts.last(), Some(Stmt::Expr { expr, .. }) if expr.diverges());
+        let empty = Block { stmts: Vec::new(), span: then.span };
+        let Some(inner) = self.narrowable(x, &empty).filter(|_| exits) else { return false };
+        let x = x.to_string();
+        self.e.w(&format!("let Some({}) = {} else ", esc(&x), esc(&x)));
+        self.block_stmt(then);
+        self.e.w(";");
+        self.e.decide(c.span, format!("let Some({}) = {} else", x, x), format!("`{}` is not null after this line", x), None);
+        self.bind_name(&x, Some(inner));
+        true
     }
 
     fn cond(&mut self, c: &Cond) {
@@ -2146,6 +2259,13 @@ impl<'a> Lowerer<'a> {
     }
 
     /// The element type of a list, array or slice expression.
+    /// `xs[i]` on a list, array or slice with `i` of an integer type other than `usize`.
+    fn int_index(&self, coll: &Expr, i: &Expr) -> bool {
+        let Some(t) = self.infer_type(i) else { return false };
+        let int = matches!(t.single_name(), Some("i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "Int" | "Long" | "Short" | "Byte"));
+        int && !matches!(i.kind, ExprKind::Int(_)) && self.elem_type(coll).is_some()
+    }
+
     fn elem_type(&self, coll: &Expr) -> Option<Type> {
         let mut t = self.infer_type(coll)?;
         while let Type::Ref { inner, .. } = t {
@@ -2254,8 +2374,8 @@ impl<'a> Lowerer<'a> {
                         } else {
                             self.e.w(&esc(&name));
                         }
-                        let params = m.params.clone();
-                        self.arg_list(args, Some(&params), TyPos::Param, span);
+                        let (args, params) = self.with_this(&name, args, &m.params, span);
+                        self.arg_list(&args, Some(&params), TyPos::Param, span);
                         return;
                     }
                 }
@@ -2467,6 +2587,20 @@ impl<'a> Lowerer<'a> {
             }
         }
         slots
+    }
+
+    /// The arguments and parameters of a call to a method of this shared class that takes the
+    /// handle (`needs_this`): `__this` passed on. Only such methods have it to pass.
+    fn with_this(&mut self, name: &str, args: &[Arg], params: &[ParamInfo], span: Span) -> (Vec<Arg>, Vec<ParamInfo>) {
+        let (mut args, mut params) = (args.to_vec(), params.to_vec());
+        if self.needs_this.contains(name) {
+            if self.this_recv.is_none() {
+                self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
+            }
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, generics: Vec::new() });
+            args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span) });
+        }
+        (args, params)
     }
 
     fn arg_list(&mut self, args: &[Arg], params: Option<&[ParamInfo]>, pos: TyPos, span: Span) {
@@ -2790,8 +2924,8 @@ impl<'a> Lowerer<'a> {
                 if let Some(m) = c.methods.get(name) {
                     self.expr(recv, P_POSTFIX);
                     self.e.w(&format!(".{}", esc(name)));
-                    let params = m.params.clone();
-                    self.arg_list(args, Some(&params), TyPos::Param, span);
+                    let (args, params) = self.with_this(name, args, &m.params, span);
+                    self.arg_list(&args, Some(&params), TyPos::Param, span);
                     return;
                 }
                 if matches!(c.fields.get(name), Some(Type::Fn { .. })) {
@@ -2964,7 +3098,7 @@ impl<'a> Lowerer<'a> {
 
     /// Emits the links of a `?.` segment after its value. A shared object's field is read as
     /// outside `?.`: through the getter, a copy (`v.name()`), at the end, and through one borrow
-    /// inside (`v.0.borrow().items.len()`).
+    /// inside (`v.0.read().items.len()`).
     fn segment_links(&mut self, seg: &[&Expr]) {
         for (i, l) in seg.iter().enumerate() {
             let shared = match &l.kind {
@@ -2973,9 +3107,9 @@ impl<'a> Lowerer<'a> {
             };
             match shared {
                 Some((name, _)) if i == seg.len() - 1 => self.e.w(&format!(".{}()", member(name))),
-                Some((name, sync)) => {
+                Some((name, _)) => {
                     let write = matches!(&seg[i + 1].kind, ExprKind::MethodCall { name, .. } if crate::sema::MUTATING_METHODS.contains(&name.as_str()));
-                    let access = if sync { "lock().unwrap()" } else if write { "borrow_mut()" } else { "borrow()" };
+                    let access = if write { "write()" } else { "read()" };
                     self.e.w(&format!(".0.{}.{}", access, member(name)));
                 }
                 None => self.link_suffix(l),
@@ -3399,13 +3533,21 @@ impl<'a> Lowerer<'a> {
 
     /// `mode`: None = statement, Some(target) = value.
     fn if_expr(&mut self, cond: &Cond, then: &Block, else_: Option<&Expr>, mode: Option<&Target>) {
+        // `x != null` unwraps `x` in the branch
+        let (narrowed, typed) = self.narrow_cond(cond, then);
+        let cond = narrowed.as_ref().unwrap_or(cond);
         if let Cond::Chain(parts) = cond {
+            let saved = std::mem::replace(&mut self.narrowed_types, typed);
             self.let_chain(parts, then, else_, mode);
+            self.narrowed_types = saved;
             return;
         }
         self.e.w("if ");
         self.push_scope();
         self.cond(cond);
+        for (name, t) in typed {
+            self.bind_name(&name, Some(t));
+        }
         self.e.w(" ");
         match mode {
             Some(t) => self.block_value(then, t),
@@ -3994,6 +4136,17 @@ fn contains_struct_lit(e: &Expr) -> bool {
         !found
     });
     found
+}
+
+/// The operands of an `&&` chain, left to right.
+fn and_operands<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Binary(BinOp::And, l, r) => {
+            and_operands(l, out);
+            and_operands(r, out);
+        }
+        _ => out.push(e),
+    }
 }
 
 fn concat_operands<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {

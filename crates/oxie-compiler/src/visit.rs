@@ -457,6 +457,47 @@ pub fn writes_through(body: &Block, name: &str) -> bool {
     found
 }
 
+/// The `this` of a method body used as a value (`listeners.push(this)`, `l.saw(this)`), not as
+/// the receiver of a field, method or index: their span starts, and those of the receivers.
+pub fn this_uses(b: &FunBody) -> (Vec<u32>, std::collections::HashSet<u32>) {
+    let mut all = Vec::new();
+    let mut recv = std::collections::HashSet::new();
+    let mut f = |e: &Expr| {
+        match &e.kind {
+            ExprKind::SelfValue => all.push(e.span.start),
+            ExprKind::Field { recv: r, .. } | ExprKind::MethodCall { recv: r, .. } | ExprKind::Index(r, _) if matches!(r.kind, ExprKind::SelfValue) => {
+                recv.insert(r.span.start);
+            }
+            _ => {}
+        }
+        true
+    };
+    match b {
+        FunBody::Block(b) => walk_block(b, &mut f),
+        FunBody::Expr(e) => walk_expr(e, &mut f),
+    }
+    let values = all.into_iter().filter(|s| !recv.contains(s)).collect();
+    (values, recv)
+}
+
+/// The names of the methods a body calls on `this`: `name(..)` and `this.name(..)`.
+pub fn own_calls(b: &FunBody) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut f = |e: &Expr| {
+        match &e.kind {
+            ExprKind::Call { callee, .. } => out.extend(callee.ident().map(str::to_string)),
+            ExprKind::MethodCall { recv, name, .. } if matches!(recv.kind, ExprKind::SelfValue) => out.push(name.clone()),
+            _ => {}
+        }
+        true
+    };
+    match b {
+        FunBody::Block(b) => walk_block(b, &mut f),
+        FunBody::Expr(e) => walk_expr(e, &mut f),
+    }
+    out
+}
+
 /// Identifiers referenced anywhere in an expression (for error message templates).
 pub fn idents_in(e: &Expr, out: &mut Vec<String>) {
     walk_expr(e, &mut |x| {

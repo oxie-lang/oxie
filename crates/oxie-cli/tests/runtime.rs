@@ -60,3 +60,25 @@ fn failed_tests_point_at_the_oxi_source() {
     assert!(stdout.contains("panicked at failing.oxi:4:5:"), "{stdout}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A method of a shared object that reaches the same object through another handle panics with
+/// an explanation at that line; an `@sync` one panics too instead of waiting for its own lock.
+#[test]
+fn shared_objects_reached_again_explain_the_panic() {
+    let src = "shared class Node(var v: i32 = 0) {\n    fun copy_from(o: Node) { v = o.v }\n}\n\nfun main() {\n    val a = Node(1)\n    a.copy_from(a)\n}\n";
+    for (name, src) in [("aliased.oxi", src.to_string()), ("locked.oxi", src.replace("shared class", "@sync shared class"))] {
+        let dir = script(name, &src);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cmd = oxie();
+        cmd.args(["run", name]).current_dir(&dir);
+        std::thread::spawn(move || tx.send(cmd.output().unwrap()).unwrap());
+        // a deadlock would never finish
+        let out = rx.recv_timeout(std::time::Duration::from_secs(600)).expect("the program hangs");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(101), "{stderr}");
+        assert!(stderr.contains(&format!("panicked at {}:2:34:", name)), "{stderr}");
+        assert!(stderr.contains("this Node can't be"), "{stderr}");
+        assert!(stderr.contains("reached the same object again"), "{stderr}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

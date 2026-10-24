@@ -1,0 +1,33 @@
+// A null check unwraps a local variable or parameter: `if (x != null)` in the branch, `if (x == null) return` after it
+data class User(name: String, email: String?)
+fun size(s: String?): usize {
+    if (s == null) return 0
+    return s.len()
+}
+fun first_char(s: String?): char {
+    if (s == null) {
+        println("none")
+        return '-'
+    }
+    s.chars().next().unwrap_or('-')
+}
+fun add(n: i32?): i32 = if (n != null) n + 1 else 0
+fun main() {
+    val name: String? = "ada".to_string()
+    if (name != null) println(name.len())
+    if (name != null && name.len() > 2) println("long ${name.to_uppercase()}")
+    if (name != null) println(name.trim()) else println("none")
+    println("${name:?}")
+    var buf: String? = "x".to_string()
+    if (buf != null) buf.push_str("y")
+    println("${buf:?} ${size(name.clone())} ${size(null)} ${first_char(null)} ${add(Some(4))} ${add(null)}")
+    val u = User("a", null)
+    val e = u.email.clone()
+    if (e == null) println("no email")
+    for (i in 0 until 3) {
+        val v: i32? = if (i == 1) null else Some(i)
+        if (v == null) continue
+        print("${v * 10} ")
+    }
+    println()
+}

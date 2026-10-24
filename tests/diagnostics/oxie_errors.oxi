@@ -15,3 +15,11 @@ fun main() {
     }
     println("$n ${make()()}")
 }
+
+interface Listener { fun register(list: &mut Vec<Watcher>) }
+shared class Watcher : Listener {
+    override fun register(list: &mut Vec<Watcher>) {
+        list.push(this)
+    }
+}
+// error: 21: `register` implements an interface method, so it can't pass `this` on

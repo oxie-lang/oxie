@@ -10,8 +10,8 @@
 //! pub(crate) struct Account(pub(crate) Rc<RefCell<AccountData>>);   // Arc<Mutex<..>> with @sync
 //! impl Account {
 //!     fn new(balance: i64) -> Self { .. }                 // same constructor
-//!     fn deposit(&self, n: i64) { self.0.borrow_mut().deposit(n) }   // one borrow per call
-//!     fn balance(&self) -> i64 { self.0.borrow().balance.clone() }   // getter
+//!     fn deposit(&self, n: i64) { self.0.write().deposit(n) }   // one borrow per call
+//!     fn balance(&self) -> i64 { self.0.read().balance.clone() }   // getter
 //!     fn set_balance(&self, value: i64) { .. }                       // setter
 //! }
 //! ```
@@ -42,7 +42,8 @@ impl<'a> Lowerer<'a> {
             (format!("::std::rc::Rc<::std::cell::RefCell<{}>>", data), "::std::rc::Rc::new(::std::cell::RefCell::new(".to_string())
         };
         let ptr = if sync { "::std::sync::Arc" } else { "::std::rc::Rc" };
-        let (read, write) = if sync { ("lock().unwrap()", "lock().unwrap()") } else { ("borrow()", "borrow_mut()") };
+        // `read()` / `write()` (`__oxie::SharedCell`, `SharedLock`) explain a conflicting use
+        let (read, write) = ("read()", "write()");
 
         self.e.nl();
         self.docs(&it.docs);
@@ -106,7 +107,7 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("#[allow(dead_code)]\n{}fn {}(&self) -> {}{} {{\n    ::std::clone::Clone::clone(&self.0.{}.{})\n}}", fvis, name, fty, bound, read, name));
                 } else if !sync {
                     self.e.w(&format!(
-                        "#[allow(dead_code)]\n{}fn {}(&self) -> ::std::cell::Ref<'_, {}> {{\n    ::std::cell::Ref::map(self.0.borrow(), |d| &d.{})\n}}",
+                        "#[allow(dead_code)]\n{}fn {}(&self) -> ::std::cell::Ref<'_, {}> {{\n    ::std::cell::Ref::map(self.0.read(), |d| &d.{})\n}}",
                         fvis, name, fty, name
                     ));
                 }
@@ -172,7 +173,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `fn name(&self, a: A) -> R { self.0.borrow_mut().name(a) }`
+    /// `fn name(&self, a: A) -> R { self.0.write().name(a) }`
     fn forwarder(&mut self, it: &Item, f: &FunDecl, recv: Recv, vis: &str, read: &str, write: &str) {
         let trait_ret = self.pending_trait_ret.take();
         let f = &auto_lifetimes(&self.with_inferred_ret(f, trait_ret), true, &|n| self.k.type_lifetimes_in(n, &self.module));
@@ -193,7 +194,11 @@ impl<'a> Lowerer<'a> {
         let ret = self.ret_type(f, TyPos::Ret);
         self.pop_scope();
         let wc = self.where_clause(&f.generics);
-        let args: Vec<String> = f.params.iter().enumerate().map(|(i, p)| p.name().map(esc).unwrap_or_else(|| format!("__arg{}", i))).collect();
+        let mut args: Vec<String> = f.params.iter().enumerate().map(|(i, p)| p.name().map(esc).unwrap_or_else(|| format!("__arg{}", i))).collect();
+        // a method that passes `this` on gets the handle
+        if !f.mods.is_override && self.needs_this.contains(&f.name) {
+            args.push("self".into());
+        }
         let access = if recv == Recv::RefMut { write } else { read };
         self.e.w(&format!("#[allow(dead_code)]\n{}{}fn {}{}({})", vis, header, esc(&f.name), g, params));
         if let Some(r) = ret {
@@ -301,7 +306,7 @@ impl<'a> Lowerer<'a> {
         cheap(self.k, &t)
     }
 
-    /// Lowers `e` into a string (for building `obj.0.borrow().field` bases).
+    /// Lowers `e` into a string (for building `obj.0.read().field` bases).
     pub(crate) fn capture(&mut self, e: &Expr, prec: u8) -> String {
         let saved = std::mem::replace(&mut self.e, Emitter::new());
         self.expr(e, prec);
@@ -309,21 +314,21 @@ impl<'a> Lowerer<'a> {
         out.buf
     }
 
-    /// `obj.field` with the object borrowed: `obj.0.borrow().field` / `obj.0.borrow_mut().field`.
-    fn borrowed_field(&mut self, obj: &Expr, field: &str, sync: bool, write: bool) -> Expr {
+    /// `obj.field` with the object borrowed: `obj.0.read().field` / `obj.0.write().field`.
+    fn borrowed_field(&mut self, obj: &Expr, field: &str, write: bool) -> Expr {
         let o = self.capture(obj, P_POSTFIX);
         if !write && self.cheap_field(obj, field) {
             return Expr::new(ExprKind::Raw(format!("{}.{}()", o, esc(field))), obj.span);
         }
-        let access = if sync { "lock().unwrap()" } else if write { "borrow_mut()" } else { "borrow()" };
+        let access = if write { "write()" } else { "read()" };
         Expr::new(ExprKind::Raw(format!("{}.0.{}.{}", o, access, esc(field))), obj.span)
     }
 
     /// The `obj.field` at the bottom of a field/index/method chain, if `obj` is shared.
-    fn shared_base(&self, e: &Expr) -> Option<(Expr, String, bool)> {
+    fn shared_base(&self, e: &Expr) -> Option<(Expr, String)> {
         match &e.kind {
             ExprKind::Field { recv, name, safe: false } => match self.shared_field(recv, name) {
-                Some(sync) => Some(((**recv).clone(), name.clone(), sync)),
+                Some(_) => Some(((**recv).clone(), name.clone())),
                 None => self.shared_base(recv),
             },
             ExprKind::Index(r, _) | ExprKind::MethodCall { recv: r, safe: false, .. } => self.shared_base(r),
@@ -363,7 +368,9 @@ impl<'a> Lowerer<'a> {
                 let ExprKind::Field { recv: obj, name: field, safe: false } = &recv.kind else {
                     return self.chain_through_borrow(e, false);
                 };
-                let Some(sync) = self.shared_field(obj, field) else { return self.chain_through_borrow(e, false) };
+                if self.shared_field(obj, field).is_none() {
+                    return self.chain_through_borrow(e, false);
+                }
                 if !sema::MUTATING_METHODS.contains(&name.as_str()) {
                     return self.chain_through_borrow(e, false);
                 }
@@ -383,7 +390,7 @@ impl<'a> Lowerer<'a> {
                         new_args.push(Arg { name: a.name.clone(), value: Expr::new(ExprKind::Raw(v), a.value.span) });
                     }
                 }
-                let base = self.borrowed_field(obj, field, sync, true);
+                let base = self.borrowed_field(obj, field, true);
                 let call = Expr::new(ExprKind::MethodCall { recv: Box::new(base), name: name.clone(), generics: None, args: new_args, safe: false }, e.span);
                 if hoisted.is_empty() {
                     self.expr(&call, P_POSTFIX);
@@ -401,11 +408,11 @@ impl<'a> Lowerer<'a> {
     /// `obj.items.len()`, `obj.pos.x`, `obj.items[0]`: one borrow for the whole chain.
     fn chain_through_borrow(&mut self, e: &Expr, write: bool) -> bool {
         // only when the shared field is below the top of the chain
-        let Some((obj, field, sync)) = self.shared_base(e) else { return false };
+        let Some((obj, field)) = self.shared_base(e) else { return false };
         if matches!(&e.kind, ExprKind::Field { recv, name, .. } if self.shared_field(recv, name).is_some()) {
             return false;
         }
-        let base = self.borrowed_field(&obj, &field, sync, write);
+        let base = self.borrowed_field(&obj, &field, write);
         let rebased = self.rebase(e, &base);
         self.e.mark(e.span);
         self.expr_inner(&rebased);
@@ -429,8 +436,8 @@ impl<'a> Lowerer<'a> {
             }
         }
         // `obj.count += 1`, `obj.items[0] = v`: evaluate the value, then borrow mutably
-        let Some((obj, field, sync)) = self.shared_base(target) else { return false };
-        let base = self.borrowed_field(&obj, &field, sync, true);
+        let Some((obj, field)) = self.shared_base(target) else { return false };
+        let base = self.borrowed_field(&obj, &field, true);
         let place = self.rebase(target, &base);
         let v = self.capture(value, P_LOWEST);
         self.e.w(&format!("{{ let __value = {}; ", v));

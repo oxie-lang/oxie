@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+* A null check unwraps a local variable or parameter of type `T?`: in `if (x != null) { ... }`
+  (also in an `&&` chain) `x` is the value, and after `if (x == null) return` (or `throw`,
+  `continue`, `break`) it is the value for the rest of the block. Fields aren't unwrapped; their
+  error says how to unwrap them.
+* A `shared class` method can pass `this` on (`child.parent = this`, `bus.subscribe(this)`): it
+  is a handle to the object. Before, it was a Rust type error about the class's data.
+* A method of a shared object that reaches the same object again while it runs (a parameter
+  that is the object itself, a callback that reads it) panics at that line with an explanation
+  instead of "RefCell already mutably borrowed". An `@sync` object used that way panics too;
+  before, the program waited for its own lock forever.
+* A list, array or slice can be indexed with any integer type (`xs[i]` with an `i32` `i` is
+  `xs[i as usize]`).
+* A loop variable has the type of the list's elements, and a method called on a value of a known
+  class gives its declared type, so more of what depends on types works in loops and on such
+  values (arguments lent to `&` parameters, shared-object fields after `?.`, null checks).
+
 ## 0.2.0 - 2026-10-24
 
 Oxie 0.2.0 makes the compiler explain itself and removes more of the bookkeeping Rust asks for.

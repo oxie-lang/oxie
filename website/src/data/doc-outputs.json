@@ -171,8 +171,18 @@
   },
   {
     "file": "docs/reference.md",
+    "output": "root has 1 child\n",
+    "source": "shared class Node(name: String, var children: Vec<Node> = vec[], var parent: Node? = null) {\n    fun add(child: Node) {\n        child.parent = this          // the handle\n        children.push(child)\n    }\n}\n\nfun main() {\n    val root = Node(\"root\")\n    val leaf = Node(\"leaf\")\n    root.add(leaf.clone())\n    println(\"${leaf.parent?.name ?: \"-\"} has ${root.children.len()} child\")\n}\n"
+  },
+  {
+    "file": "docs/reference.md",
     "output": "Ada Lovelace, AdaLovelace, startLovelace, Ada Lovelace\n",
     "source": "fun main() {\n    val first = \"Ada\".to_string()\n    val last = \"Lovelace\".to_string()\n    val full = first + \" \" + last      // format!(\"{} {}\", first, last)\n    val joined = first + last          // format!(\"{}{}\", first, last)\n    var log = \"start\".to_string()\n    log += last                        // log += &last\n    println(\"$full, $joined, $log, $first $last\")\n}\n"
+  },
+  {
+    "file": "docs/reference.md",
+    "output": "hello ADA\na ?\n",
+    "source": "fun initial(name: String?): char {\n    if (name == null) return '?'\n    name.chars().next().unwrap_or('?')     // `name` is a String here\n}\n\nfun main() {\n    val nick: String? = \"ada\".to_string()\n    if (nick != null && nick.len() > 2) println(\"hello ${nick.to_uppercase()}\")\n    println(\"${initial(nick.clone())} ${initial(null)}\")\n}\n"
   },
   {
     "file": "docs/reference.md",

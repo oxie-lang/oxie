@@ -1,0 +1,42 @@
+// A shared class's method can pass `this` on: observers, registration, parent links
+shared class Logger(var lines: Vec<String> = vec[]) {
+    fun saw(name: &str, value: i32) {
+        lines.push("$name=$value")
+    }
+}
+
+shared class Counter(name: String, var n: i32 = 0, var listeners: Vec<Logger> = vec[]) {
+    fun bump() {
+        n += 1
+        notify()
+    }
+    fun notify() {
+        for (l in listeners) l.saw(name, n)
+    }
+    fun me(): Counter = this
+}
+
+shared class Node(name: String, var children: Vec<Node> = vec[], var parent: Node? = null) {
+    fun add(child: Node) {
+        child.parent = this
+        children.push(child)
+    }
+    fun adopt(name: String): Node {
+        val c = Node(name)
+        add(c.clone())
+        c
+    }
+}
+
+fun main() {
+    val log = Logger()
+    val c = Counter("clicks")
+    c.listeners.push(log.clone())
+    c.bump()
+    c.bump()
+    println(log.lines.join(", "))
+    println(c.me() == c)
+    val root = Node("root")
+    val kid = root.adopt("kid")
+    println("${kid.parent?.name ?: "-"} ${root.children.len()} ${kid.parent == Some(root.clone())}")
+}

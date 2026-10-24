@@ -161,6 +161,30 @@ impl<'a> Lowerer<'a> {
                     let path: Vec<String> = owner.iter().cloned().chain([name.clone()]).collect();
                     return self.path_call_type(&path, through_try);
                 }
+                // a method of a value of a known class or enum (`root.adopt("kid")`)
+                if let Some(recv_ty) = self.infer_type(recv) {
+                    if let Some(owner) = self.type_owner(&recv_ty) {
+                        let own = |m: &crate::sema::MethodInfo| -> Option<Type> {
+                            if m.throws && !through_try {
+                                return None;
+                            }
+                            match m.ret.clone()? {
+                                t if t.single_name() == Some("Self") => Some(self.named_ty(&owner)),
+                                t => Some(t),
+                            }
+                        };
+                        if let Some(c) = self.class_at(&owner).filter(|c| !c.has_generics) {
+                            if let Some(m) = c.methods.get(name) {
+                                return own(m);
+                            }
+                        }
+                        if let Some(en) = self.enum_at(&owner).filter(|e| !e.has_type_params) {
+                            if let Some(m) = en.methods.get(name) {
+                                return own(m);
+                            }
+                        }
+                    }
+                }
                 match name.as_str() {
                     "len" | "count" | "capacity" => Some(ty("usize")),
                     "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "join" | "concat" | "replace" | "trim_string" => Some(ty("String")),
@@ -213,9 +237,14 @@ impl<'a> Lowerer<'a> {
                 }
             }
             VecLit(items) if !items.is_empty() => {
-                let t = self.infer_type(&items[0])?;
+                // `vec[x; n]` holds `x`s
+                let t = match &items[0].kind {
+                    ArrayRepeat(x, _) => self.infer_type(x)?,
+                    _ => self.infer_type(&items[0])?,
+                };
                 Some(Type::Path { global: false, segs: vec![PathSeg { name: "Vec".into(), generics: Some(vec![GenericArg::Type(t)]), fn_sugar: None }], span: Default::default() })
             }
+            Array(items) if !items.is_empty() => Some(Type::Array(Box::new(self.infer_type(&items[0])?), items.len().to_string())),
             // only the collection is known (`for` loops over it borrow it when it's used afterwards)
             MapLit(items) if !items.is_empty() => Some(generic("HashMap", 2)),
             SetLit(items) if !items.is_empty() => Some(generic("HashSet", 1)),

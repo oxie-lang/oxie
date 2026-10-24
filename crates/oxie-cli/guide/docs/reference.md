@@ -248,7 +248,7 @@ shared class Name(var a: A) : Interface { ... }   // Rc<RefCell<..>> handle
 * The class is generated as `NameData` (the struct, constructor and methods as for a `class`)
   and `Name`, a handle: `struct Name(Rc<RefCell<NameData>>)`.
 * The handle has the same constructor, one method per instance method that borrows the data
-  for the call (`self.0.borrow_mut().deposit(n)`), a getter `a()` and setter `set_a(v)` per
+  for the call (`self.0.write().deposit(n)`), a getter `a()` and setter `set_a(v)` per
   field, and implements the class's Oxie interfaces and `toString` (`Display`) by forwarding.
 * Static methods and `companion object` functions are on the handle.
 * `Clone` copies the handle; `==` and `Hash` use identity (`Rc::ptr_eq`).
@@ -259,7 +259,29 @@ shared class Name(var a: A) : Interface { ... }   // Rc<RefCell<..>> handle
   mutably for that statement (arguments are evaluated first), and other chains (`a.f.len()`,
   `a.f[0]`) borrow it for reading.
 * Methods returning references into the object can't be forwarded (the borrow ends with the
-  call); return owned values. Inside its methods, `this` is the data, not a handle.
+  call); return owned values.
+* Inside its methods, fields and methods are reached on the data, and `this` used as a value
+  (passed, stored or returned) is the handle: such a method, and one that calls it, gets the
+  handle as a last parameter `__this`, and `this` is `__this.clone()`.
+* A method that reaches its own object again through another handle while it runs (a parameter
+  that is the same object, a callback that reads it) panics at that line with an explanation.
+  An `@sync` object panics the same way instead of waiting for its own lock forever.
+
+```oxie
+shared class Node(name: String, var children: Vec<Node> = vec[], var parent: Node? = null) {
+    fun add(child: Node) {
+        child.parent = this          // the handle
+        children.push(child)
+    }
+}
+
+fun main() {
+    val root = Node("root")
+    val leaf = Node("leaf")
+    root.add(leaf.clone())
+    println("${leaf.parent?.name ?: "-"} has ${root.children.len()} child")
+}
+```
 
 ## Enums
 
@@ -442,6 +464,25 @@ the declared type of a variable, field, parameter or return value:
 * `x!!` — unwrap.
 * `if (val v = opt) { }` / `while (val v = opt)` — `if let Some(v)` / `while let Some(v)`;
   with a pattern (`if (val Ok(v) = r)`) the pattern is used as written.
+* A null check unwraps a local variable or parameter whose type Oxie knows to be `T?`, when the
+  branch doesn't assign it: in `if (x != null) { }` (also as a part of an `&&` chain) `x` is the
+  value, `if let Some(x) = &x` (a reference; a `Copy` value is copied, and `&mut x` is used when
+  the branch changes it). After `if (x == null) return` (or `throw`, `continue`, `break`), `x` is
+  the value for the rest of the block: `let Some(x) = x else { return };`. Fields are not
+  unwrapped (unwrap them with `if (val v = &a.field)`).
+
+```oxie
+fun initial(name: String?): char {
+    if (name == null) return '?'
+    name.chars().next().unwrap_or('?')     // `name` is a String here
+}
+
+fun main() {
+    val nick: String? = "ada".to_string()
+    if (nick != null && nick.len() > 2) println("hello ${nick.to_uppercase()}")
+    println("${initial(nick.clone())} ${initial(null)}")
+}
+```
 * `x?.let { ... }` runs the block when `x` is present.
 
 ## Errors
@@ -556,7 +597,7 @@ f(x) { trailing lambda }        // last argument outside the parentheses
 | `[1, 2, 3]`, `arrayOf(...)` | array `[1, 2, 3]` |
 | `mapOf(k to v, ...)` | `HashMap::from([(k, v), ...])` |
 | `setOf(a, b)` | `HashSet::from([a, b])` |
-| `m[key]`, `v[i]`, `&v[1..3]` | indexing and slicing |
+| `m[key]`, `v[i]`, `&v[1..3]` | indexing and slicing; a list, array or slice takes an index of any integer type (`v[i as usize]` for an `i32` `i`) |
 | `m[key] = v` on a `HashMap` or `BTreeMap` | `m.insert(key, v)`: adds the key or replaces its value |
 
 All standard library types and methods are used with their Rust names.

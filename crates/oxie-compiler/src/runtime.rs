@@ -14,6 +14,121 @@ pub mod prelude {
     pub use super::AnyError;
     pub use super::Context as _;
     pub use super::ListOps as _;
+    pub use super::SharedCell as _;
+    pub use super::SharedLock as _;
+}
+
+/// Access to the object behind a `shared class` handle: `handle.0.read()` / `.write()`.
+/// A conflicting use (a method of the object reaching the same object again while it changes
+/// it) panics with an explanation, at the line that made it.
+pub trait SharedCell<T> {
+    fn read(&self) -> ::std::cell::Ref<'_, T>;
+    fn write(&self) -> ::std::cell::RefMut<'_, T>;
+}
+
+impl<T> SharedCell<T> for ::std::cell::RefCell<T> {
+    #[inline]
+    #[track_caller]
+    fn read(&self) -> ::std::cell::Ref<'_, T> {
+        match self.try_borrow() {
+            Ok(r) => r,
+            Err(_) => in_use::<T>("read"),
+        }
+    }
+    #[inline]
+    #[track_caller]
+    fn write(&self) -> ::std::cell::RefMut<'_, T> {
+        match self.try_borrow_mut() {
+            Ok(r) => r,
+            Err(_) => in_use::<T>("changed"),
+        }
+    }
+}
+
+/// A shared object reached again while one of its methods runs: `what` it can't be, and what
+/// that method is doing to it.
+#[cold]
+#[track_caller]
+fn in_use<T>(what: &str) -> ! {
+    let running = if what == "read" { "changing it" } else { "using it" };
+    panic!(
+        "this {} can't be {} here: one of its methods is still running and {}, and it reached the same object again through another reference (a parameter, a list, a callback). Read what that method needs before calling it, or pass it values instead of the object",
+        shared_name::<T>(),
+        what,
+        running
+    )
+}
+
+/// The class name of a shared object's data type (`app::AccountData` is `Account`).
+fn shared_name<T>() -> &'static str {
+    let full = ::std::any::type_name::<T>();
+    let last = full.split('<').next().unwrap_or(full).rsplit("::").next().unwrap_or(full);
+    last.strip_suffix("Data").unwrap_or(last)
+}
+
+/// `@sync` objects: a lock that knows which objects this thread holds, so a method that reaches
+/// its own object again panics instead of waiting for itself forever.
+pub trait SharedLock<T> {
+    fn read(&self) -> Locked<'_, T>;
+    fn write(&self) -> Locked<'_, T>;
+}
+
+::std::thread_local! {
+    static HELD: ::std::cell::RefCell<::std::vec::Vec<usize>> = const { ::std::cell::RefCell::new(::std::vec::Vec::new()) };
+}
+
+impl<T> SharedLock<T> for ::std::sync::Mutex<T> {
+    #[inline]
+    #[track_caller]
+    fn read(&self) -> Locked<'_, T> {
+        self.write()
+    }
+    #[track_caller]
+    fn write(&self) -> Locked<'_, T> {
+        let at = self as *const Self as usize;
+        if HELD.with(|h| h.borrow().contains(&at)) {
+            panic!(
+                "this {} can't be used here: this thread is running one of its methods, which holds its lock and reached the same object again through another reference (a parameter, a list, a callback), so waiting for the lock would never end. Read what that method needs before calling it, or pass it values instead of the object",
+                shared_name::<T>()
+            );
+        }
+        let guard = self.lock().unwrap_or_else(|e| panic!("a {} is unusable: a thread panicked while it was changing it ({})", shared_name::<T>(), e));
+        HELD.with(|h| h.borrow_mut().push(at));
+        Locked { guard, at }
+    }
+}
+
+/// A locked `@sync` object; unlocks when dropped.
+pub struct Locked<'a, T> {
+    guard: ::std::sync::MutexGuard<'a, T>,
+    at: usize,
+}
+
+impl<T> ::std::ops::Deref for Locked<'_, T> {
+    type Target = T;
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> ::std::ops::DerefMut for Locked<'_, T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for Locked<'_, T> {
+    fn drop(&mut self) {
+        let at = self.at;
+        HELD.with(|h| {
+            let mut h = h.borrow_mut();
+            if let Some(i) = h.iter().rposition(|x| *x == at) {
+                h.swap_remove(i);
+            }
+        });
+    }
 }
 
 /// Support for `a ?: b` when `b` is not a literal.

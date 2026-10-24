@@ -121,7 +121,7 @@ fun main() {
   `"b a".split(' ').collect::<Vec<_>>().sorted()`. `is_not_empty()` is only for lists; for text
   write `!s.is_empty()`. You implement `toString()`, but you call `to_string()`.
 * **Numbers don't convert by themselves.** `i32 * f64` is an error: write `n as f64`.
-  `len()` and indexes are `usize`. Integer division truncates. `Int`, `Long` and `Double` are
+  `len()` is a `usize`; a list can be indexed with any integer type. Integer division truncates. `Int`, `Long` and `Double` are
   names for `i32`, `i64` and `f64`.
 * **Values have one owner.** Assigning a `String`, `Vec` or class value, or passing it to a
   function that keeps it, moves it, and the old variable can't be used afterwards. Lend it
@@ -134,7 +134,9 @@ fun main() {
   When several places must see the same mutable object (accounts shared by customers, nodes
   of a graph, state shared between threads), declare it `shared class`, or
   `@sync shared class` to use it from several threads. Copying such a value copies a handle,
-  and `==` on it compares identity.
+  and `==` on it compares identity. Inside its methods `this` passed on (`child.parent = this`)
+  is a handle; a method that reaches its own object again while it runs panics with an
+  explanation.
 * **Mutability belongs to the variable.** A `val` object can't call a method that changes it;
   declare the variable `var`. Oxie works out which methods change their object.
 * **No inheritance.** There are no `open`, `abstract` or `sealed` classes and no `: Base()`.
@@ -149,10 +151,12 @@ fun main() {
   else you get the `Result` and
   handle it: `when (val r = f()) { Ok(v) -> ...; Err(e) -> ... }`, `f() ?: default`,
   `if (val Err(e) = f())`, or `.unwrap()`.
-* **`null` is `Option`.** A `T?` must be unwrapped before use: there are no smart casts, so
-  instead of `if (x != null) x.foo()` write `if (val x = x) x.foo()` or `x?.foo()`, and
-  instead of `if (x == null) return` write `val x = x ?: return`. `if (val x = x)` takes the
-  value out of `x`; to use `x` again afterwards, unwrap a reference: `if (val v = &x)`.
+* **`null` is `Option`.** A `T?` must be unwrapped before use. A null check unwraps a local
+  variable or parameter: in `if (x != null) x.foo()` and `if (x != null && x.len() > 2)`, `x`
+  is the value (a reference to it), and after `if (x == null) return` it is the value. Fields
+  aren't unwrapped: write `if (val v = &a.field)`, `a.field?.foo()`, or `val v = a.field ?:
+  return`. `if (val x = x)` takes the value out of `x`; to use `x` again afterwards, unwrap a
+  reference: `if (val v = &x)`.
 * **Lambdas** are Rust closures. `return` in a lambda returns from the lambda, not from the
   enclosing function. In predicates (`filter`, `find`, `any`, `count`, ...) the element is a
   reference: comparing it with a literal reads through it (`filter { it > 2 }`), but to pass
