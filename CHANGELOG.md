@@ -22,6 +22,9 @@
   the compiler loop forever.
 * A broken `when` or `match` arm is reported once and parsing goes on after it; some (`f(x.)`)
   made the compiler loop forever.
+* A let chain whose first condition ends in a lambda parses:
+  `if (val a = f().filter { it > 0 } && val b = g())`. The lambda's `{` was taken for the end of
+  the condition.
 * `x == null` and `x != null` are `x.is_none()` and `x.is_some()`, so they work on classes
   without `==`.
 * A branch next to `null` is optional without a declared type: `val v = if (c) f() else null`

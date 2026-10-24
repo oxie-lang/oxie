@@ -1,4 +1,14 @@
+fun first_even(xs: &[i32]): i32? = xs.iter().find { it % 2 == 0 }.copied()
+
 fun main() {
     val a: i32? = 5
     if (val x = a && x > 3) println("big $x")
+    // conditions that end in a lambda
+    val xs = vec[1, 4, 6]
+    if (val e = first_even(&xs).filter { it > 2 } && val y = a) println("even $e, a $y")
+    if (xs.iter().any { it > 5 } && val y = a) println("some above 5, a $y")
+    while (val e = first_even(&xs).filter { it > 10 } && val y = a) {
+        println("never $e $y")
+        break
+    }
 }

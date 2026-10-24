@@ -2434,7 +2434,8 @@ impl<'a> Parser<'a> {
             match self.tok_at(i) {
                 Tok::Eof | Tok::Newline => break,
                 Tok::Punct("(") | Tok::Punct("[") => depth += 1,
-                Tok::Punct("{") if depth == 0 => break,
+                // Rust's `if c {` starts the body; inside `if (...)` it is a lambda: `filter { }`
+                Tok::Punct("{") if depth == 0 && self.no_struct => break,
                 Tok::Punct("{") => depth += 1,
                 Tok::Punct(")") | Tok::Punct("]") | Tok::Punct("}") => {
                     if depth == 0 {

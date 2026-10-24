@@ -528,15 +528,11 @@ fun main() {
 }
 
 /// A method Oxie rejects is kept as Rust in an `impl` block of its own; the class keeps the rest.
-/// (Rejected here: a let chain whose first condition ends in a lambda, which Oxie can't parse yet.)
+/// (Rejected here: a typed `mut self` receiver, which Oxie doesn't parse.)
 #[test]
 fn rejected_method_stays_rust_alone() {
     check(
         r#"
-fn first(v: &[i32]) -> Option<i32> {
-    v.first().copied()
-}
-
 struct Counter {
     n: i32,
 }
@@ -547,47 +543,39 @@ impl Counter {
         self.n
     }
 
-    fn both(&self, v: &[i32]) -> i32 {
-        // a let chain
-        if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
-            a + b
-        } else {
-            self.n
-        }
+    // doubles a boxed counter
+    fn into_doubled(mut self: Box<Self>) -> i32 {
+        self.n *= 2;
+        self.n
     }
 }
 
 fn main() {
     let mut c = Counter { n: 2 };
-    println!("{} {}", c.next(), c.both(&[1, 2]));
+    println!("{} {}", c.next(), Box::new(c).into_doubled());
 }
 "#,
-        r#"fun first(v: &[i32]): i32? = v.first().copied()
-
-class Counter(n: i32) {
+        r#"class Counter(n: i32) {
     fun next(): i32 {
         n += 1
         n
     }
 }
 
-// a let chain
-// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected expression, found `val`)
+// doubles a boxed counter
+// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected `)`, found `:`)
 rust {
     impl Counter {
-        fn both(&self, v: &[i32]) -> i32 {
-            if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
-                a + b
-            } else {
-                self.n
-            }
+        fn into_doubled(mut self: Box<Self>) -> i32 {
+            self.n *= 2;
+            self.n
         }
     }
 }
 
 fun main() {
     var c = Counter { n: 2 }
-    println("${c.next()} ${c.both(&[1, 2])}")
+    println("${c.next()} ${Box.new(c).into_doubled()}")
 }
 "#,
     );
@@ -598,10 +586,6 @@ fun main() {
 fn rejected_method_of_an_impl_stays_rust_alone() {
     check(
         r#"
-fn first(v: &[i32]) -> Option<i32> {
-    v.first().copied()
-}
-
 struct Meters(i32);
 
 impl Meters {
@@ -609,44 +593,70 @@ impl Meters {
         self.0
     }
 
-    fn both(&self, v: &[i32]) -> i32 {
-        if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
-            a + b
-        } else {
-            self.0
-        }
+    fn into_doubled(mut self: Box<Self>) -> i32 {
+        self.0 *= 2;
+        self.0
     }
 }
 
 fn main() {
     let m = Meters(5);
-    println!("{} {}", m.get(), m.both(&[1, 2]));
+    println!("{} {}", m.get(), Box::new(m).into_doubled());
 }
 "#,
-        r#"fun first(v: &[i32]): i32? = v.first().copied()
-
-struct Meters(i32)
+        r#"struct Meters(i32)
 
 impl Meters {
     fun get(): i32 = self.0
 }
 
-// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected expression, found `val`)
+// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected `)`, found `:`)
 rust {
     impl Meters {
-        fn both(&self, v: &[i32]) -> i32 {
-            if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
-                a + b
-            } else {
-                self.0
-            }
+        fn into_doubled(mut self: Box<Self>) -> i32 {
+            self.0 *= 2;
+            self.0
         }
     }
 }
 
 fun main() {
     val m = Meters(5)
-    println("${m.get()} ${m.both(&[1, 2])}")
+    println("${m.get()} ${Box.new(m).into_doubled()}")
+}
+"#,
+    );
+}
+
+/// A let chain whose first condition ends in a lambda.
+#[test]
+fn let_chain_with_a_lambda() {
+    check(
+        r#"
+fn first(v: &[i32]) -> Option<i32> {
+    v.first().copied()
+}
+
+fn both(v: &[i32]) -> i32 {
+    if let Some(a) = first(v).filter(|x| *x > 0) && let Some(b) = first(&v[1..]) {
+        a + b
+    } else {
+        0
+    }
+}
+
+fn main() {
+    println!("{} {}", both(&[1, 2]), both(&[-1, 2]));
+}
+"#,
+        r#"fun first(v: &[i32]): i32? = v.first().copied()
+
+fun both(v: &[i32]): i32 {
+    if (val a = first(v).filter { *it > 0 } && val b = first(&v[1..])) a + b else 0
+}
+
+fun main() {
+    println("${both(&[1, 2])} ${both(&[-1, 2])}")
 }
 "#,
     );
