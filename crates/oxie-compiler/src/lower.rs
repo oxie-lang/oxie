@@ -411,6 +411,15 @@ impl<'a> Lowerer<'a> {
             self.bind_name(name, ty);
             return;
         }
+        // `val (label, action): (&str, &dyn Action)`: each name has its element's type
+        if let (Pat::Tuple(ps), Some(Type::Tuple(ts))) = (p, &ty) {
+            if ps.len() == ts.len() && !ps.iter().any(|p| matches!(p, Pat::Rest)) {
+                for (p, t) in ps.iter().zip(ts.clone()) {
+                    self.bind_pat(p, Some(t));
+                }
+                return;
+            }
+        }
         let mut names = Vec::new();
         p.bindings(&mut names);
         for n in names {

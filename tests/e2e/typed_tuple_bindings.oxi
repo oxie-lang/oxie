@@ -1,0 +1,22 @@
+// The names of a destructured tuple with a declared type have their elements' types, so a
+// reference stays one where a reference parameter takes it.
+interface Action {
+    fun name(): String
+}
+
+class Push : Action {
+    override fun name(): String = "push"
+}
+
+class Pull : Action {
+    override fun name(): String = "pull"
+}
+
+fun label(action: &dyn Action, count: &usize): String = "${action.name()} $count"
+
+fun main() {
+    for (ahead in [0, 3]) {
+        val (title, action, n): (&str, &dyn Action, &usize) = if (ahead > 0) ("Push", &Push(), &ahead) else ("Update", &Pull(), &ahead)
+        println("$title: ${label(action, n)}")
+    }
+}
