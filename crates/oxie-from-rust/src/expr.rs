@@ -1149,7 +1149,7 @@ impl Printer<'_> {
             }
             let dot = first.chars().next().is_some_and(|c| c.is_uppercase())
                 || ["std", "core", "alloc"].contains(&first.as_str())
-                || (self.info.modules.contains(&first) && !self.cx.bound.contains(&first));
+                || (self.info.modules.contains(&first) && !self.cx.bound.contains(&first) && !self.implicit_field(&first));
             if dot && !(first == "Self" && segs.len() > 2) {
                 let v: Vec<String> = segs.iter().map(|s| self.path_segment(s)).collect();
                 return v.join(".");
