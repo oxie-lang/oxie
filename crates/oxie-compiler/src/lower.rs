@@ -866,7 +866,8 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn seg(&self, seg: &PathSeg, _pos: TyPos) -> String {
-        let mut s = esc(&seg.name);
+        // `impl Trait + use<'a, T>` says what the type captures; `use` is no name there
+        let mut s = if seg.name == "use" && seg.generics.is_some() { seg.name.clone() } else { esc(&seg.name) };
         let container = CONTAINERS.contains(&seg.name.as_str());
         if let Some(g) = &seg.generics {
             s.push('<');
