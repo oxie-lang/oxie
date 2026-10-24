@@ -128,6 +128,9 @@ pub struct FunInfo {
     /// Written in Rust (in a `rust { }` block): Oxie doesn't know its signature, only that it
     /// hides functions of other modules with its name.
     pub raw: bool,
+    /// The result type names a type parameter (`fun with<T>(..): T`), so a call's type depends
+    /// on its arguments.
+    pub generic_ret: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -994,14 +997,19 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
         }
         match &it.kind {
             ItemKind::Fun(f) if f.receiver.is_none() => {
-                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), raw: false };
+                let generic_ret = f.ret.as_ref().is_some_and(|r| {
+                    let text = crate::symbols::type_text(r);
+                    let names: Vec<&str> = text.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+                    f.generics.params.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if names.contains(&name.as_str())))
+                });
+                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), raw: false, generic_ret };
                 if let Some(key) = fun_key_for(k, &f.name, module) {
                     k.funs.insert(key, info);
                 }
             }
             ItemKind::Raw(text) => {
                 for name in raw_fn_names(text) {
-                    let info = FunInfo { module: module.to_vec(), params: Vec::new(), throws: false, ret: None, raw: true };
+                    let info = FunInfo { module: module.to_vec(), params: Vec::new(), throws: false, ret: None, raw: true, generic_ret: false };
                     if let Some(key) = fun_key_for(k, &name, module) {
                         k.funs.insert(key, info);
                     }

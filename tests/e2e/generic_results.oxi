@@ -1,0 +1,13 @@
+// A call of a function whose result is a type parameter has the type its arguments give it:
+// where a `T?` is expected, an `Option` it returns isn't wrapped again.
+fun with_folders<T>(f: impl FnOnce(&Vec<String>) -> T): T = f(&vec["/a".into(), "/a/b".into()])
+
+fun covering(path: &str): String? = with_folders { folders ->
+    folders.iter().filter { path.starts_with(it.as_str()) }.max_by_key { it.len() }.cloned()
+}
+
+fun count(): usize? = with_folders { it.len() }
+
+fun main() {
+    println("${covering("/a/b/c"):?} ${covering("/x"):?} ${count():?}")
+}
