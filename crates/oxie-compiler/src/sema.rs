@@ -1124,6 +1124,20 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
             let m = &methods[i];
             let fields: HashSet<String> = k.classes.get(&m.owner).map(|c| c.fields.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
             let recvs = callable_recvs(&m.owner, &decided, &supers);
+            // the methods callable on fields whose type is an Oxie class (`c.add(1)` for `var c: Counter`);
+            // a shared class's are called through its handle, which `&self` reaches
+            let field_recvs: HashMap<String, HashMap<String, Recv>> = k
+                .classes
+                .get(&m.owner)
+                .into_iter()
+                .flat_map(|c| c.fields.iter().map(move |f| (c, f)))
+                .filter_map(|(c, f)| {
+                    let Type::Path { segs, .. } = &f.ty else { return None };
+                    let path: Vec<String> = segs.iter().map(|s| s.name.clone()).collect();
+                    let key = k.type_key_at(&path, &c.module).filter(|key| k.classes.get(key).is_some_and(|c| !c.is_shared))?;
+                    Some((f.name.clone(), callable_recvs(&key, &decided, &supers)))
+                })
+                .collect();
             let mut_params = if k.same_named_funs.is_empty() {
                 &mut_params
             } else {
@@ -1139,7 +1153,7 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                     here
                 })
             };
-            let facts = analyze_fun_with(m.fun, &fields, &recvs, mut_params);
+            let facts = analyze_fun_with(m.fun, &fields, &recvs, mut_params, &field_recvs);
             let name = m.owner.rsplit("::").next().unwrap_or(&m.owner);
             let returns_self = m.fun.ret.as_ref().is_some_and(|t| t.single_name() == Some("Self") || t.single_name() == Some(name));
             // implementations of an interface method that is `&mut self` stay `&mut self`
@@ -1222,13 +1236,14 @@ fn callable_recvs(owner: &str, decided: &HashMap<(String, String), Recv>, supers
 }
 
 pub fn analyze_fun(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap<String, Recv>) -> BodyFacts {
-    analyze_fun_with(f, fields, methods, &HashMap::new())
+    analyze_fun_with(f, fields, methods, &HashMap::new(), &HashMap::new())
 }
 
 /// Like `analyze_fun`, also knowing which parameters of callable functions are `&mut`
-/// (passing a field there borrows it mutably: `fill(items)` becomes `fill(&mut self.items)`).
-pub fn analyze_fun_with(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap<String, Recv>, mut_params: &HashMap<String, Vec<usize>>) -> BodyFacts {
-    let mut w = Walker { fields, methods, mut_params, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
+/// (passing a field there borrows it mutably: `fill(items)` becomes `fill(&mut self.items)`)
+/// and the receivers of methods on fields of Oxie class types.
+pub fn analyze_fun_with(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap<String, Recv>, mut_params: &HashMap<String, Vec<usize>>, field_recvs: &HashMap<String, HashMap<String, Recv>>) -> BodyFacts {
+    let mut w = Walker { fields, methods, mut_params, field_recvs, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
     for p in &f.params {
         w.bind(&p.pat);
     }
@@ -1242,7 +1257,7 @@ pub fn analyze_fun_with(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap
 
 pub fn analyze_block(b: &Block, fields: &HashSet<String>, methods: &HashMap<String, Recv>) -> BodyFacts {
     let none = HashMap::new();
-    let mut w = Walker { fields, methods, mut_params: &none, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
+    let mut w = Walker { fields, methods, mut_params: &none, field_recvs: &HashMap::new(), scopes: vec![HashSet::new()], facts: BodyFacts::default() };
     w.block(b);
     w.facts
 }
@@ -1252,6 +1267,8 @@ struct Walker<'a> {
     methods: &'a HashMap<String, Recv>,
     /// Function and method name -> indices of its `&mut` parameters.
     mut_params: &'a HashMap<String, Vec<usize>>,
+    /// Field name -> the receivers of the methods of its Oxie class.
+    field_recvs: &'a HashMap<String, HashMap<String, Recv>>,
     scopes: Vec<HashSet<String>>,
     facts: BodyFacts,
 }
@@ -1309,6 +1326,16 @@ impl<'a> Walker<'a> {
                 ExprKind::Path { .. } => return cur.ident().unwrap_or("this").to_string(),
                 _ => return field.unwrap_or_else(|| "this".into()),
             }
+        }
+    }
+
+    /// The field `c` or `this.c` names, if it isn't shadowed by a local.
+    fn direct_field<'e>(&self, e: &'e Expr) -> Option<&'e str> {
+        match &e.kind {
+            ExprKind::Path { .. } => e.ident().filter(|n| !self.is_local(n) && self.fields.contains(*n)),
+            ExprKind::Field { recv, name, .. } if matches!(recv.kind, ExprKind::SelfValue) => Some(name),
+            ExprKind::Paren(x) => self.direct_field(x),
+            _ => None,
         }
     }
 
@@ -1438,6 +1465,9 @@ impl<'a> Walker<'a> {
                         self.mutates(e.span, format!("it calls `{}()`, which changes `this`", name));
                     }
                     self.mut_args(name, args);
+                } else if let Some(field) = self.direct_field(recv).filter(|f| self.field_recvs.get(*f).and_then(|r| r.get(name)) == Some(&Recv::RefMut)) {
+                    let why = format!("it calls `{}.{}()`, which changes `{}`", field, name, field);
+                    self.mutates(e.span, why);
                 } else if MUTATING_METHODS.contains(&name.as_str()) && self.rooted_in_self(recv) {
                     let why = format!("it calls `{}.{}()`", self.self_field(recv), name);
                     self.mutates(e.span, why);

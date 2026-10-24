@@ -42,6 +42,10 @@
   the result's when the function returns a reference. Before, rustc rejected the signature.
 * Inside a class with a method `name`, `self::name(x)` calls the module's function of that name
   (a bare `name(x)` calls the method), as the path does in Rust.
+* A method that calls a `&mut self` method of an Oxie class through a field (`c.add(1)`,
+  `this.c.apply { ... }` with `var c: Counter`, or a generic class like `Entity<Counter>`) takes
+  `&mut self` (a call on a `shared class` field still doesn't). Before, it took `&self` and rustc
+  rejected the call unless it was a `mut fun`.
 * `oxie from-rust` keeps a method Oxie rejects as Rust on its own, in an `impl` block after its
   class, instead of keeping the whole `impl` as Rust; and a `None` beside a value whose type
   Oxie doesn't see stays `None`. On a 70,000-line GPUI application every file now translates

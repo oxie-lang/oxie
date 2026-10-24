@@ -1,0 +1,53 @@
+// A method that calls a `&mut self` method of an Oxie class through one of its fields (`c.add(1)`,
+// `this.c.apply { ... }`) takes `&mut self` too, also when the field's class is generic and when
+// that method is itself inferred from calls on its own fields. Calls of `&self` methods don't,
+// and neither do calls on a shared class, which go through its handle.
+
+class Counter(var total: i32 = 0) {
+    fun add(n: i32) { total += n }
+    fun apply(f: (i32) -> i32) { total = f(total) }
+    fun get(): i32 = total
+}
+
+class Entity<T>(var value: T) {
+    fun update(n: i32, f: (&mut T, i32) -> Unit) { f(&mut value, n) }
+}
+
+class Holder(var c: Counter, var e: Entity<Counter>) {
+    fun bump() { c.add(1) }
+    fun twice() { this.c.apply { it * 2 } }
+    fun grow() { e.update(5) { x: &mut Counter, n -> x.total += n } }
+    fun peek(): i32 = c.get() + e.value.get()
+}
+
+class Outer(var h: Holder) {
+    fun step() { h.bump(); h.twice() }
+}
+
+shared class Tally(var n: i32 = 0) {
+    fun add(k: i32) { n += k }
+}
+
+class Owner(val t: Tally) {
+    fun record() { t.add(1) }
+}
+
+fun main() {
+    var h = Holder(Counter(), Entity(Counter()))
+    h.bump()
+    h.twice()
+    h.grow()
+    println("${h.c.total} ${h.e.value.total}")
+
+    val fixed = Holder(Counter(3), Entity(Counter(4)))
+    println(fixed.peek())
+
+    var o = Outer(h)
+    o.step()
+    println(o.h.c.total)
+
+    val owner = Owner(Tally())
+    owner.record()
+    owner.record()
+    println(owner.t.n)
+}
