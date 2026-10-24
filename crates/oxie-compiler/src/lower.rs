@@ -477,6 +477,10 @@ impl<'a> Lowerer<'a> {
         let mut inline = Vec::new();
         mods(&file.items, &mut inline);
         self.path_roots.extend(inline);
+        // the module's children in files (`lint/js.oxi` for `js.lint(..)` in `lint`)
+        let n = self.module.len();
+        let children = self.k.module_paths.iter().filter(|p| p.len() == n + 1 && p[..n] == self.module[..]).map(|p| p[n].clone());
+        self.path_roots.extend(children.collect::<Vec<_>>());
         for it in &file.items {
             self.e.nl();
             self.item(it, ItemCtx::Top);

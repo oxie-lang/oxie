@@ -423,6 +423,22 @@ fun main() = println(tools.one())
     }
 
     #[test]
+    fn child_modules_in_files_are_paths() {
+        // in `lint`, `js.count()` calls a function of `lint/js.oxi`, not a method of a value `js`
+        let file = |rel: &str, text: &str| Input { rel_path: PathBuf::from(rel), abs_path: PathBuf::from(rel), text: text.to_string() };
+        let inputs = vec![
+            file("main.oxi", "fun main() = println(lint.check())\n"),
+            file("lint/mod.oxi", "fun check(): i32 = js.count() + js.Dialect.Tsx.size()\n"),
+            file("lint/js.oxi", "fun count(): i32 = 3\nenum Dialect { Tsx }\nimpl Dialect {\n    fun size(): i32 = 1\n}\n"),
+        ];
+        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false };
+        let out = compile(inputs, &opts);
+        assert!(!out.has_errors(), "{:?}", out.diags);
+        let lint = &out.files.iter().find(|f| f.rel_path == Path::new("lint.rs")).unwrap().text;
+        assert!(lint.contains("js::count() + js::Dialect::Tsx.size()"), "{lint}");
+    }
+
+    #[test]
     fn lifetimes_say_which_parameters_they_tie() {
         // `View` holds a reference, so it gets the lifetime too; `n` has none
         let src = "class View(text: &str)\nfun pick(a: View, b: View, n: usize): &str = if (n > 0) a.text else b.text\n";
