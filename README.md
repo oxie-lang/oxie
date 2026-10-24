@@ -259,9 +259,11 @@ Differences are within timing noise. See [docs/performance.md](docs/performance.
 
 * **Kuana**: the extension in [`editors/kuana-oxie`](editors/kuana-oxie) gives highlighting,
   outline, ▶ run/test buttons, snippets and the language server.
-* **VS Code**: the extension in [`editors/vscode-oxie`](editors/vscode-oxie) gives highlighting,
-  the language server, ▶ run/test buttons, the generated Rust beside the source, tasks and
-  snippets.
+* **VS Code**: install [Oxie](https://marketplace.visualstudio.com/items?itemName=oxie-lang.oxie)
+  from the Marketplace (VSCodium, Cursor and other editors that use
+  [Open VSX](https://open-vsx.org/extension/oxie-lang/oxie): search for Oxie). It gives
+  highlighting, the language server, ▶ run/test buttons, the generated Rust beside the source,
+  tasks and snippets; the source is in [`editors/vscode-oxie`](editors/vscode-oxie).
 * **Any LSP editor**: run `oxie lsp` for diagnostics, completion, hover (with the generated Rust),
   go to definition, references, rename, signature help, formatting, symbols and inlay hints.
 * **Grammars**: tree-sitter in [`editors/tree-sitter-oxie`](editors/tree-sitter-oxie), TextMate
@@ -295,6 +297,7 @@ also shows the Rust it compiles to and its output. The same pages are in `docs/`
 * [Tooling](docs/tooling.md) — CLI, project layout, formatter, language server, editors
 * [Performance](docs/performance.md)
 * [Compiler internals](docs/internals.md) — for contributors
+* [Releasing](RELEASING.md) — where Oxie and its extensions are published, and how
 
 ## Examples
 

@@ -1,0 +1,109 @@
+# Publishes the VS Code extension (editors/vscode-oxie) when a tag vscode-vX.Y.Z is
+# pushed: checks the tag against package.json, runs the extension's tests against an
+# oxie built from this commit, packages one .vsix, attaches it to a GitHub release, and
+# publishes it to Open VSX. Run it by hand ("Run workflow") to test and package without
+# publishing; the .vsix is kept as an artifact. RELEASING.md lists where the extension
+# is published.
+#
+# Open VSX accepts the workflow as the trusted publisher of oxie-lang.oxie (no secret;
+# an OVSX_PAT secret, if set, is used instead). The VS Code Marketplace takes the .vsix
+# from the GitHub release by hand, unless the secret VSCE_PAT is set (see RELEASING.md).
+name: Release VS Code extension
+
+on:
+  push:
+    tags: ["vscode-v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write # Open VSX trusted publishing
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode-oxie
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode-oxie/package-lock.json
+
+      - name: Check the tag against package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" != "vscode-v$version" ]; then
+            echo "::error::the tag $GITHUB_REF_NAME does not match version $version in package.json"
+            exit 1
+          fi
+
+      - name: Build oxie for the tests
+        working-directory: .
+        run: cargo build --locked -p oxie
+
+      - run: npm ci
+
+      - name: Test
+        # the integration tests start VS Code, which needs a display
+        env:
+          OXIE_PATH: ${{ github.workspace }}/target/debug/oxie
+          OXIE_HOME: ${{ github.workspace }}
+        run: xvfb-run -a npm test
+
+      - name: Package
+        run: npx vsce package --out "oxie-$VERSION.vsix"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oxie-vscode-${{ env.VERSION }}
+          path: editors/vscode-oxie/oxie-${{ env.VERSION }}.vsix
+
+      - name: Create the GitHub release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # not "latest": that stays the compiler's release, which install scripts follow
+        run: gh release create "$GITHUB_REF_NAME" "oxie-$VERSION.vsix" --title "Oxie for VS Code $VERSION" --generate-notes --latest=false
+
+      - name: Publish to Open VSX
+        if: github.event_name == 'push'
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -n "$OVSX_PAT" ]; then
+            npx --yes ovsx@1.2.0 publish "oxie-$VERSION.vsix"
+          else
+            npx --yes ovsx@1.2.0 publish "oxie-$VERSION.vsix" --trusted-publishing
+          fi
+
+      - name: Publish to the VS Code Marketplace
+        if: github.event_name == 'push'
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -n "$VSCE_PAT" ]; then
+            npx vsce publish --packagePath "oxie-$VERSION.vsix"
+          else
+            echo "::notice::Upload oxie-$VERSION.vsix from the GitHub release to the VS Code Marketplace by hand: https://marketplace.visualstudio.com/manage/publishers/oxie-lang"
+          fi
+
+      - name: Summary
+        if: github.event_name == 'push'
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Oxie for VS Code $VERSION
+          - GitHub release with the .vsix: https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME
+          - Open VSX: https://open-vsx.org/extension/oxie-lang/oxie
+          - VS Code Marketplace: https://marketplace.visualstudio.com/items?itemName=oxie-lang.oxie
+            (without VSCE_PAT, upload the .vsix at https://marketplace.visualstudio.com/manage/publishers/oxie-lang)
+          EOF
