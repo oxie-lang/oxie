@@ -284,6 +284,9 @@ pub struct Lowerer<'a> {
     /// What happened to the `String`/`Vec` parameters of this file's functions that could be
     /// lent, by (the function's name span, parameter index).
     pub param_notes: HashMap<(Span, usize), crate::params::ParamNote>,
+    /// Functions declared in the blocks being lowered, with their parameters: calls go to them
+    /// rather than to the crate's functions with their names.
+    pub(crate) local_funs: Vec<(String, Vec<sema::ParamInfo>)>,
 }
 
 pub fn esc(name: &str) -> String {
@@ -359,6 +362,7 @@ impl<'a> Lowerer<'a> {
             self_by_value: false,
             keep_args: false,
             param_notes: HashMap::new(),
+            local_funs: Vec::new(),
         }
     }
 

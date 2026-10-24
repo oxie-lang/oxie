@@ -1,0 +1,19 @@
+// A function declared inside a block is what calls in that block mean, before or after its
+// declaration, even where the crate has a function with its name.
+fun depth(): i32 = 0
+
+fun sum_to(n: i32): i32 {
+    val total = depth(n, 0)
+    fun depth(n: i32, acc: i32): i32 = if (n == 0) acc else depth(n - 1, acc + n)
+    total
+}
+
+fun main() {
+    println(sum_to(4))
+    println(depth())
+    run {
+        fun depth(label: &str): String = "inner $label"
+        println(depth("block"))
+    }
+    println(depth())
+}

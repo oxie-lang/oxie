@@ -182,6 +182,15 @@ impl<'a> Lowerer<'a> {
             },
             None => None,
         };
+        // a function declared in the block can be called anywhere in it
+        let outer_funs = self.local_funs.len();
+        for s in stmts {
+            if let Stmt::Item(b) = s {
+                if let ItemKind::Fun(f) = &b.0.kind {
+                    self.local_funs.push((f.name.clone(), crate::sema::params_info(f)));
+                }
+            }
+        }
         for (i, s) in stmts.iter().enumerate() {
             self.e.nl();
             if Some(i) == tail_idx {
@@ -193,6 +202,7 @@ impl<'a> Lowerer<'a> {
                 self.stmt(s);
             }
         }
+        self.local_funs.truncate(outer_funs);
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -2400,6 +2410,15 @@ impl<'a> Lowerer<'a> {
                 if self.is_local(&name) {
                     self.e.w(&esc(&name));
                     self.arg_list(args, None, TyPos::Param, span);
+                    return;
+                }
+                if let Some((_, params)) = self.local_funs.iter().rev().find(|(n, _)| *n == name).cloned() {
+                    self.e.w(&esc(&name));
+                    if let Some(g) = generics {
+                        let gt = self.generic_args_text(g);
+                        self.e.w(&format!("::{}", gt));
+                    }
+                    self.arg_list(args, Some(&params), TyPos::Param, span);
                     return;
                 }
                 // calling a function-typed property
