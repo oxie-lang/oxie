@@ -50,22 +50,28 @@ Any extra arguments after `--` are passed to the program (run) or cargo (build/c
 fn command_help(cmd: &str) -> Option<String> {
     let cmd = if cmd == "format" { "fmt" } else { cmd };
     let commands = HELP.split("COMMANDS:\n").nth(1)?.split("\n\n").next()?;
-    // `    new <name> [--lib]     Create a new project`, the description maybe on the next lines
-    let (mut usage, mut about) = (None, Vec::new());
+    // `    new <name> [--lib]     Create a new project`, the description maybe on the next lines;
+    // a command used in several ways (`from-rust <file.rs>`, `from-rust <dir>`) has an entry for each
+    let mut entries: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut in_entry = false;
     for line in commands.lines() {
         match line.strip_prefix("    ").filter(|l| !l.starts_with(' ')) {
             Some(l) if l.split_whitespace().next() == Some(cmd) => {
                 let (u, a) = l.split_once("  ").unwrap_or((l, ""));
-                usage = Some(u.to_string());
-                about.push(a.trim());
+                entries.push((u, vec![a.trim()]));
+                in_entry = true;
             }
-            Some(_) if usage.is_some() => break,
-            None if usage.is_some() => about.push(line.trim()),
+            Some(_) => in_entry = false,
+            None if in_entry => entries.last_mut().unwrap().1.push(line.trim()),
             _ => {}
         }
     }
-    let about: Vec<&str> = about.into_iter().filter(|a| !a.is_empty()).collect();
-    usage.map(|u| format!("USAGE:\n    oxie {}\n\n{}", u, about.join(" ")))
+    let about = |lines: &[&str]| lines.iter().filter(|a| !a.is_empty()).copied().collect::<Vec<_>>().join(" ");
+    match entries.as_slice() {
+        [] => None,
+        [(usage, lines)] => Some(format!("USAGE:\n    oxie {}\n\n{}", usage, about(lines))),
+        _ => Some(format!("USAGE:\n{}", entries.iter().map(|(u, lines)| format!("    oxie {}\n        {}", u, about(lines))).collect::<Vec<_>>().join("\n"))),
+    }
 }
 
 fn main() -> ExitCode {

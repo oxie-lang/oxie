@@ -406,10 +406,15 @@ fn help_never_runs_a_command() {
     // a crate, so that `init`, `run` or `test` would find something to act on
     std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"helped\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
     for cmd in commands.iter().copied().chain(["format"]) {
+        // every way to use it that `oxie --help` lists (`from-rust <file.rs>` and `from-rust <dir>`)
+        let forms: Vec<&str> = help.lines().filter_map(|l| l.strip_prefix("    ")).filter(|l| l.split_whitespace().next() == Some(cmd)).filter_map(|l| l.split("  ").next()).collect();
         for flag in ["--help", "-h"] {
             let out = oxie().args([cmd, flag]).current_dir(&tmp).output().unwrap();
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(out.status.success() && stdout.starts_with("USAGE:\n    oxie "), "`oxie {} {}`:\n{}{}", cmd, flag, stdout, String::from_utf8_lossy(&out.stderr));
+            for form in &forms {
+                assert!(stdout.contains(&format!("oxie {}\n", form)), "`oxie {} {}` doesn't show `{}`:\n{}", cmd, flag, form, stdout);
+            }
         }
     }
     let left: Vec<String> = std::fs::read_dir(&tmp).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
