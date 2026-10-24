@@ -836,7 +836,7 @@ impl<'a> Lowerer<'a> {
             s.push_str("::");
         }
         // crate-relative module paths
-        if segs.len() > 1 && self.k.modules.contains(&segs[0].name) && !self.is_local(&segs[0].name) {
+        if segs.len() > 1 && self.k.root_module(&segs[0].name, &self.module) && !self.is_local(&segs[0].name) {
             s.push_str("crate::");
         }
         for (i, seg) in segs.iter().enumerate() {
@@ -1130,7 +1130,7 @@ impl<'a> Lowerer<'a> {
             return self.join_path(&segs[1..]);
         }
         let mut s = String::new();
-        if segs.len() > 1 && self.k.modules.contains(&segs[0]) && !self.is_local(&segs[0]) {
+        if segs.len() > 1 && self.k.root_module(&segs[0], &self.module) && !self.is_local(&segs[0]) {
             if self.k.has_lib && self.is_root && self.module.is_empty() && self.is_main_file() {
                 s.push_str(&self.k.crate_name.replace('-', "_"));
                 s.push_str("::");
@@ -1304,7 +1304,7 @@ impl<'a> Lowerer<'a> {
 
     fn use_tree(&self, t: &UseTree, top: bool) -> String {
         let prefix = |segs: &[String]| -> String {
-            if top && !segs.is_empty() && self.k.modules.contains(&segs[0]) {
+            if top && !segs.is_empty() && self.k.root_module(&segs[0], &self.module) {
                 format!("crate::{}", segs.iter().map(|s| esc(s)).collect::<Vec<_>>().join("::"))
             } else {
                 segs.iter().map(|s| if s.is_empty() { String::new() } else { esc(s) }).collect::<Vec<_>>().join("::")

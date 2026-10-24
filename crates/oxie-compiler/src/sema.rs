@@ -310,6 +310,11 @@ impl Crate {
     pub fn is_fun_name(&self, name: &str) -> bool {
         self.funs.contains_key(name) || self.same_named_funs.contains(name)
     }
+    /// Whether `name` written in `module` is a top-level module: one with that name, unless
+    /// `module` has a child module of the name (`lsp` in `editor`, with `editor/lsp.oxi`).
+    pub fn root_module(&self, name: &str, module: &[String]) -> bool {
+        self.modules.contains(name) && !(!module.is_empty() && self.module_paths.contains(&[module, &[name.to_string()]].concat()))
+    }
     /// Whether a function `name` of the crate can be called by that name in `module`: declared
     /// there, or imported by name or with `*`.
     pub fn fun_in_scope(&self, name: &str, module: &[String]) -> bool {
@@ -370,7 +375,7 @@ impl Crate {
             _ if first == self.crate_name => (Vec::new(), &qual[1..]),
             "self" => (module.to_vec(), &qual[1..]),
             "super" => (module.to_vec(), qual),
-            _ if self.modules.contains(first) => (Vec::new(), qual),
+            _ if self.root_module(first, module) => (Vec::new(), qual),
             _ => match self.imports.get(&(module.to_vec(), first.to_string())).filter(|_| follow_imports) {
                 Some(p) => (self.module_path(p, module, false)?, &qual[1..]),
                 None => (module.to_vec(), qual),

@@ -439,6 +439,24 @@ fun main() = println(tools.one())
     }
 
     #[test]
+    fn child_modules_hide_top_level_ones() {
+        // in `editor`, `lsp` is `editor/lsp.oxi`, not the top-level `lsp.oxi`
+        let file = |rel: &str, text: &str| Input { rel_path: PathBuf::from(rel), abs_path: PathBuf::from(rel), text: text.to_string() };
+        let inputs = vec![
+            file("main.oxi", "fun main() = println(\"${lsp.name()} ${editor.which()}\")\n"),
+            file("lsp.oxi", "fun name(): String = \"top\"\n"),
+            file("editor/mod.oxi", "import lsp::Event\n\nfun which(): String = lsp.name() + \"${Event.Message:?}\"\nfun first(e: lsp.Event): bool = e == Event.Message\n"),
+            file("editor/lsp.oxi", "fun name(): String = \"child\"\nenum Event { Message }\n"),
+        ];
+        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false };
+        let out = compile(inputs, &opts);
+        assert!(!out.has_errors(), "{:?}", out.diags);
+        let editor = &out.files.iter().find(|f| f.rel_path == Path::new("editor.rs")).unwrap().text;
+        assert!(!editor.contains("crate::lsp"), "{editor}");
+        assert!(editor.contains("use lsp::Event;") && editor.contains("lsp::name()") && editor.contains("e: lsp::Event"), "{editor}");
+    }
+
+    #[test]
     fn lifetimes_say_which_parameters_they_tie() {
         // `View` holds a reference, so it gets the lifetime too; `n` has none
         let src = "class View(text: &str)\nfun pick(a: View, b: View, n: usize): &str = if (n > 0) a.text else b.text\n";
