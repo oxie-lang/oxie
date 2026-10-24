@@ -1755,15 +1755,18 @@ impl<'a> Lowerer<'a> {
             }
             StructLit { path, generics, fields, base } => self.struct_lit(path, generics.as_ref(), fields, base.as_deref()),
             Macro { path, text } => {
-                self.e.w(&format!("{}!", path));
-                self.e.raw_lines(text);
+                let text = self.include_paths(&format!("{}!{}", path, text));
+                self.e.raw_lines(&text);
             }
             TryCatch { body, catch } => {
                 let t = Target::none();
                 self.try_catch(body, catch.as_deref(), Some(&t));
             }
             Paren(x) => self.expr(x, P_LOWEST),
-            Raw(s) => self.e.raw_lines(s),
+            Raw(s) => {
+                let s = self.include_paths(s);
+                self.e.raw_lines(&s);
+            }
             Error => self.e.w("()"),
         }
     }
@@ -2826,6 +2829,15 @@ impl<'a> Lowerer<'a> {
             self.comma_list(&v);
             self.e.w("]");
             return;
+        }
+        if let ([a], "include_str" | "include_bytes" | "include") = (args, name) {
+            if let ExprKind::Str(parts) = &a.value.kind {
+                if let [crate::lexer::StrPart::Lit(path)] = parts.as_slice() {
+                    let text = self.include_paths(&format!("{}!(\"{}\")", name, path));
+                    self.e.w(&text);
+                    return;
+                }
+            }
         }
         self.e.w(&format!("{}!(", name));
         let Some(pos) = fmt_pos else {

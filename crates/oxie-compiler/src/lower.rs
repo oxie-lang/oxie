@@ -667,6 +667,40 @@ impl<'a> Lowerer<'a> {
         self.k.is_trait(n) || (STD_AUTO_DYN.contains(&n) && !self.k.is_user_type(n))
     }
 
+    /// Rust text with the relative paths of its `include_str!`, `include_bytes!` and `include!`
+    /// calls made absolute: they are relative to the .oxi file, not to the generated code.
+    pub(crate) fn include_paths(&self, text: &str) -> String {
+        let Some(dir) = &self.src_dir else { return text.to_string() };
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = ["include_str!", "include_bytes!", "include!"].iter().filter_map(|m| rest.find(m).map(|i| (i, m.len()))).min() {
+            let (i, len) = at;
+            let start = i + len;
+            out.push_str(&rest[..start]);
+            rest = &rest[start..];
+            // `("path")` or `(concat!("path", ..))`
+            let lead = rest.len() - rest.trim_start_matches(|c: char| c == '(' || c.is_whitespace()).len();
+            let mut lit = lead;
+            if rest[lead..].starts_with("concat!(") {
+                lit = lead + "concat!(".len();
+                lit += rest[lit..].len() - rest[lit..].trim_start().len();
+            }
+            if !rest[..lead].starts_with('(') || !rest[lit..].starts_with('"') {
+                continue;
+            }
+            let Some(end) = rest[lit + 1..].find('"').map(|e| lit + 1 + e) else { continue };
+            let path = &rest[lit + 1..end];
+            if path.contains('\\') || std::path::Path::new(path).is_absolute() {
+                continue;
+            }
+            out.push_str(&rest[..lit]);
+            out.push_str(&format!("{:?}", dir.join(path).display().to_string().replace('\\', "/")));
+            rest = &rest[end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     /// The class `name` means in this module (of a name several modules declare, the module's
     /// own one or the one it imports).
     pub(crate) fn class_info(&self, name: &str) -> Option<&'a sema::ClassInfo> {
@@ -1222,13 +1256,15 @@ impl<'a> Lowerer<'a> {
                     }
                     _ => s.clone(),
                 };
+                let text = self.include_paths(&text);
                 self.e.raw_lines(&text);
                 self.e.nl();
             }
             ItemKind::Macro(s) => {
                 self.docs(&it.docs);
                 self.attrs(&it.attrs, &[]);
-                self.e.raw_lines(s);
+                let s = self.include_paths(s);
+                self.e.raw_lines(&s);
                 self.e.nl();
             }
         }
