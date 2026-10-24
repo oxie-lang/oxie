@@ -287,6 +287,8 @@ pub struct Lowerer<'a> {
     /// Functions declared in the blocks being lowered, with their parameters: calls go to them
     /// rather than to the crate's functions with their names.
     pub(crate) local_funs: Vec<(String, Vec<sema::ParamInfo>)>,
+    /// The type aliases this file declares at its top level.
+    pub(crate) aliases: HashSet<String>,
 }
 
 pub fn esc(name: &str) -> String {
@@ -363,6 +365,7 @@ impl<'a> Lowerer<'a> {
             keep_args: false,
             param_notes: HashMap::new(),
             local_funs: Vec::new(),
+            aliases: HashSet::new(),
         }
     }
 
@@ -474,6 +477,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+        self.aliases = file.items.iter().filter_map(|it| if let ItemKind::TypeAlias { name, .. } = &it.kind { Some(name.clone()) } else { None }).collect();
         let mut inline = Vec::new();
         mods(&file.items, &mut inline);
         self.path_roots.extend(inline);
@@ -668,6 +672,10 @@ impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ types
 
     pub(crate) fn is_trait_name(&self, n: &str) -> bool {
+        // a class, enum or type alias the module has by that name is no trait here
+        if self.class_info(n).is_some() || self.enum_info(n).is_some() || self.aliases.contains(n) {
+            return false;
+        }
         self.k.is_trait(n) || (STD_AUTO_DYN.contains(&n) && !self.k.is_user_type(n))
     }
 
