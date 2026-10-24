@@ -391,8 +391,12 @@ Settings: `oxie.path` (the `oxie` command, for example a checkout's `target/debu
 `oxie.cargoCheck` (`cargo check` on open and save) and `oxie.trace.server`. In Restricted Mode
 only highlighting and snippets work, because building runs the project's build scripts.
 
-Install: build the package with `npm install` and `npm run package` in `editors/vscode-oxie`,
-then run `code --install-extension oxie-0.1.0.vsix` (or use **Extensions: Install from VSIX…**).
+Install: search for Oxie in the Extensions view, or open it on the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=oxie-lang.oxie)
+(`code --install-extension oxie-lang.oxie`). VSCodium, Cursor and other editors that use
+Open VSX get it from [open-vsx.org](https://open-vsx.org/extension/oxie-lang/oxie). To try a
+change to the extension, run `npm install` and `npm run package` in `editors/vscode-oxie`, then
+`code --install-extension oxie-<version>.vsix`.
 
 ### Other editors
 
