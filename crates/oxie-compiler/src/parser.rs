@@ -38,6 +38,9 @@ pub struct Parser<'a> {
     /// The type after `as`: a `<` after its path starts generic arguments only if they parse,
     /// otherwise it compares (`n as usize < m`).
     cast_ty: bool,
+    /// Whether an `Fn(..)` type takes a `-> R` after it (not when that `->` ends a lambda's
+    /// parameters).
+    fn_ret: bool,
     /// An error message template, where `$0` is the case's first positional field; elsewhere
     /// it is text (`"cost $5"`).
     positional: bool,
@@ -45,7 +48,7 @@ pub struct Parser<'a> {
 
 pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false };
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
     let file = p.file();
     diags.append(&mut p.diags);
     (file, diags)
@@ -54,7 +57,7 @@ pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
 /// Parses a standalone expression (used for tests and tooling).
 pub fn parse_expr_str(src: &str) -> (Expr, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false };
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
     let e = p.expr().unwrap_or(Expr::new(ExprKind::Error, Span::default()));
     diags.append(&mut p.diags);
     (e, diags)
@@ -1188,7 +1191,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            let ret = if self.eat_punct("->") { Some(Box::new(self.ty()?)) } else { None };
+            let ret = if self.fn_ret && self.eat_punct("->") { Some(Box::new(self.ty()?)) } else { None };
             seg.fn_sugar = Some((params, ret));
         }
         Ok(seg)
@@ -2851,7 +2854,7 @@ impl<'a> Parser<'a> {
                 StrPart::Interp { src: s, offset, spec } => {
                     let (toks, mut diags) = lexer::lex_at(&s, offset);
                     self.diags.append(&mut diags);
-                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false };
+                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
                     let e = sub.expr();
                     if e.is_ok() && !matches!(sub.tok(), Tok::Newline | Tok::Eof) {
                         let sp = sub.span();
@@ -3212,24 +3215,31 @@ impl<'a> Parser<'a> {
         let save = self.pos;
         let nd = self.diags.len();
         let mut params = Vec::new();
-        let r: PResult<()> = (|| {
-            if !captures.is_empty() && self.eat_punct("->") {
-                return Ok(());
-            }
-            loop {
-                let pat = self.pattern_no_or()?;
-                let ty = if self.eat_punct(":") { Some(self.ty()?) } else { None };
-                params.push(LambdaParam { pat, ty });
-                if self.eat_punct(",") {
-                    continue;
-                }
-                if self.eat_punct("->") {
+        // `{ f: FnMut(i32) -> f(1) }`: when the `->` after a parameter's `Fn(..)` type can't be its
+        // return type, it is the lambda's arrow
+        for fn_ret in [true, false] {
+            self.fn_ret = fn_ret;
+            let r: PResult<()> = (|| {
+                if !captures.is_empty() && self.eat_punct("->") {
                     return Ok(());
                 }
-                return Err(());
+                loop {
+                    let pat = self.pattern_no_or()?;
+                    let ty = if self.eat_punct(":") { Some(self.ty()?) } else { None };
+                    params.push(LambdaParam { pat, ty });
+                    if self.eat_punct(",") {
+                        continue;
+                    }
+                    if self.eat_punct("->") {
+                        return Ok(());
+                    }
+                    return Err(());
+                }
+            })();
+            self.fn_ret = true;
+            if r.is_ok() {
+                break;
             }
-        })();
-        if r.is_err() {
             self.pos = save;
             self.diags.truncate(nd);
             params.clear();
@@ -3278,20 +3288,23 @@ impl<'a> Parser<'a> {
         self.expect_punct("]")?;
         // a parameter list or `->` must follow; otherwise this was an array literal
         let save = self.pos;
-        let ok = self.is_punct("->") || {
-            let r: PResult<()> = (|| loop {
-                self.pattern_no_or()?;
-                if self.eat_punct(":") {
-                    self.ty()?;
-                }
-                if self.eat_punct(",") {
-                    continue;
-                }
-                return if self.is_punct("->") { Ok(()) } else { Err(()) };
-            })();
-            self.pos = save;
-            r.is_ok()
-        };
+        let ok = self.is_punct("->")
+            || [true, false].into_iter().any(|fn_ret| {
+                self.fn_ret = fn_ret;
+                let r: PResult<()> = (|| loop {
+                    self.pattern_no_or()?;
+                    if self.eat_punct(":") {
+                        self.ty()?;
+                    }
+                    if self.eat_punct(",") {
+                        continue;
+                    }
+                    return if self.is_punct("->") { Ok(()) } else { Err(()) };
+                })();
+                self.fn_ret = true;
+                self.pos = save;
+                r.is_ok()
+            });
         if ok {
             Ok(out)
         } else {

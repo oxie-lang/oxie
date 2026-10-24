@@ -1,0 +1,18 @@
+// A lambda parameter of an `Fn` type: the `->` after `FnMut(String)` ends the parameters, unless
+// a type follows it and then another `->`.
+fun main() {
+    var lines = Vec<String>()
+    val report = { file: &str, add: &mut dyn FnMut(String) -> add("checked $file") }
+    report("a.scm", &mut { line: String -> lines.push(line) })
+    report("b.scm", &mut { line -> lines.push(line) })
+    println(lines.join(", "))
+
+    val twice = { f: &dyn Fn(i32) -> i32 -> f(f(1)) }
+    println(twice(&{ n: i32 -> n * 10 }))
+    val boxed = { f: Box<dyn Fn(i32) -> i32>, n: i32 -> f(n) }
+    println(boxed(Box.new { n: i32 -> n + 1 }, 4))
+    var count = 0
+    val each = { [count] f: &mut dyn FnMut(usize) -> f(count) }
+    each(&mut { n: usize -> count = n + 1 })
+    println(count)
+}
