@@ -156,6 +156,9 @@ pub struct Crate {
     pub extern_crates: HashSet<String>,
     /// (module path, trait name) for every extension-function trait.
     pub ext_traits: Vec<(Vec<String>, String)>,
+    /// Type names modules declare in Rust, which Oxie can't see into: in `rust { }` blocks
+    /// (`struct Newline;`) and item macros (`actions!(editor, [Newline])`).
+    pub rust_types: HashSet<(Vec<String>, String)>,
     /// Variant name -> the (module, name) of each enum that has it.
     pub variant_owner: HashMap<String, Vec<(Vec<String>, String)>>,
     /// Whether a `lib.oxi` exists (main.oxi then imports modules through the crate name).
@@ -418,6 +421,13 @@ impl Crate {
         if let Some(path) = module.and_then(|m| self.imports.get(&(m.to_vec(), variant.to_string()))) {
             let owner = path.len().checked_sub(2).map(|i| &path[i]);
             if !owners.iter().any(|(_, n)| Some(n) == owner) {
+                return None;
+            }
+        }
+        // and so is a type the module has from Rust code, its own or through `import editor.*`
+        if let Some(m) = module {
+            let has = |at: &[String]| self.rust_types.contains(&(at.to_vec(), variant.to_string()));
+            if has(m) || self.globs.get(m).into_iter().flatten().filter_map(|g| self.module_path(g, m, true)).any(|g| has(&g)) {
                 return None;
             }
         }
@@ -772,6 +782,61 @@ fn type_key_for(k: &mut Crate, name: &str, module: &[String], is_class: bool) ->
 
 /// The functions a `rust { }` block declares at its top level (`fn total(..)`, `pub(crate) fn ..`).
 fn raw_fn_names(text: &str) -> Vec<String> {
+    raw_items(text).into_iter().filter(|(kw, _)| *kw == "fn").map(|(_, n)| n).collect()
+}
+
+/// The CamelCase names in an item macro, like the unit structs `actions!(editor, [Newline])`
+/// declares.
+fn camel_words(text: &str) -> Vec<String> {
+    let words = text.split(|c: char| !(c.is_alphanumeric() || c == '_'));
+    words.filter(|w| w.starts_with(|c: char| c.is_ascii_uppercase()) && w.contains(|c: char| c.is_ascii_lowercase())).map(str::to_string).collect()
+}
+
+/// The macro calls at the top level of a `rust { }` block (`actions!(editor, [Newline])`).
+fn raw_macro_calls(text: &str) -> Vec<&str> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let (mut i, mut depth) = (0, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b'!' if depth == 0 && i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') => {
+                let open = i + 1 + text[i + 1..].len() - text[i + 1..].trim_start().len();
+                let close = match b.get(open) {
+                    Some(b'(') => b')',
+                    Some(b'[') => b']',
+                    Some(b'{') => b'}',
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let (mut j, mut d) = (open, 0usize);
+                while j < b.len() {
+                    if b[j] == b[open] {
+                        d += 1;
+                    } else if b[j] == close {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                out.push(&text[open..j.min(b.len())]);
+                i = j;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The items a `rust { }` block declares at its top level, with their keywords: `("fn", "total")`,
+/// `("struct", "Newline")`.
+fn raw_items(text: &str) -> Vec<(&'static str, String)> {
     let b = text.as_bytes();
     let ident = |i: usize| b[i].is_ascii_alphanumeric() || b[i] == b'_';
     let mut out = Vec::new();
@@ -809,11 +874,12 @@ fn raw_fn_names(text: &str) -> Vec<String> {
                 while i < b.len() && ident(i) {
                     i += 1;
                 }
-                if depth == 0 && &text[start..i] == "fn" {
+                let kw = ["fn", "struct", "enum", "union", "type", "trait"].into_iter().find(|kw| *kw == &text[start..i]);
+                if let Some(kw) = kw.filter(|_| depth == 0) {
                     let rest = text[i..].trim_start();
                     let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
                     if !name.is_empty() {
-                        out.push(name);
+                        out.push((kw, name));
                     }
                 }
             }
@@ -939,6 +1005,17 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                     if let Some(key) = fun_key_for(k, &name, module) {
                         k.funs.insert(key, info);
                     }
+                }
+                for (_, name) in raw_items(text).into_iter().filter(|(kw, _)| *kw != "fn") {
+                    k.rust_types.insert((module.to_vec(), name));
+                }
+                for name in raw_macro_calls(text).into_iter().flat_map(camel_words) {
+                    k.rust_types.insert((module.to_vec(), name));
+                }
+            }
+            ItemKind::Macro(text) => {
+                for name in camel_words(text) {
+                    k.rust_types.insert((module.to_vec(), name));
                 }
             }
             ItemKind::Fun(f) => {

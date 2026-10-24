@@ -182,12 +182,15 @@ impl<'a> Lowerer<'a> {
             },
             None => None,
         };
-        // a function declared in the block can be called anywhere in it
+        // a function declared in the block can be called anywhere in it, and so can what it imports
         let outer_funs = self.local_funs.len();
+        let outer_imports = self.local_imports.len();
         for s in stmts {
             if let Stmt::Item(b) = s {
-                if let ItemKind::Fun(f) = &b.0.kind {
-                    self.local_funs.push((f.name.clone(), crate::sema::params_info(f)));
+                match &b.0.kind {
+                    ItemKind::Fun(f) => self.local_funs.push((f.name.clone(), crate::sema::params_info(f))),
+                    ItemKind::Import(d) => imported_names(&d.tree, &[], &mut self.local_imports),
+                    _ => {}
                 }
             }
         }
@@ -203,6 +206,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.local_funs.truncate(outer_funs);
+        self.local_imports.truncate(outer_imports);
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -1151,7 +1155,7 @@ impl<'a> Lowerer<'a> {
                 if self.is_local(n) || self.implicit_field(n).is_some() || self.k.is_class_name(n) || self.k.is_fun_name(n) {
                     return false;
                 }
-                return self.k.variant_enum_in(n, Some(&self.module)).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
+                return self.variant_enum(n).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
             }
             ExprKind::Path { segs, generics: None, .. } => segs.clone(),
             ExprKind::Field { .. } => match self.as_path(e) {
@@ -2181,7 +2185,7 @@ impl<'a> Lowerer<'a> {
                 return;
             }
             if !self.is_local(n) && !self.k.is_class_name(n) && !self.k.is_fun_name(n) {
-                if let Some(en) = self.k.variant_enum_in(n, Some(&self.module)) {
+                if let Some(en) = self.variant_enum(n) {
                     s.push_str(&format!("{}::{}", en.name, n));
                     self.e.w(&s);
                     return;
@@ -2236,7 +2240,7 @@ impl<'a> Lowerer<'a> {
                     return Some((segs.clone(), PathKind::Type));
                 }
                 if is_type_like(n) {
-                    if self.k.variant_enum_in(n, Some(&self.module)).is_some() && !self.k.is_user_type(n) {
+                    if self.variant_enum(n).is_some() && !self.k.is_user_type(n) {
                         return None;
                     }
                     return Some((segs.clone(), PathKind::Type));
@@ -2514,7 +2518,7 @@ impl<'a> Lowerer<'a> {
                     return;
                 }
                 if !self.k.is_user_type(&name) {
-                    if let Some(en) = self.k.variant_enum_in(&name, Some(&self.module)).cloned() {
+                    if let Some(en) = self.variant_enum(&name).cloned() {
                         let shape = en.variant(&name).cloned().unwrap();
                         self.variant_ctor(&format!("{}::{}", en.name, name), &shape, args, span);
                         return;
@@ -4302,5 +4306,25 @@ fn spine<'e>(e: &'e Expr, ops: &mut Vec<&'e Expr>, nodes: &mut Vec<&'e Expr>) {
             nodes.push(e);
         }
         _ => ops.push(e),
+    }
+}
+
+/// The names an import brings in, with the paths they stand for (`Config` for
+/// `nucleo_matcher::{Config, Matcher}`).
+fn imported_names(tree: &UseTree, prefix: &[String], out: &mut Vec<(String, Vec<String>)>) {
+    match tree {
+        UseTree::Path { segments, alias } => {
+            let path: Vec<String> = prefix.iter().chain(segments).cloned().collect();
+            if let Some(last) = path.last().filter(|l| *l != "self") {
+                out.push((alias.clone().unwrap_or_else(|| last.clone()), path.clone()));
+            }
+        }
+        UseTree::Group { segments, items } => {
+            let prefix: Vec<String> = prefix.iter().chain(segments).cloned().collect();
+            for i in items {
+                imported_names(i, &prefix, out);
+            }
+        }
+        UseTree::Glob { .. } => {}
     }
 }

@@ -289,6 +289,9 @@ pub struct Lowerer<'a> {
     pub(crate) local_funs: Vec<(String, Vec<sema::ParamInfo>)>,
     /// The type aliases this file declares at its top level.
     pub(crate) aliases: HashSet<String>,
+    /// Names imported inside the blocks being lowered (`import nucleo_matcher::Config` in a
+    /// function), with the paths they stand for.
+    pub(crate) local_imports: Vec<(String, Vec<String>)>,
 }
 
 pub fn esc(name: &str) -> String {
@@ -366,6 +369,7 @@ impl<'a> Lowerer<'a> {
             param_notes: HashMap::new(),
             local_funs: Vec::new(),
             aliases: HashSet::new(),
+            local_imports: Vec::new(),
         }
     }
 
@@ -670,6 +674,18 @@ impl<'a> Lowerer<'a> {
     }
 
     // ------------------------------------------------------------------ types
+
+    /// The enum whose variant a bare `n` is in this module: none when a block imports `n` from
+    /// elsewhere.
+    pub(crate) fn variant_enum(&self, n: &str) -> Option<&'a sema::EnumInfo> {
+        if let Some((_, path)) = self.local_imports.iter().rev().find(|(name, _)| name == n) {
+            let owner = path.len().checked_sub(2).map(|i| &path[i]);
+            if !self.k.variant_owner.get(n).is_some_and(|owners| owners.iter().any(|(_, e)| Some(e) == owner)) {
+                return None;
+            }
+        }
+        self.k.variant_enum_in(n, Some(&self.module))
+    }
 
     pub(crate) fn is_trait_name(&self, n: &str) -> bool {
         // a class, enum or type alias the module has by that name is no trait here
@@ -1103,7 +1119,7 @@ impl<'a> Lowerer<'a> {
         if segs.len() == 1 {
             let n = &segs[0];
             if !self.k.is_class_name(n) && !self.is_local(n) {
-                if let Some(en) = self.k.variant_enum_in(n, Some(&self.module)) {
+                if let Some(en) = self.variant_enum(n) {
                     let shape = en.variant(n).cloned();
                     return (format!("{}::{}", en.name, n), shape);
                 }
