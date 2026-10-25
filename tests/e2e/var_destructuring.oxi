@@ -1,0 +1,13 @@
+// `var (x, y)` makes only the parts that change mutable (no warnings for the others)
+
+fun fill(v: &mut Vec<i32>) { v.push(9) }
+
+fun main() {
+    var (x, y) = (3, 4)
+    x += 1
+    println("$x $y")
+    var (a, b, c) = (vec[1], vec[2], 5)
+    a.push(2)
+    fill(b)
+    println("${a:?} ${b:?} $c")
+}

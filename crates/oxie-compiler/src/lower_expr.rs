@@ -232,6 +232,64 @@ fn appended_text_var(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
     Some(Stmt::Let { pat: pat.clone(), mutable: false, ty: None, init: Some(Expr::new(from, sp)), else_: None, span: *span })
 }
 
+/// `var (x, y) = ...` whose `y` never changes afterwards destructures to `let (mut x, y)`: Rust
+/// would warn about the `mut` of `y`, which Oxie can't drop on its own.
+fn unchanged_parts(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
+    let Stmt::Let { pat, .. } = s else { return None };
+    if matches!(pat, Pat::Ident { .. }) {
+        return None;
+    }
+    let mut names = Vec::new();
+    pat.bindings(&mut names);
+    // a name each later statement may change: assigned to, borrowed with `&mut`, a method
+    // called on it, passed to a call (which may borrow it mutably), looped over or in Rust code
+    fn root(e: &Expr) -> Option<&str> {
+        match &e.kind {
+            ExprKind::Field { recv: r, .. } | ExprKind::Index(r, _) | ExprKind::Paren(r) | ExprKind::Unary(UnOp::Deref, r) => root(r),
+            _ => e.ident(),
+        }
+    }
+    let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in rest {
+        visit::walk_stmt(s, &mut |e| {
+            let mut roots = Vec::new();
+            match &e.kind {
+                ExprKind::Assign(_, lhs, _) | ExprKind::Unary(UnOp::RefMut, lhs) => roots.push(root(lhs)),
+                ExprKind::MethodCall { recv, args, .. } => roots.extend(std::iter::once(root(recv)).chain(args.iter().map(|a| root(&a.value)))),
+                ExprKind::Call { args, .. } => roots.extend(args.iter().map(|a| root(&a.value))),
+                ExprKind::For { iter, .. } => roots.push(root(iter)),
+                ExprKind::Macro { text, .. } | ExprKind::Raw(text) => changed.extend(names.iter().filter(|n| crate::sema::contains_word(text, n)).cloned()),
+                _ => {}
+            }
+            changed.extend(roots.into_iter().flatten().map(str::to_string));
+            true
+        });
+    }
+    fn keep(p: &mut Pat, changed: &std::collections::HashSet<String>, any: &mut bool) {
+        match p {
+            Pat::Ident { name, mutable, sub, .. } => {
+                if *mutable && !changed.contains(name.as_str()) {
+                    *mutable = false;
+                    *any = true;
+                }
+                if let Some(s) = sub {
+                    keep(s, changed, any);
+                }
+            }
+            Pat::Tuple(v) | Pat::Slice(v) => v.iter_mut().for_each(|p| keep(p, changed, any)),
+            Pat::TupleStruct { elems, .. } => elems.iter_mut().for_each(|p| keep(p, changed, any)),
+            Pat::Struct { fields, .. } => fields.iter_mut().filter_map(|(_, p)| p.as_mut()).for_each(|p| keep(p, changed, any)),
+            Pat::Typed { pat, .. } => keep(pat, changed, any),
+            _ => {}
+        }
+    }
+    let mut s = s.clone();
+    let Stmt::Let { pat, .. } = &mut s else { return None };
+    let mut any = false;
+    keep(pat, &changed, &mut any);
+    any.then_some(s)
+}
+
 /// See `text_when`.
 enum TextWhen {
     Deref,
@@ -270,7 +328,7 @@ impl<'a> Lowerer<'a> {
                     self.e.mark(expr.span);
                     self.tail_moving_args(expr, tail.unwrap());
                 }
-            } else if let Some(s) = appended_text_var(s, &stmts[i + 1..]) {
+            } else if let Some(s) = appended_text_var(s, &stmts[i + 1..]).or_else(|| unchanged_parts(s, &stmts[i + 1..])) {
                 self.stmt(&s);
             } else {
                 self.stmt(s);

@@ -2057,6 +2057,16 @@ fn unused_mut(d: &mut MappedDiag, lines: &[&str]) {
     let Some(c) = col else { return };
     let after: String = line.chars().skip(c as usize + 4).collect();
     let name: String = after.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    // `var (x, y) = ...`: one part never changes, but `val` would stop the others from changing
+    if name.is_empty() || after.trim_start()[name.len()..].trim_start().starts_with(['(', '{']) {
+        let part = d.gen_text.as_deref().and_then(|t| t.strip_prefix("mut ")).unwrap_or("").to_string();
+        let part = if part.is_empty() { "a part of this".to_string() } else { format!("`{}`", part) };
+        rewrite(d, format!("{} never changes, so it doesn't need to be a `var`", part));
+        d.label = None;
+        d.notes.retain(|n| !n.contains("remove this `mut`") && !n.contains("#[warn(unused_mut)]"));
+        d.notes.push(help("`var` makes every part of a destructuring changeable; declare the ones that change with their own `var` to leave the others read-only."));
+        return;
+    }
     rewrite(d, format!("`{}` never changes, so it can be a `val`", name));
     d.col = c;
     d.end_col = c + 3;
@@ -2864,6 +2874,17 @@ mod tests {
         assert_eq!(fixed("if (!value.is_not_empty()) g()"), "if (value.is_empty()) g()");
         assert_eq!(fixed("val n = value.is_not_empty().then { 1 }"), "val n = (!value.is_empty()).then { 1 }");
         assert_eq!(fixed(r#"println("${value.is_not_empty()}")"#), r#"println("${!value.is_empty()}")"#);
+    }
+
+    #[test]
+    fn a_part_of_a_var_destructuring_that_never_changes_is_named() {
+        let src = "fun main() {\n    var (a, b) = (vec[1], 2)\n    b += 1\n}\n";
+        let mut d = diag("/crate/main.oxi", "unused_mut", "variable does not need to be mutable", 1, 4, 28);
+        d.level = "warning".into();
+        d.gen_text = Some("mut a".into());
+        explain(&mut d, &Sources::from_texts(&[("/crate/main.oxi", src)]));
+        assert_eq!(d.message, "`a` never changes, so it doesn't need to be a `var`");
+        assert!(d.fixes.is_empty(), "{:?}", d.fixes);
     }
 
     #[test]
