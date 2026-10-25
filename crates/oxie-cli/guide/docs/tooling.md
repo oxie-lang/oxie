@@ -277,7 +277,12 @@ fun parse_point(s: &str): Point throws {
   `T?` and `None` is `null`; `match` is `when`; `if let Some(x) = e` is `if (val x = e)`.
 * `format!`, `println!` and friends use string templates; closures become lambdas (`{ it * 2 }`
   for simple one-parameter bodies) and move outside the parentheses when last; `vec![..]`,
-  `HashMap::from([(k, v)])` and `HashSet::from([..])` become `vec[..]`, `mapOf(k to v)` and `setOf(..)`.
+  `HashMap::from([(k, v)])` and `HashSet::from([..])` become `vec[..]` (`[..]` for a declared
+  list), `[k: v]` and `setOf(..)`, `HashMap::new()` becomes `[:]`, and `.collect::<Vec<_>>()`
+  becomes `.to_list()`.
+* `Vec<T>` is written `[T]` and std's `HashMap<K, V>` `[K: V]`. `Vec<T>` stays where Oxie reads
+  `[T]` as a slice (`&mut Vec<T>`, `Arc<Vec<T>>`), and an item with a slice type Oxie can't write
+  (`type Bytes = [u8]`) is kept as Rust.
 * Receivers, `self.`, `Type::new` and literal `.to_string()`s are dropped where Oxie restores
   them, and a call to a function that a method of the same name hides in Oxie becomes
   `self::name(..)`. The translation is compiled with the Oxie compiler before it is printed:
