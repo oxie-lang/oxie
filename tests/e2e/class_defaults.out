@@ -1,0 +1,5 @@
+Settings { width: 80, name: "main", extra: 7 }
+Settings { width: 80, name: "main", extra: 7 } true
+"" 3
+Plain { a: 0, b: "" }
+Stats { count: 3, total: 0.5 }

@@ -90,7 +90,7 @@ impl ClassInfo {
 #[derive(Clone, Debug)]
 pub enum VariantShape {
     Unit,
-    Tuple(usize),
+    Tuple(Vec<Type>),
     Named(Vec<(String, Type)>),
 }
 
@@ -1082,7 +1082,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         .map(|v| {
                             let shape = match &v.fields {
                                 VariantFields::Unit => VariantShape::Unit,
-                                VariantFields::Tuple(ts) => VariantShape::Tuple(ts.len()),
+                                VariantFields::Tuple(ts) => VariantShape::Tuple(ts.clone()),
                                 VariantFields::Named(fs) => VariantShape::Named(fs.iter().map(|f| (f.name.clone(), f.ty.clone())).collect()),
                             };
                             (v.name.clone(), shape)

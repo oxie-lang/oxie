@@ -122,7 +122,7 @@
   {
     "file": "docs/guide.md",
     "output": "Dog says woof\nTom says meow\n",
-    "source": "interface Animal {\n    fun name(): String\n    fun sound(): String\n    fun speak(): String = \"${name()} says ${sound()}\"    // default method\n}\n\nclass Dog : Animal {\n    override fun name() = \"Dog\"\n    override fun sound() = \"woof\"\n}\n\nclass Cat(name: String) : Animal {\n    override fun name() = name.clone()\n    override fun sound() = \"meow\"\n}\n\nfun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`\n\nfun main() {\n    val zoo: Vec<Box<Animal>> = vec[Box.new(Dog()), Box.new(Cat(\"Tom\".to_string()))]\n    for (a in &zoo) introduce(a)                          // lends the boxed value\n}\n"
+    "source": "interface Animal {\n    fun name(): String\n    fun sound(): String\n    fun speak(): String = \"${name()} says ${sound()}\"    // default method\n}\n\nclass Dog : Animal {\n    override fun name() = \"Dog\"\n    override fun sound() = \"woof\"\n}\n\nclass Cat(name: String) : Animal {\n    override fun name() = name.clone()\n    override fun sound() = \"meow\"\n}\n\nfun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`\n\nfun main() {\n    val zoo: Vec<Box<Animal>> = vec[Box.new(Dog()), Box.new(Cat(\"Tom\"))]\n    for (a in &zoo) introduce(a)                          // lends the boxed value\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -132,7 +132,7 @@
   {
     "file": "docs/guide.md",
     "output": "8080\nerror: invalid value 'eighty' for port\n80\n",
-    "source": "error enum ConfigError {\n    Missing(key: String) = \"missing key: $key\"\n    Invalid(key: String, value: String) = \"invalid value '$value' for $key\"\n}\n\nfun port(text: &str): u16 throws ConfigError {\n    if (text.is_empty()) throw ConfigError.Missing(\"port\".to_string())\n    text.parse().map_err { ConfigError.Invalid(\"port\".to_string(), text.to_string()) }?\n}\n\nfun main() {\n    println(port(\"8080\").unwrap())\n    when (val r = port(\"eighty\")) {\n        Ok(p) -> println(\"port $p\")\n        Err(e) -> println(\"error: $e\")\n    }\n    val fallback = port(\"\") ?: 80\n    println(fallback)\n}\n"
+    "source": "error enum ConfigError {\n    Missing(key: String) = \"missing key: $key\"\n    Invalid(key: String, value: String) = \"invalid value '$value' for $key\"\n}\n\nfun port(text: &str): u16 throws ConfigError {\n    if (text.is_empty()) throw ConfigError.Missing(\"port\")\n    text.parse().map_err { ConfigError.Invalid(\"port\", text) }?\n}\n\nfun main() {\n    println(port(\"8080\").unwrap())\n    when (val r = port(\"eighty\")) {\n        Ok(p) -> println(\"port $p\")\n        Err(e) -> println(\"error: $e\")\n    }\n    val fallback = port(\"\") ?: 80\n    println(fallback)\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -152,7 +152,7 @@
   {
     "file": "docs/guide.md",
     "output": "1: apple\n2: pear\n",
-    "source": "class Inventory(var items: Vec<String>) {\n    var count = 0\n\n    // fn note(item: &str, count: &mut i32) { *count += 1; ... }\n    fun note(item: &str) {\n        count += 1\n        println(\"$count: $item\")\n    }\n\n    // Self::note(&item, &mut self.count)\n    fun scan() {\n        for (item in items) { note(item) }\n    }\n}\n\nfun main() {\n    var inv = Inventory(vec[\"apple\".to_string(), \"pear\".to_string()])\n    inv.scan()\n}\n"
+    "source": "class Inventory(var items: Vec<String>) {\n    var count = 0\n\n    // fn note(item: &str, count: &mut i32) { *count += 1; ... }\n    fun note(item: &str) {\n        count += 1\n        println(\"$count: $item\")\n    }\n\n    // Self::note(&item, &mut self.count)\n    fun scan() {\n        for (item in items) { note(item) }\n    }\n}\n\nfun main() {\n    var inv = Inventory(vec[\"apple\", \"pear\"])\n    inv.scan()\n}\n"
   },
   {
     "file": "docs/guide.md",

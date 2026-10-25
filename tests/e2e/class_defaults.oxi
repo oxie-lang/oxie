@@ -1,0 +1,26 @@
+// `: Default` on a class with declared defaults builds what its constructor builds.
+
+import std::collections::HashMap
+
+data class Settings(var width: i32 = 80, var name: String = "main") : Default {
+    var extra: i32 = 7
+}
+
+// a parameter without a default takes its type's default
+class Cell<T>(value: T, hits: i32 = 3) : Default
+
+// without declared defaults, `Default` is still a derive
+data class Plain(a: i32, b: String) : Default
+
+data class Stats(var count: i32 = 1, var total: f64 = 0.5) : Default
+
+fun main() {
+    println("${Settings.default():?}")
+    println("${Settings():?} ${Settings.default() == Settings()}")
+    val c: Cell<String> = Default.default()
+    println("${c.value:?} ${c.hits}")
+    println("${Plain.default():?}")
+    var stats: HashMap<String, Stats> = HashMap()
+    stats.entry("a".to_string()).or_default().count += 2
+    println("${stats["a"]:?}")
+}

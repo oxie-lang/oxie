@@ -859,7 +859,7 @@ impl<'a> Lowerer<'a> {
             }
             Type::Option(inner) => match &e.kind {
                 ExprKind::Null => self.e.w("None"),
-                _ if self.is_value_like(e) => {
+                _ if self.is_value_like(e) || inner.is_string() && self.is_str_var(e) => {
                     self.e.w("Some(");
                     self.coerce(e, inner, TyPos::Generic);
                     self.e.w(")");
@@ -903,6 +903,10 @@ impl<'a> Lowerer<'a> {
                 {
                     self.expr(e, P_POSTFIX);
                     self.e.w(".into()");
+                }
+                ExprKind::Path { .. } if self.is_str_var(e) => {
+                    self.expr(e, P_POSTFIX);
+                    self.e.w(".to_string()");
                 }
                 _ => self.expr(e, P_LOWEST),
             },
@@ -1093,6 +1097,12 @@ impl<'a> Lowerer<'a> {
 
     fn in_throwing_fn(&self) -> bool {
         self.fns.last().is_some_and(|f| f.throws && !f.is_lambda)
+    }
+
+    /// A variable known to be `&str`, which converts to a `String` with `.to_string()`.
+    fn is_str_var(&self, e: &Expr) -> bool {
+        matches!(e.kind, ExprKind::Path { .. })
+            && self.infer_type(e).is_some_and(|t| matches!(&t, Type::Ref { mutable: false, inner, .. } if inner.single_name() == Some("str")))
     }
 
     fn is_value_like(&self, e: &Expr) -> bool {
@@ -2688,9 +2698,10 @@ impl<'a> Lowerer<'a> {
                     self.error(span, "this enum variant has no fields");
                 }
             }
-            VariantShape::Tuple(_) => {
+            VariantShape::Tuple(types) => {
+                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
                 self.e.w(path);
-                self.arg_list(args, None, TyPos::Field, span);
+                self.arg_list(args, Some(&params), TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
                 let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
@@ -3166,6 +3177,27 @@ impl<'a> Lowerer<'a> {
                 if let ExprKind::Lambda { params, body, .. } = &mut a.value.kind {
                     if params.is_empty() && !visit::uses_it(body) {
                         params.push(LambdaParam { pat: Pat::Wild, ty: None });
+                    }
+                    // `sum_of { it }` sums the elements, not references to them
+                    if matches!(name, "sum_of" | "max_of" | "min_of") {
+                        let param = match params.first() {
+                            None => Some("it".to_string()),
+                            Some(LambdaParam { pat: Pat::Ident { name, .. }, .. }) => Some(name.clone()),
+                            _ => None,
+                        };
+                        let tail = match &mut body.kind {
+                            ExprKind::Block(b) if b.stmts.len() == 1 => match &mut b.stmts[0] {
+                                Stmt::Expr { expr, semi: false } => Some(expr),
+                                _ => None,
+                            },
+                            _ => Some(&mut **body),
+                        };
+                        if let (Some(p), Some(tail)) = (param, tail) {
+                            if tail.ident() == Some(p.as_str()) {
+                                let span = tail.span;
+                                *tail = Expr::new(ExprKind::Unary(UnOp::Deref, Box::new(tail.clone())), span);
+                            }
+                        }
                     }
                 }
                 a

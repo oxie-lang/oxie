@@ -284,7 +284,10 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
   `Hash` when every field type supports them, and supports `x.copy(field = value)`.
 * **Supertypes** after `:` are traits to implement. Derivable traits (`Debug`, `Clone`,
   `Copy`, `PartialEq`, `Eq`, `Hash`, `Default`, `PartialOrd`, `Ord`) without methods in the
-  body become derives. `override fun toString() = "..."` implements `Display`.
+  body become derives. `override fun toString() = "..."` implements `Display`. A class with
+  default values that lists `Default` gets an `impl Default` that builds what the constructor
+  builds (`Settings()`, with each default; parameters without one take their type's default),
+  not a derive of zeros.
 * `@derive(...)` adds derives; `@no_auto_derive` turns the automatic ones off.
 * **Reference fields**: a class, struct or enum whose fields hold references without a lifetime
   (`&str`, `Vec<&T>`, `&str?`, or another such type) gets one: `class Parser(input: &str)` →

@@ -61,6 +61,17 @@
 * `oxie from-rust` writes a call to a free function as `self::name(..)` in the methods of a type
   that has a method of the same name. Before, the translation called the method: a wrong
   result, or an error that kept the code as Rust.
+* `: Default` on a class with default values builds what its constructor builds:
+  `class Settings(width: i32 = 80) : Default` gives a width of 80. Before, it derived `Default`,
+  which ignored the declared defaults and gave 0.
+* A `&str` variable passed where a `String` or `String?` is declared (a parameter, a field of a
+  constructor or an enum case) is converted, as a literal is. Before, only literals and method
+  results were, and constructors and enum cases rejected it.
+* The arguments of an enum case with positional fields (`Plain(String)`) convert like those of
+  one with named fields: `Plain("text")` and `Wrapped(5)` for a `Wrapped(i32?)` compile.
+* `sum_of { it }`, `max_of { it }` and `min_of { it }` work on the elements' values; `sum_of`
+  failed to compile, since `it` is a reference.
+* rustc's advice to add `#[derive(Default)]` reads as Oxie: `class Stats(...) : Default`.
 
 ## 0.2.0 - 2026-10-24
 

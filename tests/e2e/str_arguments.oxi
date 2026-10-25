@@ -1,0 +1,34 @@
+// A `&str` variable passed where a `String` (or `String?`) is declared becomes `.to_string()`,
+// as a literal becomes `String::from`.
+
+enum Event {
+    Named(key: String)
+    Plain(String)
+    Wrapped(i32?)
+}
+
+class Tag(name: String)
+data class Label(name: String, note: String?)
+
+fun keep(s: String): String = s
+fun maybe(s: String?): String? = s
+
+error enum ConfigError {
+    Invalid(key: String, value: String) = "invalid value '$value' for $key"
+}
+
+fun port(text: &str): u16 throws ConfigError = text.parse().map_err { ConfigError.Invalid("port", text) }?
+
+fun main() {
+    val text: &str = "hey"
+    println(keep(text))
+    println(Tag(text).name)
+    println("${Label(text, text):?}")
+    println("${Event.Named(text):?} ${Event.Plain(text):?} ${Event.Plain("lit"):?} ${Event.Wrapped(5):?}")
+    println("${maybe(text):?}")
+    println("${port("x").unwrap_err()}")
+    // `sum_of { it }` sums the elements themselves
+    val xs = vec[1, 2, 3]
+    val fs = vec[1.5, 2.5]
+    println("${xs.sum_of { it }} ${xs.max_of { x -> x }:?} ${fs.min_of { it }:?} ${fs.sum_of { it }}")
+}

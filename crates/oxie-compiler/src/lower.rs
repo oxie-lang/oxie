@@ -1849,6 +1849,15 @@ impl<'a> Lowerer<'a> {
                 derives.push(d);
             }
         }
+        // `: Default` on a class with declared defaults builds the value its constructor does
+        // (`Settings()`), not one of zeros
+        let default_impl = !t.shared
+            && !matches!(t.kind, TypeKind::TupleStruct | TypeKind::Union)
+            && t.fields.iter().any(|f| f.default.is_some())
+            && derives.iter().any(|d| d == "Default");
+        if default_impl {
+            derives.retain(|d| d != "Default");
+        }
         if !t.shared {
             self.docs(&it.docs);
         }
@@ -1939,6 +1948,9 @@ impl<'a> Lowerer<'a> {
             self.e.w("}");
             self.e.nl();
         }
+        if default_impl {
+            self.default_impl(t, &g, &self_ty, &wc);
+        }
         // operators
         for m in ops {
             if let ItemKind::Fun(f) = &m.kind {
@@ -1975,6 +1987,52 @@ impl<'a> Lowerer<'a> {
             self.e.nl();
             self.item(m, ctx);
         }
+    }
+
+    /// `impl Default` that calls the constructor with each parameter's default (the type's own
+    /// default for a parameter without one).
+    fn default_impl(&mut self, t: &TypeDecl, g: &str, self_ty: &str, wc: &str) {
+        let span = t.fields.first().map(|f| f.span).unwrap_or_default();
+        let args: Vec<Arg> = t
+            .fields
+            .iter()
+            .filter(|f| f.in_ctor && f.default.is_none())
+            .map(|f| Arg { name: Some(f.name.clone()), value: Expr::new(ExprKind::Raw("Default::default()".into()), span) })
+            .collect();
+        let callee = Expr::new(ExprKind::Path { segs: vec![t.name.clone()], generics: None, global: false }, span);
+        let call = Expr::new(ExprKind::Call { callee: Box::new(callee), args }, span);
+        // a parameter of type `T` without a default needs `T: Default`
+        let bounds: Vec<String> = t
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                GenericParam::Type { name, .. } if t.fields.iter().any(|f| f.in_ctor && f.default.is_none() && f.ty.single_name() == Some(name)) => {
+                    Some(format!("{}: Default", name))
+                }
+                _ => None,
+            })
+            .collect();
+        let wc = match (wc.is_empty(), bounds.is_empty()) {
+            (_, true) => wc.to_string(),
+            (true, false) => format!(" where {}", bounds.join(", ")),
+            (false, false) => format!("{}, {}", wc, bounds.join(", ")),
+        };
+        self.e.nl();
+        self.e.w(&format!("impl{} Default for {}{} {{", g, self_ty, wc));
+        self.e.indent();
+        self.e.nl();
+        self.e.w("fn default() -> Self {");
+        self.e.indent();
+        self.e.nl();
+        self.expr(&call, P_LOWEST);
+        self.e.dedent();
+        self.e.nl();
+        self.e.w("}");
+        self.e.dedent();
+        self.e.nl();
+        self.e.w("}");
+        self.e.nl();
     }
 
     pub(crate) fn recv_of(&self, owner: &str, f: &FunDecl) -> Recv {

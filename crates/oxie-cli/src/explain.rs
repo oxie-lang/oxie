@@ -25,6 +25,7 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
     let names = ticks(&d.message);
     let first = names.first().cloned().unwrap_or_default();
     let code = d.code.clone().unwrap_or_default();
+    derive_in_oxie_terms(d);
     match code.as_str() {
         "E0382" => moved_value(d, sources, &lines, &first),
         "E0384" => assign_twice(d, &lines, &first),
@@ -1536,6 +1537,21 @@ fn trait_missing(d: &mut MappedDiag, sources: &Sources, lines: &[&str], names: &
     } else if user_kind.is_some() {
         d.notes.push(help(&format!("`data class` and `enum` get a debug form automatically; for a plain `class`, add `@derive(Debug)` to `{}`.", base)));
     }
+}
+
+/// rustc's "consider annotating `Stats` with `#[derive(Default)]`" as the Oxie spelling.
+fn derive_in_oxie_terms(d: &mut MappedDiag) {
+    for n in d.notes.iter_mut() {
+        let Some(rest) = n.strip_prefix("help: consider annotating `") else { continue };
+        let Some((ty, rest)) = rest.split_once("` with `#[derive(") else { continue };
+        let Some((traits, _)) = rest.split_once(")]`") else { continue };
+        let ty = ty.split('<').next().unwrap_or(ty);
+        *n = help(&format!("make `{}` implement {}: `class {}(...) : {}`.", ty, tick_list(traits), ty, traits));
+    }
+}
+
+fn tick_list(traits: &str) -> String {
+    traits.split(", ").map(|t| format!("`{}`", t)).collect::<Vec<_>>().join(" and ")
 }
 
 /// The length of the template placeholder (`$name`, `${...}`) starting at `col`.

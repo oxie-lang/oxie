@@ -404,7 +404,7 @@ class Cat(name: String) : Animal {
 fun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`
 
 fun main() {
-    val zoo: Vec<Box<Animal>> = vec[Box.new(Dog()), Box.new(Cat("Tom".to_string()))]
+    val zoo: Vec<Box<Animal>> = vec[Box.new(Dog()), Box.new(Cat("Tom"))]
     for (a in &zoo) introduce(a)                          // lends the boxed value
 }
 ```
@@ -445,8 +445,8 @@ error enum ConfigError {
 }
 
 fun port(text: &str): u16 throws ConfigError {
-    if (text.is_empty()) throw ConfigError.Missing("port".to_string())
-    text.parse().map_err { ConfigError.Invalid("port".to_string(), text.to_string()) }?
+    if (text.is_empty()) throw ConfigError.Missing("port")
+    text.parse().map_err { ConfigError.Invalid("port", text) }?
 }
 
 fun main() {
@@ -584,7 +584,7 @@ class Inventory(var items: Vec<String>) {
 }
 
 fun main() {
-    var inv = Inventory(vec["apple".to_string(), "pear".to_string()])
+    var inv = Inventory(vec["apple", "pear"])
     inv.scan()
 }
 ```
