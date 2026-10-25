@@ -400,7 +400,7 @@ AI coding agents (Claude Code, Codex, Cursor, ...) know little about Oxie, and w
 may be from an older version. Oxie gives them the rules of the version you use:
 
 * `oxie guide` prints a guide to writing Oxie: how to work with the compiler, the language at a
-  glance, how it differs from Kotlin and from Rust, and the mistakes to avoid. `oxie guide
+  glance, how it differs from Kotlin and from Rust, and the patterns to use. `oxie guide
   <topic>` prints a page of this documentation (`oxie guide topics` lists them). Both are built
   into the `oxie` binary, so they describe exactly the Oxie it compiles, and they warn when the
   project builds with another `oxie-build`.
@@ -410,6 +410,9 @@ may be from an older version. Oxie gives them the rules of the version you use:
   also in projects without an `AGENTS.md`. Install it with
   `claude plugin install oxie --marketplace oxie-lang/oxie`, or copy `skills/oxie` to
   `~/.claude/skills/oxie`.
+
+[AI coding agents](ai-agents.md) covers setting up each agent, the commands agents use, what
+the compiler tells them, and how they stay current when Oxie changes.
 
 ## Formatter
 

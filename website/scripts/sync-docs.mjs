@@ -1,4 +1,5 @@
-// Generates the site's pages in src/content/docs from docs/*.md and CHANGELOG.md, so the
+// Generates the site's pages in src/content/docs from docs/*.md, CHANGELOG.md, and the guide
+// `oxie guide` prints (crates/oxie-cli/guide/writing-oxie.md), so the
 // Markdown in docs/ stays the only copy of the documentation. Each ```oxie example gets tabs
 // with the Rust that `oxie emit` produces for it and the output recorded by the doc-example test
 // (src/data/doc-outputs.json, written by `OXIE_BLESS=1 cargo test -p oxie --test e2e
@@ -16,10 +17,13 @@ const outDir = path.join(website, 'src/content/docs');
 const partsDir = path.join(website, 'src/generated');
 const outputsFile = path.join(website, 'src/data/doc-outputs.json');
 const github = 'https://github.com/oxie-lang/oxie';
+/** The guide `oxie guide` prints, built into the binary; the site shows it as Writing Oxie. */
+const writingGuide = path.join(repo, 'crates/oxie-cli/guide/writing-oxie.md');
 
-/** Sidebar groups; every file in docs/ must appear here. */
+/** Sidebar groups; every file in docs/ must appear here (writing-oxie is the guide in the crate). */
 export const groups = [
 	{ label: 'Learn', pages: ['guide', 'cheatsheet'] },
+	{ label: 'AI coding agents', pages: ['ai-agents', 'writing-oxie'] },
 	{ label: 'Language', pages: ['reference', 'errors'] },
 	{ label: 'Using Oxie', pages: ['rust-interop', 'tooling', 'performance'] },
 	{ label: 'Project', pages: ['internals', 'changelog'] },
@@ -30,7 +34,7 @@ export const sidebar = groups.map((g) => ({ label: g.label, items: g.pages }));
 /** Files the pages are generated from: the dev server regenerates the site when they change. */
 export function sources() {
 	const docs = fs.readdirSync(path.join(repo, 'docs')).filter((f) => f.endsWith('.md'));
-	return [...docs.map((f) => path.join(repo, 'docs', f)), path.join(repo, 'CHANGELOG.md'), path.join(repo, 'README.md'), outputsFile];
+	return [...docs.map((f) => path.join(repo, 'docs', f)), writingGuide, path.join(repo, 'CHANGELOG.md'), path.join(repo, 'README.md'), outputsFile];
 }
 
 let oxieBin;
@@ -109,7 +113,7 @@ function rewriteLinks(text, srcDir) {
 		if (/^([a-z]+:|#)/.test(target)) return all;
 		const [file, hash = ''] = target.split('#');
 		const rel = path.relative(repo, path.resolve(srcDir, file)).replaceAll('\\', '/');
-		const page = rel === 'CHANGELOG.md' ? 'changelog' : rel.match(/^docs\/([\w-]+)\.md$/)?.[1];
+		const page = rel === 'CHANGELOG.md' ? 'changelog' : rel === 'crates/oxie-cli/guide/writing-oxie.md' ? 'writing-oxie' : rel.match(/^docs\/([\w-]+)\.md$/)?.[1];
 		if (page) return `](/${page}/${hash ? '#' + hash : ''})`;
 		const kind = /\.\w+$/.test(rel) ? 'blob' : 'tree';
 		return `](${github}/${kind}/main/${rel}${hash ? '#' + hash : ''})`;
@@ -166,13 +170,13 @@ function page(srcFile, slug, outputs) {
 	return { file: path.join(outDir, `${slug}.md`), text: frontmatter.join('\n') + '\n' + convert(rest, path.dirname(srcFile), outputs) };
 }
 
-/** A `## ` section of the README, for the home page. */
-function readmeSection(heading, outputs) {
+/** A `## ` section of the README, for the home page, as src/generated/readme-<name>.md. */
+function readmeSection(heading, outputs, name = heading.toLowerCase()) {
 	const lines = fs.readFileSync(path.join(repo, 'README.md'), 'utf8').split('\n');
 	const start = lines.indexOf(`## ${heading}`);
 	if (start < 0) throw new Error(`README.md has no "## ${heading}" section for the home page`);
 	const end = lines.findIndex((l, i) => i > start && l.startsWith('## '));
-	const file = path.join(partsDir, `readme-${heading.toLowerCase()}.md`);
+	const file = path.join(partsDir, `readme-${name}.md`);
 	return { file, text: convert(lines.slice(start, end < 0 ? undefined : end), repo, outputs) };
 }
 
@@ -195,7 +199,9 @@ export function syncDocs() {
 	const pages = [
 		...docs.map((f) => page(path.join(repo, 'docs', f), f.slice(0, -3), outputs)),
 		page(path.join(repo, 'CHANGELOG.md'), 'changelog', outputs),
+		page(writingGuide, 'writing-oxie', outputs),
 		readmeSection('Why', outputs),
+		readmeSection('AI coding agents', outputs, 'agents'),
 		readmeSection('Install', outputs),
 		homeExample(),
 	];

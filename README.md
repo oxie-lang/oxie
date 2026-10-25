@@ -13,7 +13,12 @@ Every crate works, programs run exactly as fast as hand-written Rust, and you ne
 `let mut`, `impl` blocks, `Ok(...)`, `.to_string()` on literals or `#[derive(...)]` boilerplate
 unless you want to.
 
-Documentation: **[oxie.bkymz.net](https://oxie.bkymz.net)**
+Documentation: **[oxie.bkymz.net](https://oxie.bkymz.net)** · **[AI coding agents](https://oxie.bkymz.net/ai-agents/)**
+
+> **Built for AI coding agents.** Oxie works with Claude Code, Codex, Cursor, and any agent that
+> reads `AGENTS.md`: `oxie new` gives every project one, `oxie guide` teaches the agent the exact
+> Oxie version installed, and `oxie check` explains what it gets wrong, in Oxie terms and with the
+> fix. [Set it up in a minute](#ai-coding-agents).
 
 ```oxie
 error enum BankError {
@@ -150,6 +155,39 @@ reads takes `&self`, a function that returns `Self` without touching `self` is s
 When the borrow checker objects, the error says what happened in Oxie terms ("`name` was moved
 into `register()` on line 6") and offers fixes your editor can apply.
 
+## AI coding agents
+
+Oxie is built to be written by AI coding agents as well as by people. Models have seen little
+Oxie, and what they have seen may describe an older version, so Oxie doesn't rely on what they
+remember: the installed `oxie` teaches the language and explains mistakes.
+
+```bash
+oxie new hello                   # a new project with an AGENTS.md for agents
+oxie guide                       # the guide to writing the installed version of Oxie
+oxie check                       # errors at .oxi lines, in Oxie terms, each with its fix
+oxie emit src/main.oxi --annotate   # the Rust a file becomes, and why
+```
+
+* **`oxie guide`** prints the guide to writing Oxie, built into the binary, so it always matches
+  the compiler: how to work with it, the language at a glance, what works differently from
+  Kotlin and from Rust, and the patterns to use. `oxie guide topics` lists the reference pages it
+  also carries, and it warns when a project builds with another `oxie-build`.
+* **`oxie new` and `oxie init`** write an `AGENTS.md`, read by Codex, Cursor, GitHub Copilot, and
+  other agents. It holds no language rules, only commands, so updating Oxie updates what agents
+  learn.
+* **`oxie check`** turns rustc's errors into Oxie's terms at `.oxi` lines (where a value moved,
+  why a `val` can't change) and ends most with a `= fix:` line giving the corrected code; the
+  language server offers the same fixes as quick fixes.
+* **Claude Code** also has a plugin whose skill does all this for any Oxie work:
+
+  ```bash
+  claude plugin install oxie --marketplace oxie-lang/oxie
+  ```
+
+The [AI coding agents guide](docs/ai-agents.md) covers setup for each agent, the commands, and
+how agents stay current when Oxie changes, and [`evals/`](evals) measures how well models write
+Oxie with and without this help.
+
 ## Install
 
 Oxie needs Rust 1.82 or newer with Cargo (install them with [rustup](https://rustup.rs)), since
@@ -269,21 +307,6 @@ Differences are within timing noise. See [docs/performance.md](docs/performance.
 * **Grammars**: tree-sitter in [`editors/tree-sitter-oxie`](editors/tree-sitter-oxie), TextMate
   in [`editors/vscode-oxie/syntaxes`](editors/vscode-oxie/syntaxes).
 
-## AI coding agents
-
-Models know little about Oxie, and what they know may describe an older version. `oxie guide`
-prints a guide to writing the installed version: how to work with the compiler, how Oxie
-differs from Kotlin and Rust, and the usual mistakes. The `AGENTS.md` that `oxie new` writes tells
-agents to read it. Neither a project nor an agent's setup holds language rules of its own, so
-updating Oxie updates what agents learn. Claude Code also has a skill that does this for any
-Oxie work:
-
-```bash
-claude plugin install oxie --marketplace oxie-lang/oxie
-```
-
-[`evals/`](evals) measures how well models write Oxie with and without this help.
-
 ## Documentation
 
 The documentation is published at [oxie.bkymz.net](https://oxie.bkymz.net), where every example
@@ -295,6 +318,8 @@ also shows the Rust it compiles to and its output. The same pages are in `docs/`
 * [Coming from Kotlin or TypeScript](docs/cheatsheet.md)
 * [Rust interop](docs/rust-interop.md) — crates, mixed projects, calling Oxie from Rust
 * [Tooling](docs/tooling.md) — CLI, project layout, formatter, language server, editors
+* [AI coding agents](docs/ai-agents.md) — Claude Code, Codex, Cursor and other agents, and
+  [writing Oxie](crates/oxie-cli/guide/writing-oxie.md), the guide `oxie guide` prints
 * [Performance](docs/performance.md)
 * [Compiler internals](docs/internals.md) — for contributors
 * [Releasing](RELEASING.md) — where Oxie and its extensions are published, and how

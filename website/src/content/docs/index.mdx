@@ -2,13 +2,20 @@
 title: The Oxie programming language
 description: A programming language for the Rust ecosystem, with a concise, familiar syntax that compiles to plain Rust.
 template: splash
+banner:
+  content: |
+    <strong>Built for AI coding agents.</strong> <code>oxie new</code> gives every project an <code>AGENTS.md</code>, and <code>oxie guide</code> teaches the installed version. <a href="/ai-agents/">Set up your agent</a>
 hero:
   title: Oxie is a concise, familiar language that compiles to plain Rust
-  tagline: It keeps Rust's ownership, traits and speed, and drops the bookkeeping. Every crate works, and programs run exactly as fast as hand-written Rust, because they are Rust.
+  tagline: It keeps Rust's ownership, traits and speed, and drops the bookkeeping. AI coding agents learn Oxie from the compiler itself, which teaches the installed version and explains what they get wrong. Every crate works, and programs run exactly as fast as hand-written Rust, because they are Rust.
   actions:
     - text: Take the tour
       link: /guide/
       icon: right-arrow
+    - text: AI coding agents
+      link: /ai-agents/
+      icon: rocket
+      variant: secondary
     - text: Install
       link: /tooling/#installing
       variant: minimal
@@ -20,9 +27,12 @@ hero:
 
 import OxieToRust from '../../components/OxieToRust.astro';
 import Why from '../../generated/readme-why.md';
+import Agents from '../../generated/readme-agents.md';
 import Install from '../../generated/readme-install.md';
 
 <OxieToRust />
+
+<Agents />
 
 <Why />
 

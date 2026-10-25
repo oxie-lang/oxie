@@ -271,11 +271,13 @@ fn markdown_files(dir: &Path) -> Vec<PathBuf> {
 
 /// The pages of docs/ that `oxie guide <topic>` prints are built into the binary from copies in
 /// `crates/oxie-cli/guide/docs` (a published crate can't include files outside its directory).
-/// They must equal docs/, and every page of docs/ is a topic except the ones for working on Oxie
-/// itself. `OXIE_BLESS=1` copies docs/ over them.
+/// They must equal docs/, and every page of docs/ is a topic except the ones an agent writing
+/// Oxie doesn't need (NOT_TOPICS). `OXIE_BLESS=1` copies docs/ over them.
 #[test]
 fn guide_topics_match_docs() {
-    const NOT_TOPICS: [&str; 1] = ["internals.md"];
+    // internals.md is for working on Oxie, ai-agents.md for setting an agent up: an agent
+    // reading `oxie guide` needs neither
+    const NOT_TOPICS: [&str; 2] = ["internals.md", "ai-agents.md"];
     let root = repo();
     let copies = root.join("crates/oxie-cli/guide/docs");
     let mut problems = Vec::new();
