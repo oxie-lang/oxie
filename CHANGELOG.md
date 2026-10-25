@@ -9,6 +9,9 @@
   retries > 2)`, `class Rect(w: i32, h: i32 = w)`) uses that parameter's argument. Before, the
   default was pasted into the call, where it read a variable of the caller with that name, or
   failed when there was none.
+* `val (x, y) = point` destructures a data class into its fields in constructor order, as
+  Kotlin's `component1()`, `component2()` do (`let Point { x, y } = point;`). Before, rustc
+  rejected the tuple pattern.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.

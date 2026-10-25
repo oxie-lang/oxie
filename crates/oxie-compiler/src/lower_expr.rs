@@ -311,6 +311,8 @@ impl<'a> Lowerer<'a> {
     }
 
     fn let_stmt(&mut self, pat: &Pat, ty: Option<&Type>, init: Option<&Expr>, else_: Option<&Block>) {
+        let fields = self.data_class_destructuring(pat, ty.cloned().or_else(|| init.and_then(|e| self.infer_type(e))));
+        let pat = fields.as_ref().unwrap_or(pat);
         let mut p = self.pat(pat);
         // closures that assign to captured variables are FnMut and must be `let mut` to be called
         if let (Some(Expr { kind: ExprKind::Lambda { body, .. }, .. }), Pat::Ident { mutable: false, .. }) = (init, pat) {
@@ -1126,6 +1128,30 @@ impl<'a> Lowerer<'a> {
 
     fn in_throwing_fn(&self) -> bool {
         self.fns.last().is_some_and(|f| f.throws && !f.is_lambda)
+    }
+
+    /// `val (x, y) = point` on a data class: its fields in constructor order, as Kotlin's
+    /// `component1()`, `component2()`: `let Point { x, y, .. } = point;`.
+    fn data_class_destructuring(&self, pat: &Pat, ty: Option<Type>) -> Option<Pat> {
+        let Pat::Tuple(parts) = pat else { return None };
+        let ty = match ty? {
+            Type::Ref { inner, .. } => *inner,
+            t => t,
+        };
+        let name = ty.last_name()?.to_string();
+        let c = self.class_info(&name).filter(|c| c.is_data && !c.is_shared && !c.is_tuple)?;
+        let params = c.ctor_params();
+        if parts.len() > params.len() || parts.iter().any(|p| matches!(p, Pat::Rest)) {
+            return None;
+        }
+        let fields: Vec<(String, Option<Pat>)> = params
+            .iter()
+            .zip(parts)
+            .filter(|(_, p)| !matches!(p, Pat::Wild))
+            .map(|(f, p)| (f.name.clone().unwrap_or_default(), Some(p.clone())))
+            .collect();
+        let rest = fields.len() < c.fields.len();
+        Some(Pat::Struct { path: vec![name], fields, rest, span: Default::default() })
     }
 
     /// A variable known to be `&str`, which converts to a `String` with `.to_string()`.

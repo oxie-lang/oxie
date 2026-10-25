@@ -1133,6 +1133,10 @@ impl<'a> Lowerer<'a> {
                 let mut parts: Vec<String> = fields
                     .iter()
                     .map(|(n, sub)| match sub {
+                        // `Point { x, mut y }`
+                        Some(Pat::Ident { name, by_ref: false, mutable, sub: None, .. }) if name == n => {
+                            format!("{}{}", if *mutable { "mut " } else { "" }, esc(n))
+                        }
                         Some(sp) => format!("{}: {}", esc(n), self.pat(sp)),
                         None => esc(n),
                     })

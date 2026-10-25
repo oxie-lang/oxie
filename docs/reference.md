@@ -47,6 +47,7 @@ Contents: [Lexical structure](#lexical-structure) · [Declarations](#declaration
 | `val x: T = v` | `let x: T = v;` |
 | `val (a, b) = pair` | `let (a, b) = pair;` |
 | `var (a, b) = pair` | `let (mut a, mut b) = pair;` |
+| `val (x, y) = point` (a data class) | `let Point { x, y } = point;` (fields in constructor order) |
 | `let`/`let mut` (Rust style) | unchanged |
 | `val Some(x) = opt else { return }` | `let Some(x) = opt else { return };` |
 | top-level `const NAME = 1` / `val NAME = 1` | `const NAME: i32 = 1;` (type inferred from literals) |
