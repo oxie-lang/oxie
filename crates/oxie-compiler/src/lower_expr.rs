@@ -2474,7 +2474,9 @@ impl<'a> Lowerer<'a> {
                     return;
                 }
                 if let Some(c) = self.class.as_ref().cloned() {
-                    if let Some(m) = c.methods.get(&name) {
+                    // `drop(x)` is std's: Rust never lets code call `Drop::drop`
+                    let std_drop = |m: &&crate::sema::MethodInfo| name == "drop" && m.params.is_empty() && args.len() == 1;
+                    if let Some(m) = c.methods.get(&name).filter(|m| !std_drop(m)) {
                         let static_ctx = c.is_static;
                         if m.recv == Recv::Static {
                             self.e.w(&format!("Self::{}", esc(&name)));
