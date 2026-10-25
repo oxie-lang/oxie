@@ -1,0 +1,55 @@
+// Methods that only read a `String`, `Vec` or class parameter borrow it, like top-level
+// functions (not interface methods, whose signature the interface fixes). Extension functions
+// that change their receiver take `&mut self`.
+data class Item(name: String, price: i32) {
+    fun cheaper_than(o: Item): Boolean = price < o.price
+    fun named(n: String): Boolean = name == n
+    fun total(xs: Vec<i32>): i32 = xs.iter().sum::<i32>() + price
+}
+interface Greeter { fun greet(n: String): String }
+class Hi : Greeter {
+    override fun greet(n: String): String = "hi $n"
+}
+class Shop(var items: Vec<Item> = vec[]) {
+    fun add(i: Item) = items.push(i)
+    fun has(n: String): Boolean = items.any { it.name == n }
+}
+
+// a parameter moved into a struct (`Self { label, .. }`) stays owned
+class Tagged(label: String, n: i32) {
+    static fun make(label: String): Self = Self { label, n: 1 }
+}
+
+class Temp(var c: f64 = 0.0)
+fun Temp.warm(by: f64) { c += by }
+fun Temp.show(): String = "$c"
+fun Vec<i32>.add_one() { self.push(1) }
+fun String.shout(): String = self.replace("a", "A")
+
+fun main() {
+    val a = Item("a", 1)
+    val b = Item("b", 2)
+    println(a.cheaper_than(b))
+    println(b.name)
+    val n = "a".to_string()
+    println(a.named(n))
+    val xs = vec[1, 2]
+    println(a.total(xs))
+    println(xs.len())
+    var s = Shop()
+    s.add(a)
+    println(s.has(n))
+    println(Hi().greet(n))
+
+    val tag = Tagged.make("tag".to_string())
+    println("${tag.label} ${tag.n}")
+
+    var t = Temp()
+    t.warm(2.5)
+    println(t.show())
+    var v = vec[1]
+    v.add_one()
+    println(v.len())
+    val word = "banana".to_string()
+    println(word.shout())
+}

@@ -299,6 +299,8 @@ pub struct Lowerer<'a> {
     /// What happened to the `String`/`Vec` parameters of this file's functions that could be
     /// lent, by (the function's name span, parameter index).
     pub param_notes: HashMap<(Span, usize), crate::params::ParamNote>,
+    /// The parameters of the function being lowered that Oxie lends (see `params.rs`).
+    pub(crate) lent: Vec<String>,
     /// Functions declared in the blocks being lowered, with their parameters: calls go to them
     /// rather than to the crate's functions with their names.
     pub(crate) local_funs: Vec<(String, Vec<sema::ParamInfo>)>,
@@ -442,6 +444,7 @@ impl<'a> Lowerer<'a> {
             self_by_value: false,
             keep_args: false,
             param_notes: HashMap::new(),
+            lent: Vec::new(),
             local_funs: Vec::new(),
             aliases: HashSet::new(),
             fn_aliases: HashMap::new(),
@@ -1828,6 +1831,8 @@ impl<'a> Lowerer<'a> {
         let unboxed_ret = !throws && self.iface_ret(f).is_some_and(|boxed| !boxed);
         self.fns.push(FnCtx { throws, ret: ret.clone(), is_lambda: false, tries: Vec::new(), text_break: None, unboxed_ret });
         let by_value = std::mem::replace(&mut self.self_by_value, matches!(f.self_param, Some(SelfParam::Value { .. })));
+        let lent_here = f.params.iter().enumerate().filter(|(i, _)| self.param_notes.get(&(f.name_span, *i)).is_some_and(|n| n.borrowed)).filter_map(|(_, p)| p.name().map(str::to_string)).collect();
+        let lent = std::mem::replace(&mut self.lent, lent_here);
         match body {
             FunBody::Block(b) => self.fn_block(b, ret.as_ref(), throws),
             FunBody::Expr(e) => {
@@ -1844,6 +1849,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.self_by_value = by_value;
+        self.lent = lent;
         self.fns.pop();
     }
 

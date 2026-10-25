@@ -69,7 +69,7 @@ impl Ids {
     }
 
     // argument_locals.oxi:23
-    pub(crate) fn name(&mut self /* oxie: &mut self because it calls `names.insert()` */, n: String) -> Option<String> {
+    pub(crate) fn name(&mut self /* oxie: &mut self because it calls `names.insert()` */, n: String /* oxie: owned because it passes `n` to `.insert()` */) -> Option<String> {
         // argument_locals.oxi:24
         let next_id = self.next_id(); /* oxie: computed first because `next_id()` changes `this` while `names` is borrowed for `.insert()` */
         let old = self.names.insert(next_id, n);

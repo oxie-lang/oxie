@@ -22,6 +22,34 @@ fn generic(name: &str, n: usize) -> Type {
     Type::Path { global: false, segs: vec![PathSeg { name: name.into(), generics: Some(vec![GenericArg::Type(Type::Infer); n]), fn_sugar: None }], span: Default::default() }
 }
 
+/// `Name<args>`, or `Name<_, ..>` (`n` of them) when the arguments aren't written.
+fn with_args(name: &str, args: Option<&Vec<GenericArg>>, n: usize) -> Type {
+    match args {
+        Some(g) => Type::Path { global: false, segs: vec![PathSeg { name: name.into(), generics: Some(g.clone()), fn_sugar: None }], span: Default::default() },
+        None => generic(name, n),
+    }
+}
+
+/// The number of type arguments of a std collection that `Name()` / `Name::new()` builds.
+fn std_collection(name: &str) -> Option<usize> {
+    match name {
+        "Vec" | "VecDeque" | "LinkedList" | "HashSet" | "BTreeSet" | "BinaryHeap" => Some(1),
+        "HashMap" | "BTreeMap" => Some(2),
+        _ => None,
+    }
+}
+
+/// Does the type leave some of itself to Rust (`Vec<_>`)?
+pub(crate) fn has_infer(t: &Type) -> bool {
+    match t {
+        Type::Infer => true,
+        Type::Path { segs, .. } => segs.iter().flat_map(|s| s.generics.iter().flatten()).any(|g| matches!(g, GenericArg::Type(t) | GenericArg::Binding(_, t) if has_infer(t))),
+        Type::Ref { inner, .. } | Type::Slice(inner) | Type::Array(inner, _) | Type::Option(inner) => has_infer(inner),
+        Type::Tuple(v) => v.iter().any(has_infer),
+        _ => false,
+    }
+}
+
 impl<'a> Lowerer<'a> {
     pub(crate) fn infer_type(&self, e: &Expr) -> Option<Type> {
         self.infer(e, false)
@@ -97,9 +125,53 @@ impl<'a> Lowerer<'a> {
             Paren(x) => self.infer_type(x),
             Elvis(_, r) => self.infer_type(r).map(|t| if t == static_str() { ty("String") } else { t }),
             Call { callee, args } => {
+                // `HashMap<String, i32>()`, `mutableListOf<i32>()`, `Stack<i32>()`: type arguments given
+                if let ExprKind::Path { segs, generics: Some(g), global: false } = &callee.kind {
+                    let n = segs.last()?.as_str();
+                    let built = match (segs.len(), n) {
+                        (1, "listOf" | "mutableListOf" | "arrayListOf" | "vecOf") if g.len() == 1 => Some("Vec"),
+                        (1, "mapOf" | "mutableMapOf" | "hashMapOf") if g.len() == 2 => Some("HashMap"),
+                        (1, "setOf" | "mutableSetOf" | "hashSetOf") if g.len() == 1 => Some("HashSet"),
+                        _ => None,
+                    };
+                    if let Some(t) = built {
+                        return Some(with_args(t, Some(g), 0));
+                    }
+                    // `HashMap<String, i32>::new()`: the arguments belong to the type
+                    if let [ty, f] = segs.as_slice() {
+                        return match std_collection(ty) {
+                            Some(count) if matches!(f.as_str(), "new" | "with_capacity" | "default") && !self.k.is_user_type(ty) && g.len() == count => Some(with_args(ty, Some(g), count)),
+                            _ => None,
+                        };
+                    }
+                    if segs.len() != 1 || self.is_local(n) {
+                        return None;
+                    }
+                    if std_collection(n).is_some_and(|count| count == g.len()) && args.is_empty() && !self.k.is_user_type(n) {
+                        return Some(with_args(n, Some(g), 0));
+                    }
+                    return self.class_info(n).filter(|c| c.type_params == g.len()).map(|_| with_args(n, Some(g), 0));
+                }
+                // `Vec::<i32>::new()`, `std::collections::HashMap::<K, V>::new()`
+                if let ExprKind::QualifiedPath(Type::Qualified { ty, trait_: None, rest }) = &callee.kind {
+                    let Type::Path { segs, .. } = &**ty else { return None };
+                    let last = segs.last()?;
+                    let std_path = segs.len() == 1 && !self.k.is_user_type(&last.name) || segs[0].name == "std";
+                    return match (std_collection(&last.name), rest.as_slice()) {
+                        (Some(count), [f]) if std_path && matches!(f.name.as_str(), "new" | "with_capacity" | "default") => Some(with_args(&last.name, last.generics.as_ref(), count)),
+                        _ => None,
+                    };
+                }
                 // `util::total(v)`, `a::Counter(1)`
                 if let ExprKind::Path { segs, .. } = &callee.kind {
                     if segs.len() > 1 {
+                        // `Vec::new()`, `std::collections::HashMap::new()`
+                        if let [.., ty, f] = segs.as_slice() {
+                            let std_path = segs.len() == 2 && !self.k.is_user_type(ty) || segs[0] == "std";
+                            if let Some(count) = std_collection(ty).filter(|_| std_path && matches!(f.as_str(), "new" | "with_capacity" | "default")) {
+                                return Some(generic(ty, count));
+                            }
+                        }
                         return self.path_call_type(segs, through_try);
                     }
                 }
@@ -127,8 +199,9 @@ impl<'a> Lowerer<'a> {
                         Some(t) => Some(Type::Path { global: false, segs: vec![PathSeg { name: "Vec".into(), generics: Some(vec![GenericArg::Type(t)]), fn_sugar: None }], span: Default::default() }),
                         None => Some(generic("Vec", 1)),
                     },
-                    "mapOf" | "mutableMapOf" | "hashMapOf" if !args.is_empty() => Some(generic("HashMap", 2)),
-                    "setOf" | "mutableSetOf" | "hashSetOf" if !args.is_empty() => Some(generic("HashSet", 1)),
+                    "listOf" | "mutableListOf" | "arrayListOf" | "vecOf" => Some(generic("Vec", 1)),
+                    "mapOf" | "mutableMapOf" | "hashMapOf" => Some(generic("HashMap", 2)),
+                    "setOf" | "mutableSetOf" | "hashSetOf" => Some(generic("HashSet", 1)),
                     "Vec" | "VecDeque" | "HashSet" | "BTreeSet" if args.is_empty() && !self.k.is_user_type(n) => Some(generic(n, 1)),
                     "HashMap" | "BTreeMap" if args.is_empty() && !self.k.is_user_type(n) => Some(generic(n, 2)),
                     "String" if !self.k.is_user_type(n) => Some(ty("String")),
@@ -251,18 +324,19 @@ impl<'a> Lowerer<'a> {
                     _ => None,
                 }
             }
-            VecLit(items) if !items.is_empty() => {
+            VecLit(items) => {
                 // `vec[x; n]` holds `x`s
-                let t = match &items[0].kind {
-                    ArrayRepeat(x, _) => self.infer_type(x)?,
-                    _ => self.infer_type(&items[0])?,
+                let t = match items.first().map(|x| &x.kind) {
+                    Some(ArrayRepeat(x, _)) => self.infer_type(x),
+                    Some(_) => self.infer_type(&items[0]),
+                    None => None,
                 };
-                Some(Type::Path { global: false, segs: vec![PathSeg { name: "Vec".into(), generics: Some(vec![GenericArg::Type(t)]), fn_sugar: None }], span: Default::default() })
+                Some(Type::Path { global: false, segs: vec![PathSeg { name: "Vec".into(), generics: Some(vec![GenericArg::Type(t.unwrap_or(Type::Infer))]), fn_sugar: None }], span: Default::default() })
             }
             Array(items) if !items.is_empty() => Some(Type::Array(Box::new(self.infer_type(&items[0])?), items.len().to_string())),
             // only the collection is known (`for` loops over it borrow it when it's used afterwards)
-            MapLit(items) if !items.is_empty() => Some(generic("HashMap", 2)),
-            SetLit(items) if !items.is_empty() => Some(generic("HashSet", 1)),
+            MapLit(_) => Some(generic("HashMap", 2)),
+            SetLit(_) => Some(generic("HashSet", 1)),
             _ => None,
         }
     }
@@ -289,7 +363,8 @@ impl<'a> Lowerer<'a> {
             for p in &f.params {
                 self.bind_pat(&p.pat, Some(p.ty.clone()));
             }
-            f2.ret = self.infer_type(e);
+            // a type Rust would have to fill in (`Vec<_>`) can't be a function's result
+            f2.ret = self.infer_type(e).filter(|t| !has_infer(t));
             self.pop_scope();
         }
         f2

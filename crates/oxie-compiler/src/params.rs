@@ -71,6 +71,8 @@ fn kind_in<'a>(ty: &Type, stage: &Stage<'a>, module: &[String]) -> Option<(Kind,
     match (s.name.as_str(), s.generics.as_deref()) {
         (n, _) if k.class_in(n, module).is_some() => class(n).map(|c| (Kind::Class, Some(c))),
         ("Box", Some([GenericArg::Type(t)])) => Some((Kind::Boxed, t.single_name().and_then(class))),
+        // a `Vec` the source analysis kept: a loop over it may only read elements of a class
+        ("Vec", Some([GenericArg::Type(_)])) => Some((Kind::Vec, None)),
         _ => None,
     }
 }
@@ -90,6 +92,27 @@ fn chain_text(e: &Expr) -> String {
     match &e.kind {
         ExprKind::Field { recv, name, .. } => format!("{}.{}", chain_text(recv), name),
         _ => e.ident().unwrap_or("this").to_string(),
+    }
+}
+
+/// The operands of a `+` chain: `a + b + c` → `[a, b, c]`.
+fn concat_operands<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Binary(BinOp::Add, l, r) => {
+            concat_operands(l, out);
+            out.push(r);
+        }
+        _ => out.push(e),
+    }
+}
+
+/// The element type of a collection a `for` loop can borrow (`Vec<T>`, `HashSet<T>`, ...).
+fn loop_elem(t: &Type) -> Option<&Type> {
+    let Type::Path { segs, .. } = t else { return None };
+    let [s] = segs.as_slice() else { return None };
+    match (s.name.as_str(), s.generics.as_deref()) {
+        ("Vec" | "VecDeque" | "LinkedList" | "HashSet" | "BTreeSet" | "BinaryHeap", Some([GenericArg::Type(t)])) => Some(t),
+        _ => None,
     }
 }
 
@@ -262,11 +285,23 @@ impl<'a> Types<'a> {
     }
 }
 
-/// The top-level functions of the items, with the module inside the file that declares each.
-fn top_level_funs<'a>(items: &'a [Item], module: &[String], out: &mut Vec<(Vec<String>, &'a Item, &'a FunDecl)>) {
+/// The top-level functions of the items, and the methods of their classes (not of shared
+/// classes, whose methods a handle forwards to), with the module inside the file that declares
+/// each and whether it is a method.
+fn top_level_funs<'a>(items: &'a [Item], module: &[String], out: &mut Vec<(Vec<String>, &'a Item, &'a FunDecl, bool)>) {
+    fn methods<'a>(t: &'a TypeDecl, module: &[String], out: &mut Vec<(Vec<String>, &'a Item, &'a FunDecl, bool)>) {
+        for m in &t.members {
+            match &m.kind {
+                ItemKind::Fun(f) if !t.shared => out.push((module.to_vec(), m, f, true)),
+                ItemKind::Type(inner) => methods(inner, module, out),
+                _ => {}
+            }
+        }
+    }
     for it in items {
         match &it.kind {
-            ItemKind::Fun(f) => out.push((module.to_vec(), it, f)),
+            ItemKind::Fun(f) => out.push((module.to_vec(), it, f, false)),
+            ItemKind::Type(t) => methods(t, module, out),
             ItemKind::Mod { name, items } => top_level_funs(items, &[module, std::slice::from_ref(name)].concat(), out),
             _ => {}
         }
@@ -383,6 +418,10 @@ struct Cand<'a> {
     index: usize,
     kind: Kind,
     name: &'a str,
+    /// Its type (for a loop variable, the element type).
+    ty: Type,
+    /// The module of the function.
+    module: Vec<String>,
     body: Block,
     /// The class of the value a class or `Box` parameter lends, when it is an Oxie class.
     class: Option<&'a ClassInfo>,
@@ -391,12 +430,23 @@ struct Cand<'a> {
     drops: Option<(Span, String)>,
 }
 
+/// A parameter: the index of the file declaring its function, the start of the function's name,
+/// and the parameter's position.
+type Key = (usize, u32, usize);
+
 /// The (function, parameter index) pairs that can be borrowed, found as a greatest fixpoint.
 struct Analysis<'a> {
-    decls: HashMap<&'a str, &'a FunDecl>,
+    /// The top-level functions whose names no other one has, with their files.
+    decls: HashMap<&'a str, (usize, &'a FunDecl)>,
     cands: Vec<Cand<'a>>,
-    alive: HashSet<(String, usize)>,
+    alive: HashSet<Key>,
     stage: Stage<'a>,
+}
+
+impl Cand<'_> {
+    fn key(&self) -> Key {
+        (self.file, self.fun.name_span.start, self.index)
+    }
 }
 
 impl<'a> Analysis<'a> {
@@ -407,14 +457,30 @@ impl<'a> Analysis<'a> {
         for (i, (module, f)) in files.iter().enumerate() {
             let mut here = Vec::new();
             top_level_funs(&f.items, module, &mut here);
-            funs.extend(here.into_iter().map(|(m, it, d)| (i, m, it, d)));
+            funs.extend(here.into_iter().map(|(m, it, d, method)| (i, m, it, d, method)));
         }
         let files: Vec<&File> = files.iter().map(|(_, f)| *f).collect();
         let mut count: HashMap<&str, usize> = HashMap::new();
-        for (.., f) in &funs {
-            *count.entry(f.name.as_str()).or_default() += 1;
+        for (.., f, method) in &funs {
+            if !method {
+                *count.entry(f.name.as_str()).or_default() += 1;
+            }
         }
-        let decls: HashMap<&str, &FunDecl> = funs.iter().filter(|(.., f)| count[f.name.as_str()] == 1).map(|(.., f)| (f.name.as_str(), *f)).collect();
+        let decls: HashMap<&str, (usize, &FunDecl)> = funs.iter().filter(|(.., f, method)| !method && count[f.name.as_str()] == 1).map(|(i, .., f, _)| (f.name.as_str(), (*i, *f))).collect();
+        // the methods of interfaces, whose implementations keep the interface's signature
+        let mut iface_methods: HashSet<&str> = HashSet::new();
+        fn ifaces<'a>(items: &'a [Item], out: &mut HashSet<&'a str>) {
+            for it in items {
+                match &it.kind {
+                    ItemKind::Trait(t) => out.extend(t.members.iter().filter_map(|m| if let ItemKind::Fun(f) = &m.kind { Some(f.name.as_str()) } else { None })),
+                    ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => ifaces(items, out),
+                    _ => {}
+                }
+            }
+        }
+        for f in &files {
+            ifaces(&f.items, &mut iface_methods);
+        }
 
         // functions used as values (`xs.map(greet)`) or called through a path (`util.greet(x)`, whose
         // arguments this analysis doesn't follow) keep their signature
@@ -431,6 +497,10 @@ impl<'a> Analysis<'a> {
                             as_value.insert(segs.last().cloned().unwrap_or_default());
                         }
                     }
+                    // a method as a value (`Self.save`), or a field of its name
+                    if let ExprKind::Field { name, .. } = &e.kind {
+                        as_value.insert(name.clone());
+                    }
                     true
                 });
             });
@@ -439,9 +509,9 @@ impl<'a> Analysis<'a> {
         let types = Types::new(&files);
         let mut cands = Vec::new();
         let mut alive = HashSet::new();
-        for (file, module, it, f) in &funs {
+        for (file, module, it, f, method) in &funs {
             let eligible = it.vis != Vis::Public
-                && decls.contains_key(f.name.as_str())
+                && if *method { !f.mods.is_override && !f.mods.is_operator && !iface_methods.contains(f.name.as_str()) } else { decls.contains_key(f.name.as_str()) }
                 && !as_value.contains(&f.name)
                 && f.name != "main"
                 && f.receiver.is_none()
@@ -469,19 +539,14 @@ impl<'a> Analysis<'a> {
                     Kind::Class | Kind::Boxed => types.kept_for_drop(&p.ty, name, f, true),
                 };
                 if drops.is_none() {
-                    alive.insert((f.name.clone(), i));
+                    alive.insert((*file, f.name_span.start, i));
                 }
-                cands.push(Cand { file: *file, fun: f, index: i, kind, name: name.as_str(), body: body.clone(), class, drops });
+                cands.push(Cand { file: *file, fun: f, index: i, kind, name: name.as_str(), ty: p.ty.clone(), module: module.clone(), body: body.clone(), class, drops });
             }
         }
         let mut a = Analysis { decls, cands, alive, stage };
         loop {
-            let dead: Vec<(String, usize)> = a
-                .cands
-                .iter()
-                .filter(|c| a.alive.contains(&(c.fun.name.clone(), c.index)) && a.first_owned_use(c).is_some())
-                .map(|c| (c.fun.name.clone(), c.index))
-                .collect();
+            let dead: Vec<Key> = a.cands.iter().filter(|c| a.alive.contains(&c.key()) && a.first_owned_use(c).is_some()).map(|c| c.key()).collect();
             if dead.is_empty() {
                 break;
             }
@@ -495,7 +560,7 @@ impl<'a> Analysis<'a> {
     /// Does an argument of a call to `callee` only lend the value: its parameter is a `&`
     /// reference, or one that is borrowed itself?
     fn lends(&self, callee: &str, pos: usize, arg: &Arg) -> bool {
-        let Some(d) = self.decls.get(callee) else { return false };
+        let Some(&(file, d)) = self.decls.get(callee) else { return false };
         let i = match &arg.name {
             Some(n) => match d.params.iter().position(|p| p.name() == Some(n.as_str())) {
                 Some(i) => i,
@@ -505,7 +570,7 @@ impl<'a> Analysis<'a> {
         };
         match d.params.get(i) {
             Some(p) if matches!(p.ty, Type::Ref { mutable: false, .. }) => true,
-            Some(_) => self.alive.contains(&(callee.to_string(), i)),
+            Some(_) => self.alive.contains(&(file, d.name_span.start, i)),
             None => false,
         }
     }
@@ -531,6 +596,8 @@ impl<'a> Analysis<'a> {
             let read_at = |x: &Expr, whole: bool| if whole && is_p(x) { Some(x.span.start) } else { chain_root(x, name) };
             match &e.kind {
                 ExprKind::Path { .. } if is_p(e) => uses.push(e.span.start),
+                // `Self { name, .. }` moves the parameter into the struct
+                ExprKind::StructLit { fields, .. } if fields.iter().any(|(f, v)| v.is_none() && f == name) => uses.push(e.span.start),
                 ExprKind::MethodCall { recv, name: m, .. } if is_p(recv) && (reads.contains(&m.as_str()) || self.reads_value(c, m)) => {
                     ok.insert(recv.span.start);
                 }
@@ -569,14 +636,33 @@ impl<'a> Analysis<'a> {
                 ExprKind::Index(a, _) => {
                     ok.extend(read_at(a, whole_compares));
                 }
+                // a loop over the `Vec` (or a collection field of the value) that only reads the
+                // elements: it goes over the borrowed collection
+                ExprKind::For { pat, iter, body, .. } => {
+                    let (at, coll) = if is_p(iter) { (iter.span.start, Some(c.ty.clone())) } else { (chain_root(iter, name).unwrap_or(u32::MAX), self.chain_type(c, iter)) };
+                    if (c.kind == Kind::Vec || !is_p(iter)) && coll.as_ref().and_then(loop_elem).is_some_and(|t| self.elems_only_read(c, t, pat, body)) {
+                        ok.insert(at);
+                    }
+                }
                 ExprKind::Call { callee, args } => {
                     if let Some(f) = callee.ident() {
                         for (pos, a) in args.iter().enumerate() {
                             if self.lends(f, pos, a) {
-                                ok.extend(read_at(&a.value, true));
+                                // `&s` too: a reference to the reference coerces
+                                let v = match &a.value.kind {
+                                    ExprKind::Unary(UnOp::Ref, x) => x,
+                                    _ => &a.value,
+                                };
+                                ok.extend(read_at(v, true));
                             }
                         }
                     }
+                }
+                // joining text with `+` formats it: `format!("{}{}", a, b)`
+                ExprKind::Binary(BinOp::Add, ..) if c.kind == Kind::Str => {
+                    let mut ops = Vec::new();
+                    concat_operands(e, &mut ops);
+                    ok.extend(ops.into_iter().filter(|o| is_p(o)).map(|o| o.span.start));
                 }
                 ExprKind::Lambda { is_move: true, body, .. } => {
                     walk_expr(body, &mut |x| {
@@ -599,6 +685,26 @@ impl<'a> Analysis<'a> {
             true
         });
         uses.into_iter().filter(|u| !ok.contains(u)).chain(captured).min()
+    }
+
+    /// Does the body of a loop over a collection of `elem`s only read the element `pat` binds,
+    /// so the loop can go over the borrowed collection? `Copy` elements are bound by value.
+    fn elems_only_read(&self, c: &Cand, elem: &Type, pat: &Pat, body: &Block) -> bool {
+        let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
+        let copy = match &self.stage {
+            Stage::Types { copy, .. } => is_copy_simple(elem, copy),
+            Stage::Text => is_copy_simple(elem, &HashSet::new()),
+        };
+        if matches!(pat, Pat::Wild) || copy && (plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain))) {
+            return true;
+        }
+        let Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } = pat else { return false };
+        let Some((kind, class)) = kind_in(elem, &self.stage, &c.module) else { return false };
+        if rebinds(body, name) {
+            return false;
+        }
+        let elem = Cand { file: c.file, fun: c.fun, index: c.index, kind, name, ty: elem.clone(), module: c.module.clone(), body: body.clone(), class, drops: None };
+        self.first_owned_use(&elem).is_none()
     }
 
     /// Does calling `m` on a class or `Box` parameter only read it: a method of its class that
@@ -691,6 +797,74 @@ pub fn kept_reason(files: &[&File], fun: &str, index: usize) -> Option<(usize, S
     Some((c.file, span, why))
 }
 
+/// Where and why the function `fun` (declared once in the crate, at the top level or in a
+/// class) keeps its parameter number `index` in a way no borrow could serve: it returns it,
+/// stores it (in a variable, a field, a struct or a collection), passes it on by value, or a
+/// `move` lambda captures it. The index of the file declaring it, the use, and a clause like
+/// "it returns `v`". For the fix that would lend the parameter, which can't compile then.
+pub fn stored_reason(files: &[&File], fun: &str, index: usize) -> Option<(usize, Span, String)> {
+    fn funs<'a>(items: &'a [Item], out: &mut Vec<&'a FunDecl>) {
+        for it in items {
+            match &it.kind {
+                ItemKind::Fun(f) => out.push(f),
+                ItemKind::Type(t) => funs(&t.members, out),
+                ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => funs(items, out),
+                _ => {}
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for (i, f) in files.iter().enumerate() {
+        let mut here = Vec::new();
+        funs(&f.items, &mut here);
+        found.extend(here.into_iter().filter(|d| d.name == fun).map(|d| (i, d)));
+    }
+    let [(file, d)] = found[..] else { return None };
+    let p = d.params.get(index)?;
+    let name = p.name()?;
+    let body = match d.body.as_ref()? {
+        FunBody::Block(b) => b.clone(),
+        FunBody::Expr(e) => Block { stmts: vec![Stmt::Expr { expr: e.clone(), semi: false }], span: e.span },
+    };
+    if rebinds(&body, name) {
+        return None;
+    }
+    let views: Vec<(&[String], &File)> = files.iter().map(|f| (&[][..], *f)).collect();
+    let a = Analysis::new(&views, Stage::Text);
+    let c = Cand { file, fun: d, index, kind: Kind::Class, name, ty: p.ty.clone(), module: Vec::new(), body, class: None, drops: None };
+    // the uses, without those lent to a call; a `move` lambda's start for what it captures
+    let mut uses: Vec<u32> = Vec::new();
+    let mut lent: HashSet<u32> = HashSet::new();
+    walk_block(&c.body, &mut |e| {
+        let is_p = |x: &Expr| x.ident() == Some(name);
+        match &e.kind {
+            ExprKind::Path { .. } if is_p(e) => uses.push(e.span.start),
+            ExprKind::StructLit { fields, .. } if fields.iter().any(|(f, v)| v.is_none() && f == name) => uses.push(e.span.start),
+            ExprKind::Call { callee, args } => {
+                if let Some(f) = callee.ident() {
+                    for (pos, arg) in args.iter().enumerate() {
+                        if is_p(&arg.value) && (PRINTS.contains(&f) && !a.decls.contains_key(f) || a.lends(f, pos, arg)) {
+                            lent.insert(arg.value.span.start);
+                        }
+                    }
+                }
+            }
+            ExprKind::Lambda { is_move: true, body, .. } => walk_expr(body, &mut |x| {
+                if is_p(x) {
+                    uses.push(e.span.start);
+                }
+                true
+            }),
+            _ => {}
+        }
+        true
+    });
+    uses.sort();
+    uses.dedup();
+    let stores = |why: &str| ["it returns", "it stores", "it passes", "a `move` lambda"].iter().any(|s| why.starts_with(s));
+    uses.into_iter().filter(|u| !lent.contains(u)).map(|at| kept_use(&c, at)).find(|(_, why)| stores(why)).map(|(span, why)| (file, span, why))
+}
+
 /// The use of the candidate's parameter at `at` that needs the owned value, as a span and a
 /// clause ("it returns `v`").
 fn kept_use(c: &Cand, at: u32) -> (Span, String) {
@@ -711,6 +885,7 @@ fn kept_use(c: &Cand, at: u32) -> (Span, String) {
         what = match &e.kind {
             ExprKind::Lambda { is_move: true, .. } | ExprKind::Async { .. } if e.span.start == at => Some(format!("a `move` lambda captures `{}`", name)),
             ExprKind::Return(Some(x)) if is_at(x) => Some(format!("it returns `{}`", name)),
+            ExprKind::For { iter, .. } if is_at(iter) => Some(format!("a loop takes the elements out of `{}`", name)),
             ExprKind::Call { callee, args } if args.iter().any(|a| is_at(&a.value)) => match callee.ident() {
                 Some(f) => Some(format!("it passes `{}` to `{}`, which takes it by value", name, f)),
                 None => Some(format!("it passes `{}` to a function that takes it by value", name)),
@@ -724,8 +899,10 @@ fn kept_use(c: &Cand, at: u32) -> (Span, String) {
             ExprKind::MethodCall { recv, name: m, .. } if chain_root(recv, name) == Some(at) => Some(format!("it calls `.{}()` on `{}`", m, chain_text(recv))),
             ExprKind::Field { .. } if chain_root(e, name) == Some(at) => Some(format!("it uses `{}` by value", chain_text(e))),
             ExprKind::MethodCall { args, name: m, .. } if args.iter().any(|a| is_at(&a.value)) => Some(format!("it passes `{}` to `.{}()`", name, m)),
+            ExprKind::Unary(UnOp::Ref | UnOp::RefMut, x) if is_at(x) => Some(format!("it uses `&{}`, a reference to the value itself", name)),
+            ExprKind::In { item, .. } if is_at(item) => Some(format!("it looks for `{}` with `in`, which compares the value itself", name)),
             ExprKind::Assign(_, _, rhs) if is_at(rhs) => Some(format!("it stores `{}`", name)),
-            ExprKind::StructLit { fields, .. } if fields.iter().any(|(_, v)| v.as_ref().is_some_and(is_at)) => Some(format!("it stores `{}` in a struct", name)),
+            ExprKind::StructLit { fields, .. } if fields.iter().any(|(f, v)| v.as_ref().map_or(e.span.start == at && f == name, is_at)) => Some(format!("it stores `{}` in a struct", name)),
             _ => None,
         };
         true
@@ -755,7 +932,7 @@ pub fn borrow_class_params(files: &mut [(&[String], &mut File)], k: &Crate) -> V
 /// what happened to each candidate.
 fn lend(files: &mut [(&[String], &mut File)], stage: Stage) -> Vec<ParamNote> {
     // the notes, and the type each lent parameter gets, by (function, parameter index)
-    let (notes, lent): (Vec<ParamNote>, HashMap<(String, usize), Type>) = {
+    let (notes, lent): (Vec<ParamNote>, HashMap<Key, Type>) = {
         let views: Vec<(&[String], &File)> = files.iter().map(|(m, f)| (*m, &**f)).collect();
         let a = Analysis::new(&views, stage);
         let mut lent = HashMap::new();
@@ -766,7 +943,7 @@ fn lend(files: &mut [(&[String], &mut File)], stage: Stage) -> Vec<ParamNote> {
                 let kept = a.kept_why(c);
                 let borrowed = kept.is_none();
                 if borrowed {
-                    lent.insert((c.fun.name.clone(), c.index), lent_type(&c.fun.params[c.index].ty, c.kind));
+                    lent.insert(c.key(), lent_type(&c.fun.params[c.index].ty, c.kind));
                 }
                 let (cause, why) = match kept {
                     Some((span, why)) => (Some(span), why),
@@ -777,24 +954,25 @@ fn lend(files: &mut [(&[String], &mut File)], stage: Stage) -> Vec<ParamNote> {
             .collect();
         (notes, lent)
     };
-    fn apply(items: &mut [Item], lent: &HashMap<(String, usize), Type>) {
+    fn apply(file: usize, items: &mut [Item], lent: &HashMap<Key, Type>) {
         for it in items {
             match &mut it.kind {
                 ItemKind::Fun(f) => {
                     for (i, p) in f.params.iter_mut().enumerate() {
-                        if let Some(t) = lent.get(&(f.name.clone(), i)) {
+                        if let Some(t) = lent.get(&(file, f.name_span.start, i)) {
                             p.ty = t.clone();
                         }
                     }
                 }
-                ItemKind::Mod { items, .. } => apply(items, lent),
+                ItemKind::Type(t) => apply(file, &mut t.members, lent),
+                ItemKind::Mod { items, .. } => apply(file, items, lent),
                 _ => {}
             }
         }
     }
     if !lent.is_empty() {
-        for (_, f) in files.iter_mut() {
-            apply(&mut f.items, &lent);
+        for (i, (_, f)) in files.iter_mut().enumerate() {
+            apply(i, &mut f.items, &lent);
         }
     }
     notes

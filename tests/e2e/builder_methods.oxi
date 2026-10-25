@@ -1,0 +1,18 @@
+// A method that returns `this` as its class (a builder) takes `self`, or `mut self` when it
+// changes it; one that returns what such a method gives for `this` takes `self` too.
+class B(var url: String = "", var n: i32 = 0, var tags: Vec<String> = vec[]) {
+    fun url(u: &str): B { url = u.to_string(); this }
+    fun times(k: i32): B { n = k; return this }
+    fun tag(t: &str): B { tags.push(t.to_string()); this }
+    fun reset(): B { n = 0; this }
+    fun twice(): B { val k = n * 2; return reset().times(k) }
+    fun describe(): String = "$url $n ${tags.len()}"
+}
+class C(var n: i32 = 0) { fun same(): C = this }
+fun main() {
+    val b = B().url("x").times(2).tag("a")
+    println("${b.url} ${b.n} ${C().same().n}")
+    println(b.describe())
+    val c = B().times(4).twice()
+    println(c.n)
+}
