@@ -370,7 +370,10 @@ class's methods may be spread over the `impl` blocks of many files, as GPUI apps
 workspace; translated together, the class gets its `context(...)` where it is declared, and its
 methods in the other files drop the same parameters. Each file is still compiled and checked on
 its own, next to declarations of the other files' methods that take contexts. A single file is a
-crate of its own: an `impl` block of a class declared in another file keeps its parameters.
+crate of its own: an `impl` block of a class declared in another file keeps its parameters. Next
+to the crate root's `.oxi` file, the output gets the `main.rs` (or `lib.rs`) a project includes
+the generated code from (see [Project layout](#project-layout)), with the root's crate attributes
+other than lints, such as `#![cfg_attr(windows, windows_subsystem = "windows")]`.
 
 ## Project layout
 

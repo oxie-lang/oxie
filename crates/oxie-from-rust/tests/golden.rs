@@ -985,3 +985,30 @@ fn name(n: i32) -> Option<String> {
 "#,
     );
 }
+
+#[test]
+fn module_paths_beside_fields_of_another_file() {
+    // the struct is in the first file and its method in the second: `servers::COPILOT` stays a
+    // path, since `servers.COPILOT` would read the field
+    let main = r#"
+mod servers;
+mod copilot;
+
+pub struct Store {
+    servers: Vec<String>,
+    #[cfg(test)]
+    tested: bool,
+}
+"#;
+    let copilot = r#"
+use crate::{servers, Store};
+
+impl Store {
+    pub fn sign_in(&mut self) {
+        self.servers.push(servers::COPILOT.to_string());
+    }
+}
+"#;
+    let out: Vec<String> = oxie_from_rust::translate_crate(&[main, copilot]).into_iter().map(|t| t.unwrap().oxie).collect();
+    assert!(out[1].contains("self.servers.push(servers::COPILOT.to_string())"), "{}", out[1]);
+}
