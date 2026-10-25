@@ -538,11 +538,12 @@ impl<'a> Parser<'a> {
             let g = self.raw_group()?;
             let _ = g;
             ItemKind::Raw(self.src[s..self.prev_span().end as usize].to_string())
-        } else if matches!(self.tok(), Tok::Ident(_)) && self.is_punct_at(1, "!") && !self.is_punct_at(2, "=") {
-            // item macro: macro_rules! name { ... } / thread_local! { ... }
+        } else if let Some(n) = self.item_macro_path() {
+            // item macro: macro_rules! name { ... } / thread_local! { ... } / a::b! { ... }
             let s = self.toks[self.pos].span.start as usize;
-            self.bump();
-            self.bump();
+            for _ in 0..=n {
+                self.bump();
+            }
             if self.is_ident() {
                 self.bump();
             }
@@ -1864,6 +1865,23 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(stmts)
+    }
+
+    /// The number of tokens of the path before `!` when an item macro call starts here
+    /// (`thread_local!`, `wasmtime::component::bindgen!`).
+    fn item_macro_path(&self) -> Option<usize> {
+        let mut i = 0;
+        loop {
+            if !matches!(self.tok_at(i), Tok::Ident(_)) {
+                return None;
+            }
+            i += 1;
+            if self.is_punct_at(i, "::") {
+                i += 1;
+                continue;
+            }
+            return (self.is_punct_at(i, "!") && !self.is_punct_at(i + 1, "=")).then_some(i);
+        }
     }
 
     fn is_item_start(&self) -> bool {
