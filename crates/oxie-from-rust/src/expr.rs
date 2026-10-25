@@ -1051,6 +1051,14 @@ impl Printer<'_> {
                     root = Some(r);
                     segs = v;
                 }
+                // `Quit.name()` on a unit struct: Oxie reads `Type.f()` as a static call
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.get_ident().is_some_and(|i| {
+                    // a CamelCase name: Oxie reads an all-caps one (`COUNT.with(..)`) as a value already
+                    let n = i.to_string();
+                    n.starts_with(|c: char| c.is_ascii_uppercase()) && n.contains(|c: char| c.is_ascii_lowercase()) && n != "Self"
+                }) => {
+                    root = Some(format!("({})", self.postfix(&m.receiver)));
+                }
                 other => root = Some(self.postfix(other)),
             }
             prefix = ".".into();
