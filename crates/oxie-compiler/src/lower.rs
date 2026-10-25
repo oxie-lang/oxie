@@ -1398,12 +1398,29 @@ impl<'a> Lowerer<'a> {
                 self.docs(&it.docs);
                 self.attrs(&it.attrs, &[]);
                 let vis = self.vis(&it.vis, ctx);
+                let at_run_time = c.value.as_ref().and_then(|v| self.run_time_part(v));
+                if let Some((span, why)) = &at_run_time {
+                    let kind = if is_static { "a `static`" } else { "a Rust `const`" };
+                    self.error(
+                        *span,
+                        format!(
+                            "`{}` is {}, computed while compiling, but {}: compute it in a function (`fun {}() = ...`) or in a `static` on first use (`static {}: LazyLock<T> = LazyLock.new {{ ... }}`)",
+                            c.name,
+                            kind,
+                            why,
+                            c.name.to_lowercase(),
+                            c.name
+                        ),
+                    );
+                }
                 let ty = match &c.ty {
                     Some(t) => self.ty(t, TyPos::Plain),
                     None => match c.value.as_ref().and_then(infer_lit_type) {
                         Some(t) => t,
                         None => {
-                            self.error(it.span, format!("constant `{}` needs a type annotation", c.name));
+                            if at_run_time.is_none() {
+                                self.error(it.span, format!("constant `{}` needs a type annotation", c.name));
+                            }
                             "_".into()
                         }
                     },
@@ -2248,6 +2265,14 @@ impl<'a> Lowerer<'a> {
                 impl_traits.push(st.clone());
             }
         }
+        // a class as a supertype: Kotlin inheritance
+        for st in &impl_traits {
+            if let (Type::Path { segs, span, .. }, Some(name)) = (st, st.last_name()) {
+                if segs.len() == 1 && self.class_info(name).is_some() && !self.k.traits.contains_key(name) {
+                    self.error(*span, crate::diag::no_inheritance(name));
+                }
+            }
+        }
         let mut by_trait: Vec<Vec<&Item>> = vec![Vec::new(); impl_traits.len()];
         let mut inherent = Vec::new();
         for m in &t.members {
@@ -2267,6 +2292,12 @@ impl<'a> Lowerer<'a> {
             } else if (is_override || assoc) && impl_traits.iter().filter(|t| t.last_name() != Some("__Display")).count() == 1 {
                 let i = impl_traits.iter().position(|t| t.last_name() != Some("__Display")).unwrap();
                 by_trait[i].push(m);
+            } else if is_override && !impl_traits.iter().any(|t| t.last_name() != Some("__Display")) {
+                let name = match &m.kind {
+                    ItemKind::Fun(f) => f.name.as_str(),
+                    _ => "this member",
+                };
+                self.error(m.span, format!("`{}` overrides nothing: `{}` implements no interface; list the interface that declares it (`class {} : Interface`), or remove `override`", name, t.name, t.name));
             } else if is_override || (assoc && !impl_traits.is_empty()) {
                 self.error(m.span, "cannot tell which supertype this member implements; use a separate `impl Trait for Type { }` block");
             } else {
@@ -2505,6 +2536,40 @@ impl<'a> Lowerer<'a> {
             ItemKind::Fun(f) => self.recv_of(owner, f) == Recv::RefMut && info.methods.get(&f.name).is_some_and(|mi| mi.recv == Recv::Ref),
             _ => false,
         })
+    }
+
+    /// The first part of a constant's value that only the running program can compute (it
+    /// allocates or calls a function that isn't `const`), with why.
+    fn run_time_part(&self, e: &Expr) -> Option<(Span, String)> {
+        let allocates = |what: &str| Some((e.span, format!("{} allocates, which only the running program can do", what)));
+        match &e.kind {
+            ExprKind::VecLit(items) if !items.is_empty() => allocates("`vec[...]`"),
+            ExprKind::MapLit(_) | ExprKind::SetLit(_) => allocates("a map or set"),
+            ExprKind::Template(_) => Some((e.span, "a string template builds a `String` while the program runs".into())),
+            ExprKind::MethodCall { name, .. } if matches!(name.as_str(), "to_string" | "to_owned" | "to_vec" | "collect" | "clone" | "into") => {
+                Some((e.span, format!("`.{}()` isn't `const`", name)))
+            }
+            ExprKind::MethodCall { recv, name, .. } if name == "new" || name == "from" => match recv.ident() {
+                Some(t @ ("Box" | "String" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "Rc" | "Arc")) if !(t == "String" && name == "new") => allocates(&format!("`{}.{}`", t, name)),
+                _ => None,
+            },
+            ExprKind::Call { callee, args } => {
+                if let Some(n) = callee.ident() {
+                    if matches!(n, "Box" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "Rc" | "Arc") {
+                        return allocates(&format!("`{}(...)`", n));
+                    }
+                    if self.class_info(n).is_some_and(|c| !c.user_new && !c.is_unit && !c.is_tuple) {
+                        return Some((e.span, format!("`{}(...)` calls `{}::new`, which isn't `const` (`{} {{ .. }}` is)", n, n, n)));
+                    }
+                }
+                args.iter().find_map(|a| self.run_time_part(&a.value))
+            }
+            ExprKind::Paren(x) | ExprKind::Unary(_, x) | ExprKind::Cast(x, _) => self.run_time_part(x),
+            ExprKind::Binary(_, a, b) => self.run_time_part(a).or_else(|| self.run_time_part(b)),
+            ExprKind::Tuple(xs) | ExprKind::Array(xs) => xs.iter().find_map(|x| self.run_time_part(x)),
+            ExprKind::StructLit { fields, .. } => fields.iter().find_map(|(_, v)| v.as_ref().and_then(|v| self.run_time_part(v))),
+            _ => None,
+        }
     }
 
     /// The cases of enum `name` with the types of their fields (for bound inference).

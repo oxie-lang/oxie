@@ -127,12 +127,31 @@ fn plan(files: &[(&[String], &File)]) -> (Adds, Vec<(usize, Diag)>) {
     // the methods whose contexts come from their class, with what their bodies use
     let mut sites: HashMap<usize, Vec<Site>> = HashMap::new();
     let mut uses: HashMap<usize, HashSet<String>> = HashMap::new();
+    let mut fixed_uses = Vec::new();
     for (i, f) in d.funs.iter().enumerate() {
         let Some(c) = f.class.map(|c| &d.classes[c]) else { continue };
-        if c.contexts.is_empty() || !f.decl.contexts.is_empty() || f.fixed {
+        if c.contexts.is_empty() || !f.decl.contexts.is_empty() {
             continue;
         }
         let Some(body) = &f.decl.body else { continue };
+        if f.fixed {
+            // an override or operator can't take the class's contexts: say so where it uses one
+            let mut s = Scan { d: &d, class: c, watch: c.contexts.iter().filter_map(|p| p.name()).collect(), scopes: vec![HashMap::new()], free: HashSet::new(), sites: Vec::new() };
+            for p in &f.decl.params {
+                s.bind_pat(&p.pat, Some(p.ty.clone()));
+            }
+            match body {
+                FunBody::Block(b) => s.block(b),
+                FunBody::Expr(e) => s.expr(e),
+            }
+            let mut used: Vec<String> = s.free.into_iter().collect();
+            used.sort();
+            if let Some(n) = used.first() {
+                let what = if f.decl.mods.is_operator { "an operator" } else { "an interface method" };
+                fixed_uses.push((f.file, f.decl.name_span, format!("`{}` is {}, so it takes only the parameters declared there and can't use the class's context `{}`: keep `{}` in a field, or pass it as an argument", f.decl.name, what, n, n)));
+            }
+            continue;
+        }
         let mut s = Scan { d: &d, class: c, watch: c.contexts.iter().filter_map(|p| p.name()).collect(), scopes: vec![HashMap::new()], free: HashSet::new(), sites: Vec::new() };
         for p in &f.decl.params {
             s.bind_pat(&p.pat, Some(p.ty.clone()));
@@ -167,6 +186,9 @@ fn plan(files: &[(&[String], &File)]) -> (Adds, Vec<(usize, Diag)>) {
         for (i, name) in grew {
             uses.get_mut(&i).unwrap().insert(name);
         }
+    }
+    for (file, span, msg) in fixed_uses {
+        d.error(file, span, msg);
     }
     let names: Vec<Names> = files.iter().map(|(module, f)| Names::of(module, f)).collect();
     let mut adds = HashMap::new();

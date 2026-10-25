@@ -482,6 +482,10 @@ impl<'a> Parser<'a> {
         while (self.is_kw("open") || self.is_kw("final") || self.is_kw("inline") || self.is_kw("sealed") || self.is_kw("abstract"))
             && matches!(self.tok_at(1), Tok::Ident(_))
         {
+            if (self.is_kw("open") || self.is_kw("abstract")) && (self.is_kw_at(1, "class") || self.is_kw_at(2, "class")) {
+                let m = if self.is_kw("open") { "open" } else { "abstract" };
+                self.diags.push(Diag::warning(self.span(), format!("`{}` has no effect: Oxie has no class inheritance, so no class extends another; share behavior with an interface or a field", m)));
+            }
             self.bump();
         }
         let kind = if self.is_fun_start() {
@@ -1307,12 +1311,16 @@ impl<'a> Parser<'a> {
                     }
                     continue;
                 }
+                let start = self.span();
                 let t = self.ty_path()?;
-                // Kotlin `Base()` super constructor call: ignore the parens
+                // Kotlin's `Base(name)` super constructor call (reported, and the supertype left out)
                 if self.is_punct("(") {
                     self.raw_group()?;
+                    let name = t.last_name().unwrap_or("it").to_string();
+                    self.diags.push(Diag::error(start.to(self.prev_span()), crate::diag::no_inheritance(&name)));
+                } else {
+                    out.push(t);
                 }
-                out.push(t);
                 if !(self.eat_punct(",") || self.eat_punct("+")) {
                     break;
                 }
@@ -1529,6 +1537,10 @@ impl<'a> Parser<'a> {
 
     fn enum_decl(&mut self, is_error: bool) -> PResult<TypeDecl> {
         self.bump(); // enum
+        // Kotlin's `enum class Color`
+        if self.is_kw("class") && self.is_ident_at(1) {
+            self.bump();
+        }
         let name_span = self.span();
         let name = self.ident()?;
         let mut generics = self.generics_opt()?;
@@ -1676,8 +1688,8 @@ impl<'a> Parser<'a> {
         if self.peek_past_newlines_kw("where") {
             self.where_clause(&mut generics)?;
         }
-        self.skip_nl_only();
-        let members = self.trait_body()?;
+        // `interface Marker`: no members
+        let members = if self.peek_past_newlines_punct("{") { self.trait_body()? } else { Vec::new() };
         Ok(TraitDecl { name, name_span, generics, supertraits, members, is_unsafe })
     }
 
@@ -1724,6 +1736,25 @@ impl<'a> Parser<'a> {
                     let c = self.const_body(false)?;
                     items.push(Item { docs, attrs, vis, kind: ItemKind::Const(c), span: istart.to(self.prev_span()) });
                     return Ok(());
+                }
+                // Kotlin's abstract property: `val name: String`
+                if (self.is_kw("val") || self.is_kw("var")) && self.is_ident_at(1) {
+                    let at = self.span();
+                    let prop = match self.tok_at(1) {
+                        Tok::Ident(n) => n.clone(),
+                        _ => String::new(),
+                    };
+                    let mut i = 2;
+                    while !matches!(self.tok_at(i), Tok::Newline | Tok::Eof | Tok::Punct("}") | Tok::Punct("=") | Tok::Punct(";")) {
+                        i += 1;
+                    }
+                    if self.is_kw("var") || !self.is_punct_at(i, "=") {
+                        let ty = self.src.get(self.toks[self.pos + 1].span.end as usize..self.toks[self.pos + i - 1].span.end as usize).unwrap_or("").trim().trim_start_matches(':').trim().to_string();
+                        let ty = if ty.is_empty() { "T".to_string() } else { ty };
+                        self.diags.push(Diag::error(at, format!("an interface has no properties: declare `fun {}(): {}`, which each class implements (`override fun {}() = {}`)", prop, ty, prop, prop)));
+                        self.recover_stmt();
+                        return Ok(());
+                    }
                 }
                 self.pos = save;
                 match self.item()? {
