@@ -48,6 +48,8 @@
   `n?.name?.len()`) works like Kotlin's. Before, it was a Rust type error, also when only another
   class had an optional field of that name. `x?.let { if (c) it.len() else null }` gives a
   `usize?`, not a `usize??`.
+* `?.` chains ending in a std method that gives an optional (`s?.chars().next()`,
+  `list?.first()`, `map?.get(k)`) give one optional, not a nested one.
 * `a ?: b ?: c` with an optional `b` tries `a`, then `b`, then `c`; a call in the middle runs only
   when needed. Before, it was an error whose fix used `.expect`, which panics.
 * `?.` on a method declared to return `&T?` and on `find_last` reads fields by reference. Before,
