@@ -300,6 +300,12 @@ pub struct Lowerer<'a> {
     /// Parameters whose type is an interface or a function (`impl Shape`, `impl FnMut(..)`),
     /// as (scope depth, name): a value Oxie boxes where a `Box<dyn ..>` is expected.
     pub(crate) impl_params: Vec<(usize, String)>,
+    /// Lowering the items of an interface or of an `impl Interface for` block.
+    pub(crate) in_trait_items: bool,
+    /// Lowering an interface's method or an implementation of one: parameters and results
+    /// typed as an Oxie interface are `Box<dyn I>` there, which keeps the interface usable as
+    /// `dyn` (an `impl I` would make the method generic).
+    pub(crate) iface_sig: bool,
 }
 
 /// The `#[cfg(..)]` attributes among `attrs`, each followed by a space.
@@ -394,6 +400,8 @@ impl<'a> Lowerer<'a> {
             aliases: HashSet::new(),
             local_imports: Vec::new(),
             impl_params: Vec::new(),
+            in_trait_items: false,
+            iface_sig: false,
         }
     }
 
@@ -1505,6 +1513,10 @@ impl<'a> Lowerer<'a> {
                 parts.push(format!("{}: {} + 'static", pat, ty));
                 continue;
             }
+            if self.iface_sig && self.is_oxie_iface(&p.ty) {
+                parts.push(format!("{}: {}", pat, self.ty(&p.ty, TyPos::Field)));
+                continue;
+            }
             let mut pos = TyPos::Param;
             if fn_typed {
                 let captured = p.name().is_some_and(|n| f.body.as_ref().is_some_and(|b| visit::ident_in_lambda(b, n)));
@@ -1542,7 +1554,7 @@ impl<'a> Lowerer<'a> {
     fn bind_params(&mut self, f: &FunDecl) {
         for p in &f.params {
             self.bind_pat(&p.pat, Some(p.ty.clone()));
-            if let (Some(n), true) = (p.name(), self.is_impl_type(&p.ty)) {
+            if let (Some(n), true) = (p.name(), self.is_impl_type(&p.ty) && !(self.iface_sig && self.is_oxie_iface(&p.ty))) {
                 self.impl_params.push((self.scopes.len() - 1, n.to_string()));
             }
         }
@@ -1556,6 +1568,11 @@ impl<'a> Lowerer<'a> {
             Type::Path { segs, .. } => segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && self.is_trait_name(&segs[0].name),
             _ => false,
         }
+    }
+
+    /// An interface declared in Oxie, named bare (`Shape`).
+    pub(crate) fn is_oxie_iface(&self, t: &Type) -> bool {
+        matches!(t, Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && self.k.traits.contains_key(&segs[0].name) && self.is_trait_name(&segs[0].name))
     }
 
     /// Is `name` a parameter of an interface or function type (see `impl_params`)?
@@ -1773,6 +1790,8 @@ impl<'a> Lowerer<'a> {
         };
         let header = self.fn_header(f);
         let g = self.generics_decl(&f.generics);
+        let iface_sig = self.in_trait_items || f.mods.is_override || self.class.as_ref().is_some_and(|c| c.trait_methods.as_ref().is_some_and(|t| t.contains(&f.name)));
+        let saved_sig = std::mem::replace(&mut self.iface_sig, iface_sig);
         self.push_scope();
         let params = self.params_parts(f, recv_text);
         let ret = self.ret_type(f, TyPos::Ret);
@@ -1814,6 +1833,7 @@ impl<'a> Lowerer<'a> {
         if let (Some(c), Some(s)) = (self.class.as_mut(), saved_static) {
             c.is_static = s;
         }
+        self.iface_sig = saved_sig;
         self.pop_scope();
         self.e.nl();
     }
@@ -2735,6 +2755,7 @@ impl<'a> Lowerer<'a> {
             generics: Vec::new(),
             trait_methods: None,
         });
+        let saved_items = std::mem::replace(&mut self.in_trait_items, true);
         for m in &t.members {
             self.e.nl();
             match &m.kind {
@@ -2756,6 +2777,7 @@ impl<'a> Lowerer<'a> {
                 _ => self.assoc_item(m, false),
             }
         }
+        self.in_trait_items = saved_items;
         self.class = saved;
         self.e.dedent();
         self.e.w("}");
@@ -2790,6 +2812,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         let tinfo = imp.trait_.as_ref().and_then(|t| t.last_name()).and_then(|n| self.k.traits.get(n)).cloned();
+        let saved_items = std::mem::replace(&mut self.in_trait_items, imp.trait_.is_some());
         for m in &imp.members {
             self.e.nl();
             match &m.kind {
@@ -2806,6 +2829,7 @@ impl<'a> Lowerer<'a> {
                 _ => self.assoc_item(m, imp.trait_.is_none()),
             }
         }
+        self.in_trait_items = saved_items;
         self.class = saved;
         self.e.dedent();
         self.e.w("}");

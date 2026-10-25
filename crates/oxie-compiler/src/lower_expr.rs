@@ -1163,6 +1163,40 @@ impl<'a> Lowerer<'a> {
         interfaces.is_some_and(|is| is.iter().any(|i| i == iface))
     }
 
+    /// The interface method `name` of a value: of its interface (`Shape`, `&Shape`, `Box<Shape>`)
+    /// or of one its class or enum implements.
+    fn iface_method(&self, recv: &Expr, name: &str) -> Option<crate::sema::MethodInfo> {
+        let mut t = self.infer_type(recv)?;
+        loop {
+            t = match &t {
+                Type::Ref { inner, .. } => (**inner).clone(),
+                Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Box" => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(inner)]) => inner.clone(),
+                    _ => return None,
+                },
+                _ => break,
+            };
+        }
+        let mut ifaces: Vec<String> = match t.single_name() {
+            Some(n) if self.is_oxie_iface(&t) => vec![n.to_string()],
+            _ => {
+                let owner = self.type_owner(&t)?;
+                self.class_at(&owner).map(|c| c.interfaces.clone()).or_else(|| self.enum_at(&owner).map(|e| e.interfaces.clone()))?
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        while let Some(i) = ifaces.pop() {
+            if !seen.insert(i.clone()) {
+                continue;
+            }
+            let Some(ti) = self.k.traits.get(&i) else { continue };
+            if let Some(m) = ti.methods.get(name) {
+                return Some(m.clone());
+            }
+        }
+        None
+    }
+
     /// For a call that puts a value into a collection of interface values or functions
     /// (`shapes.push(s)`, `rules.insert(0, f)`, `by_name.insert(k, s)`): the index of that
     /// argument and the element type, which boxes it.
@@ -1208,6 +1242,10 @@ impl<'a> Lowerer<'a> {
         let Some(Type::Path { segs, .. }) = &f.ret else { return None };
         if segs.len() != 1 || segs[0].generics.is_some() || segs[0].fn_sugar.is_some() || !self.is_trait_name(&segs[0].name) {
             return None;
+        }
+        // an interface method returns its interface boxed, like each implementation
+        if self.iface_sig && self.is_oxie_iface(f.ret.as_ref()?) {
+            return Some(true);
         }
         let Some(body) = f.body.as_ref().filter(|_| !f.mods.is_override) else { return Some(false) };
         let mut classes: Vec<String> = Vec::new();
@@ -2764,12 +2802,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             VariantShape::Tuple(types) => {
-                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
+                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false }).collect();
                 self.e.w(path);
                 self.arg_list(args, Some(&params), TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
-                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
+                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false }).collect();
                 let slots = self.fill_args(args, &params, span);
                 self.e.w(&format!("{} {{ ", path));
                 for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
@@ -2854,7 +2892,7 @@ impl<'a> Lowerer<'a> {
             if self.this_recv.is_none() {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
-            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new() });
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false });
             args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span) });
         }
         (args, params)
@@ -2876,7 +2914,7 @@ impl<'a> Lowerer<'a> {
                         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
                             self.expr(a, P_LOWEST);
                         } else {
-                            self.coerce(a, &p.ty, pos);
+                            self.coerce(a, &p.ty, if p.boxed { TyPos::Generic } else { pos });
                         }
                     }
                 }
@@ -3174,6 +3212,20 @@ impl<'a> Lowerer<'a> {
             let owner = self.infer_type(recv).and_then(|t| self.type_owner(&t));
             let m = owner.as_ref().and_then(|o| self.class_at(o).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(o).and_then(|e| e.methods.get(name)))).cloned();
             if let Some(m) = m {
+                self.expr(recv, P_POSTFIX);
+                self.e.w(&format!(".{}", esc(name)));
+                if let Some(g) = generics {
+                    let gt = self.generic_args_text(g);
+                    self.e.w(&format!("::{}", gt));
+                }
+                self.arg_list(args, Some(&m.params), TyPos::Param, span);
+                return;
+            }
+        }
+        // an interface's method with interface parameters, which take boxes, on an interface
+        // value or a value whose class inherits it
+        if !matches!(recv.kind, ExprKind::SelfValue) {
+            if let Some(m) = self.iface_method(recv, name).filter(|m| m.params.iter().any(|p| p.boxed)) {
                 self.expr(recv, P_POSTFIX);
                 self.e.w(&format!(".{}", esc(name)));
                 if let Some(g) = generics {

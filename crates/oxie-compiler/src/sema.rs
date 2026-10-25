@@ -23,6 +23,9 @@ pub struct ParamInfo {
     pub context: Option<String>,
     /// Generic parameter names of the declaring function (lambda arguments can't be annotated with them).
     pub generics: Vec<String>,
+    /// An interface value passed in a box: a parameter of an interface method typed as an Oxie
+    /// interface is a `Box<dyn I>`, so the interface stays usable as `dyn`.
+    pub boxed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +38,8 @@ pub struct MethodInfo {
     pub explicit: bool,
     /// Why an inferred receiver is `&mut self` ("it assigns `hits`"), and the use that decided it.
     pub recv_why: Option<(String, Option<Span>)>,
+    /// An interface's method or an implementation of one.
+    pub iface: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -84,7 +89,7 @@ impl ClassInfo {
         self.fields
             .iter()
             .filter(|f| f.in_ctor)
-            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new() })
+            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new(), boxed: false })
             .collect()
     }
 }
@@ -494,6 +499,7 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
     for u in units {
         collect_impls(&mut k, &u.module, &u.file.items);
     }
+    box_interface_params(&mut k);
     // pass 4: receiver inference (fixpoint over mutating methods)
     infer_receivers(&mut k, units);
     compute_derives(&mut k, units);
@@ -738,7 +744,9 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
                 for m in &t.members {
                     match &m.kind {
                         ItemKind::Fun(f) => {
-                            methods.insert(f.name.clone(), method_info_explicit(f, None).unwrap_or_else(|| default_mi(f)));
+                            let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
+                            mi.iface = true;
+                            methods.insert(f.name.clone(), mi);
                         }
                         ItemKind::TypeAlias { name, .. } => assoc.push(name.clone()),
                         _ => {}
@@ -754,6 +762,32 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
             _ => {}
         }
     }
+}
+
+/// Does the method implement a method of one of the interfaces `supertypes` names (`override`,
+/// or a method named like one of theirs)?
+fn implements_method(k: &Crate, f: &FunDecl, supertypes: &[Type]) -> bool {
+    f.mods.is_override || supertypes.iter().filter_map(|s| s.last_name()).any(|n| k.traits.get(n).is_some_and(|t| t.methods.contains_key(&f.name)))
+}
+
+/// Marks the parameters of interface methods typed as an Oxie interface `boxed`.
+fn box_interface_params(k: &mut Crate) {
+    let ifaces: HashSet<String> = k.traits.keys().filter(|n| !k.classes.contains_key(*n) && !k.enums.contains_key(*n)).cloned().collect();
+    let mark = |m: &mut MethodInfo| {
+        if m.iface {
+            for p in &mut m.params {
+                p.boxed = is_iface_type(&ifaces, &p.ty);
+            }
+        }
+    };
+    k.traits.values_mut().flat_map(|t| t.methods.values_mut()).for_each(mark);
+    k.classes.values_mut().flat_map(|c| c.methods.values_mut()).for_each(mark);
+    k.enums.values_mut().flat_map(|e| e.methods.values_mut()).for_each(mark);
+}
+
+/// A bare interface name among `ifaces` (`Shape`, not `Box<Shape>` or `&Shape`).
+pub(crate) fn is_iface_type(ifaces: &HashSet<String>, t: &Type) -> bool {
+    matches!(t, Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && ifaces.contains(&segs[0].name))
 }
 
 fn insert_unique<V>(map: &mut HashMap<String, V>, amb: &mut HashSet<String>, key: String, v: V) {
@@ -957,12 +991,12 @@ pub fn params_info(f: &FunDecl) -> Vec<ParamInfo> {
         .collect();
     f.params
         .iter()
-        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone() })
+        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), boxed: false })
         .collect()
 }
 
 fn default_mi(f: &FunDecl) -> MethodInfo {
-    MethodInfo { recv: Recv::Ref, params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), explicit: false, recv_why: None }
+    MethodInfo { recv: Recv::Ref, params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), explicit: false, recv_why: None, iface: false }
 }
 
 /// Receiver determined purely from syntax, or None if it must be inferred.
@@ -982,7 +1016,7 @@ fn method_info_explicit(f: &FunDecl, trait_recv: Option<Recv>) -> Option<MethodI
         None if f.mods.is_operator => Some(Recv::Value),
         None => None,
     };
-    recv.map(|recv| MethodInfo { recv, params, throws, ret: f.ret.clone(), explicit: trait_recv.is_none() || f.self_param.is_some() || f.mods.is_static || f.mods.is_mut, recv_why: None })
+    recv.map(|recv| MethodInfo { recv, params, throws, ret: f.ret.clone(), explicit: trait_recv.is_none() || f.self_param.is_some() || f.mods.is_static || f.mods.is_mut, recv_why: None, iface: false })
 }
 
 fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
@@ -1051,11 +1085,9 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                             if f.name == "new" {
                                 user_new = true;
                             }
-                            if let Some(mi) = method_info_explicit(f, None) {
-                                methods.insert(f.name.clone(), mi);
-                            } else {
-                                methods.insert(f.name.clone(), default_mi(f));
-                            }
+                            let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
+                            mi.iface = implements_method(k, f, &t.supertypes);
+                            methods.insert(f.name.clone(), mi);
                         }
                     }
                     let info = ClassInfo {
@@ -1096,7 +1128,8 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                     let mut methods = HashMap::new();
                     for m in &t.members {
                         if let ItemKind::Fun(f) = &m.kind {
-                            let mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
+                            let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
+                            mi.iface = implements_method(k, f, &t.supertypes);
                             methods.insert(f.name.clone(), mi);
                         }
                     }
@@ -1155,7 +1188,8 @@ fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
                 for m in &imp.members {
                     if let ItemKind::Fun(f) = &m.kind {
                         let trecv = trait_info.as_ref().and_then(|t| t.methods.get(&f.name)).map(|m| m.recv);
-                        let mi = method_info_explicit(f, trecv).unwrap_or_else(|| default_mi(f));
+                        let mut mi = method_info_explicit(f, trecv).unwrap_or_else(|| default_mi(f));
+                        mi.iface = imp.trait_.is_some();
                         if let Some(c) = k.classes.get_mut(&owner) {
                             if f.name == "new" && imp.trait_.is_none() {
                                 c.user_new = true;
