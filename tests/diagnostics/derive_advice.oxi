@@ -1,0 +1,11 @@
+// rustc's advice to derive a trait reads as Oxie.
+
+import std::collections::HashMap
+
+data class Stats(var count: i32 = 0)
+
+fun main() {
+    var stats: HashMap<String, Stats> = HashMap()
+    stats.entry("a".to_string()).or_default().count += 1
+    // error: 9: make `Stats` implement `Default`: `class Stats(...) : Default`
+}

@@ -1,0 +1,10 @@
+// A predicate's parameter is a reference that can't be stored.
+
+import std::collections::HashSet
+
+fun main() {
+    var seen = HashSet()
+    val dups = "programming".chars().filter { !seen.insert(it) }.collect::<String>()
+    // error: 7: `it` is a reference, and is stored where it would outlive the lambda
+    println(dups)
+}

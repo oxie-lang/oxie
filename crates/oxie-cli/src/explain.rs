@@ -87,6 +87,13 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
         "E0277" => trait_missing(d, sources, &lines, &names),
         "E0308" => mismatched(d, src, &lines),
         "E0615" => getter_call(d, &lines, &first),
+        // `filter { seen.insert(it) }`: the lambda's parameter is a reference into the iteration
+        "E0521" if d.label.as_deref().is_some_and(|l| l.ends_with("escapes the closure body here")) => {
+            let name = d.label.as_deref().and_then(|l| between(l, "`", "`")).unwrap_or_else(|| "it".to_string());
+            rewrite(d, format!("`{}` is a reference, and is stored where it would outlive the lambda", name));
+            d.notes.retain(|n| !n.contains("invariant") && !n.contains("nomicon") && !n.contains("requirement occurs"));
+            d.notes.push(help(&format!("lambdas like `filter`, `find` and `any` get a reference to each element, which lives only for that call. Store a copy instead: `*{}` for a number or `char`, `{}.clone()` otherwise.", name, name)));
+        }
         "E0283" if d.notes.iter().any(|n| n.contains("Option<_>: From<Option<")) => optional_already(d, &lines),
         // reported without a code
         _ if d.message.starts_with("future cannot be sent between threads safely") => thread_safety(d, sources, ""),

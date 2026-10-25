@@ -77,6 +77,8 @@
   different types unless the variable declared `String`.
 * A lambda passed where a future is expected (`tokio.spawn { ... }`) is explained, and the error
   suggests an async block, instead of rustc's advice to call the closure.
+* Storing a predicate's parameter where it outlives the lambda (`filter { seen.insert(it) }`) is
+  explained: `it` is a reference to the element, so store `*it` or `it.clone()`.
 
 ## 0.2.0 - 2026-10-24
 
