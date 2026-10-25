@@ -17,8 +17,31 @@ const INFERENCE_DEPENDENT: &[&str] = &[
     "get", "first", "last", "find", "max", "min", "pop", "next", "cloned", "copied", "as_ref", "as_deref", "take", "filter",
 ];
 
+/// Rust string literal text for a format string: braces doubled, except those of `\u{..}`.
 fn escape_braces(s: &str) -> String {
-    s.replace('{', "{{").replace('}', "}}")
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                let Some(n) = chars.next() else { break };
+                out.push(n);
+                if n == 'u' && chars.peek() == Some(&'{') {
+                    for d in chars.by_ref() {
+                        out.push(d);
+                        if d == '}' {
+                            break;
+                        }
+                    }
+                }
+            }
+            '{' => out.push_str("{{"),
+            '}' => out.push_str("}}"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// The type of an `if`/`when` value nothing declares: a `T?` when one of its branches is `null`
