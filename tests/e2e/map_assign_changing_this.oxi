@@ -1,0 +1,25 @@
+// A call that changes `this` in a map index assignment on a field runs first, also after
+// a conversion of a parameter.
+
+import std::collections::HashMap
+class Reg {
+    var ids: HashMap<String, i32> = HashMap()
+    var names: Vec<String> = Vec()
+    var n: i32 = 0
+    fun alloc(): i32 { n += 1; n }
+    fun label(): String { n += 1; "l$n" }
+    fun add(k: String) { ids[k] = alloc() }
+    fun add2(name: &str) { ids.insert(name.to_string(), alloc()) }
+    fun add3(name: &str) { ids[name.to_string()] = alloc() }
+    fun add4(name: &str) { names.push(name.to_string() + &label()) }
+}
+fun main() {
+    var r = Reg()
+    r.add("a".to_string())
+    r.add2("b")
+    r.add3("c")
+    r.add4("d")
+    println(r.n)
+    println(r.ids["c"])
+    println("${r.names:?}")
+}

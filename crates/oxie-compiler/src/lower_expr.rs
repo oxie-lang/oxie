@@ -188,6 +188,10 @@ const NEVER_COPY: &[&str] = &[
     "Cell", "RefCell", "Mutex", "RwLock",
 ];
 
+/// Methods of text and numbers that only convert the value, so they can run after a call that
+/// changes `this` without noticing (`ids.insert(name.to_string(), alloc())`).
+const PLAIN_CONVERSIONS: &[&str] = &["to_string", "to_owned", "clone", "len", "as_str", "to_uppercase", "to_lowercase", "trim", "is_empty", "abs"];
+
 /// The method or function a call like `next_id()`, `this.next_id()` or `next_id()?` calls.
 fn called_name(e: &Expr) -> Option<&str> {
     match &e.kind {
@@ -212,7 +216,7 @@ fn replace_moved(e: &mut Expr, moved: &[(Span, String)]) {
             args.iter_mut().for_each(|a| replace_moved(&mut a.value, moved));
         }
         ExprKind::Paren(x) | ExprKind::Cast(x, _) | ExprKind::Unary(_, x) | ExprKind::Field { recv: x, .. } | ExprKind::Try(x) | ExprKind::Unwrap(x) | ExprKind::Await(x) => replace_moved(x, moved),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Pair(a, b) => {
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Pair(a, b) | ExprKind::Assign(None, a, b) => {
             replace_moved(a, moved);
             replace_moved(b, moved);
         }
@@ -374,9 +378,17 @@ impl<'a> Lowerer<'a> {
     /// statement as written. Only when the call borrows the field (`borrowed_by`): a `Copy`
     /// field would be copied first and the statement compile. Also returns the field's name.
     fn args_changing_this<'e>(&self, e: &'e Expr) -> Option<(Vec<&'e Expr>, &'e str)> {
-        let ExprKind::MethodCall { recv, name, args, safe: false, .. } = &e.kind else { return None };
+        let (recv, name, args): (&Expr, &str, Vec<&Expr>) = match &e.kind {
+            ExprKind::MethodCall { recv, name, args, safe: false, .. } if args.iter().all(|a| a.name.is_none()) => (recv, name, args.iter().map(|a| &a.value).collect()),
+            // `m[k] = v` on a map field is `m.insert(k, v)`
+            ExprKind::Assign(None, target, value) if self.map_entry_types(target).is_some() => {
+                let ExprKind::Index(m, k) = &target.kind else { return None };
+                (m, "insert", vec![k, value])
+            }
+            _ => return None,
+        };
         let c = self.class.as_ref()?;
-        if c.is_static || self.self_by_value || args.iter().any(|a| a.name.is_some()) {
+        if c.is_static || self.self_by_value {
             return None;
         }
         let field = match &recv.kind {
@@ -394,7 +406,7 @@ impl<'a> Lowerer<'a> {
         let mut calls = Vec::new();
         let mut ran = false;
         for a in args {
-            self.calls_changing_this(&a.value, &mut calls, &mut ran)?;
+            self.calls_changing_this(a, &mut calls, &mut ran)?;
         }
         (!calls.is_empty()).then_some((calls, field))
     }
@@ -510,6 +522,8 @@ impl<'a> Lowerer<'a> {
                 }
                 *ran = true;
             }
+            // a conversion of a local's text or number can't tell that a call changed `this`
+            ExprKind::MethodCall { recv, name, args, safe: false, .. } if args.is_empty() && PLAIN_CONVERSIONS.contains(&name.as_str()) && self.is_plain_local(recv) => {}
             ExprKind::MethodCall { recv, args, safe: false, .. } if args.iter().all(|a| a.name.is_none()) => {
                 self.calls_changing_this(recv, calls, ran)?;
                 for a in args {
@@ -532,6 +546,25 @@ impl<'a> Lowerer<'a> {
         Some(())
     }
 
+    /// A text or number literal, or a local or parameter holding text or a number (not a field).
+    fn is_plain_local(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Char(_) | ExprKind::Bool(_) => true,
+            ExprKind::Paren(x) => self.is_plain_local(x),
+            _ => {
+                let Some(Some(t)) = e.ident().and_then(|n| self.local(n)) else { return false };
+                let mut t = t;
+                while let Type::Ref { inner, .. } = t {
+                    t = inner;
+                }
+                matches!(
+                    t.single_name(),
+                    Some("str" | "String" | "char" | "bool" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64")
+                )
+            }
+        }
+    }
+
     /// Moves the calls that change `this` out of the statement `e` (`args_changing_this`): emits
     /// a `let` for each, named after its method (`let next_id = self.next_id();`), and returns
     /// `e` reading the locals, which stay bound until `unbind_moved`. `taken`: names the
@@ -542,7 +575,7 @@ impl<'a> Lowerer<'a> {
         }
         let (calls, field) = self.args_changing_this(e)?;
         let (calls, field): (Vec<Expr>, String) = (calls.into_iter().cloned().collect(), field.to_string());
-        let method = called_name(e).unwrap_or_default().to_string();
+        let method = if matches!(e.kind, ExprKind::Assign(..)) { "insert" } else { called_name(e).unwrap_or_default() }.to_string();
         let mut moved: Vec<(Span, String)> = Vec::new();
         for c in &calls {
             let base = called_name(c).unwrap_or("value").to_string();
