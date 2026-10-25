@@ -645,6 +645,9 @@ impl<'a> Printer<'a> {
 
     fn item(&mut self, it: &syn::Item, plan: &Plan, idx: usize, items: &[syn::Item]) -> String {
         match it {
+            // `#[cfg(a)] { .. } #[cfg(not(a))] { .. }` at the end: the block a build keeps is the
+            // function's value, which Oxie can't say
+            syn::Item::Fn(f) if cfg_value_blocks(&f.block) => self.raw_item(it, "its value is a block chosen by `#[cfg]`, which Oxie has no syntax for"),
             syn::Item::Fn(f) => {
                 let saved = std::mem::take(&mut self.cx);
                 let s = self.fun(&f.attrs, &f.vis, &f.sig, Some(&f.block), FunKind::Free);
@@ -1802,4 +1805,11 @@ pub enum BlockMode {
     ValueFn,
     /// a block whose value is used (closures, `run { }`, `let x = if ...`)
     Value,
+}
+
+/// Whether a function body ends in blocks with `#[cfg]` attributes and no semicolons: the one
+/// the build keeps gives the function's value.
+fn cfg_value_blocks(b: &syn::Block) -> bool {
+    let cfg_block = |s: &syn::Stmt| matches!(s, syn::Stmt::Expr(syn::Expr::Block(eb), None) if eb.attrs.iter().any(|a| a.path().is_ident("cfg")));
+    b.stmts.len() >= 2 && b.stmts[b.stmts.len() - 2..].iter().all(cfg_block)
 }
