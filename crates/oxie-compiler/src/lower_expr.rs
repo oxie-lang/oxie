@@ -1556,7 +1556,7 @@ impl<'a> Lowerer<'a> {
                 }
                 self.e.w("matches!(");
                 self.expr(expr, P_LOWEST);
-                let p = self.pat(pat);
+                let p = self.pat_against(pat, Some(expr));
                 self.e.w(&format!(", {})", p));
             }
             Pair(a, b) => {
@@ -2034,7 +2034,7 @@ impl<'a> Lowerer<'a> {
                 self.e.indent();
                 self.e.nl();
                 self.push_scope();
-                let p = self.pat(pat);
+                let p = self.let_cond_pat(pat, expr, *implicit_some);
                 if *implicit_some {
                     self.e.w(&format!("Some({})", p));
                 } else {
@@ -2229,7 +2229,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Cond::Let { pat, expr, implicit_some } => {
-                let p = self.pat(pat);
+                let p = self.let_cond_pat(pat, expr, *implicit_some);
                 if *implicit_some {
                     self.e.w(&format!("let Some({}) = ", p));
                 } else {
@@ -2239,6 +2239,25 @@ impl<'a> Lowerer<'a> {
                 self.bind_pat(pat, None);
             }
         }
+    }
+
+    /// The pattern of `if (val pat = expr)`, matched against the value (inside its `Some` when
+    /// `implicit_some`).
+    fn let_cond_pat(&mut self, pat: &Pat, expr: &Expr, implicit_some: bool) -> String {
+        let ty = self.infer_type(expr);
+        let ty = if implicit_some {
+            match ty {
+                Some(Type::Option(inner)) => Some(*inner),
+                Some(Type::Path { segs, .. }) if segs.len() == 1 && segs[0].name == "Option" => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(t)]) => Some(t.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else {
+            ty
+        };
+        self.pat_typed(pat, ty)
     }
 
     // ------------------------------------------------------------------ paths
@@ -2259,7 +2278,10 @@ impl<'a> Lowerer<'a> {
                 self.e.w(field);
                 return;
             }
-            if !self.is_local(n) && !self.k.is_class_name(n) && !self.k.is_fun_name(n) {
+            // a constant of the class or companion object being lowered
+            if !self.is_local(n) && self.class.as_ref().is_some_and(|c| c.consts.contains(n)) {
+                s.push_str("Self::");
+            } else if !self.is_local(n) && !self.k.is_class_name(n) && !self.k.is_fun_name(n) {
                 if let Some(en) = self.variant_enum(n) {
                     s.push_str(&format!("{}::{}", en.name, n));
                     self.e.w(&s);
@@ -3975,7 +3997,7 @@ impl<'a> Lowerer<'a> {
                                     }
                                 }
                                 WhenCond::Pat(p) => {
-                                    let ps = self.pat(p);
+                                    let ps = self.pat_against(p, subject);
                                     self.e.w(&format!("matches!({}, {})", w, ps));
                                 }
                                 _ => {}
@@ -3998,7 +4020,7 @@ impl<'a> Lowerer<'a> {
                                     if arm.guard.is_none() && matches!(p, Pat::Wild | Pat::Ident { sub: None, .. }) {
                                         has_catch_all = true;
                                     }
-                                    self.pat(p)
+                                    self.pat_against(p, subject)
                                 }
                                 WhenCond::Else => {
                                     has_catch_all = arm.guard.is_none() || has_catch_all;

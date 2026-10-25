@@ -69,6 +69,8 @@ pub struct ClassInfo {
     pub lifetimes: usize,
     /// The names in its `context(...)` clause.
     pub contexts: Vec<String>,
+    /// Associated constants (in the body, a companion object or an `impl` block).
+    pub consts: Vec<String>,
 }
 
 impl ClassInfo {
@@ -103,6 +105,8 @@ pub struct EnumInfo {
     /// Number of lifetime parameters (`enum Tok<'a>`).
     pub lifetimes: usize,
     pub has_type_params: bool,
+    /// Associated constants, as in `ClassInfo`.
+    pub consts: Vec<String>,
 }
 
 impl EnumInfo {
@@ -1100,6 +1104,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         type_params: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Type { .. })).count(),
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
                         contexts: t.contexts.iter().filter_map(|p| p.name().map(String::from)).collect(),
+                        consts: member_consts(&t.members),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, true) {
                         k.classes.insert(key, info);
@@ -1132,6 +1137,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         methods,
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
                         has_type_params: !only_lifetimes(&t.generics),
+                        consts: member_consts(&t.members),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, false) {
                         for (vn, _) in &info.variants {
@@ -1163,12 +1169,25 @@ fn impl_owner(k: &Crate, imp: &ImplDecl, module: &[String]) -> Option<String> {
     Some(k.type_key_at(&path, module).unwrap_or_else(|| name.to_string()))
 }
 
+/// The names of the constants among a type's members.
+fn member_consts(members: &[Item]) -> Vec<String> {
+    members.iter().filter_map(|m| if let ItemKind::Const(c) = &m.kind { Some(c.name.clone()) } else { None }).collect()
+}
+
 fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
     for it in items {
         match &it.kind {
             ItemKind::Impl(imp) => {
                 let Some(owner) = impl_owner(k, imp, module) else { continue };
                 let trait_info = imp.trait_.as_ref().and_then(|t| t.last_name()).and_then(|n| k.traits.get(n)).cloned();
+                if imp.trait_.is_none() {
+                    let consts = member_consts(&imp.members);
+                    if let Some(c) = k.classes.get_mut(&owner) {
+                        c.consts.extend(consts);
+                    } else if let Some(e) = k.enums.get_mut(&owner) {
+                        e.consts.extend(consts);
+                    }
+                }
                 for m in &imp.members {
                     if let ItemKind::Fun(f) = &m.kind {
                         let trecv = trait_info.as_ref().and_then(|t| t.methods.get(&f.name)).map(|m| m.recv);

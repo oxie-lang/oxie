@@ -366,8 +366,10 @@ impl<'a> Parser<'a> {
             match self.item() {
                 Ok(Some(item)) => items.push(item),
                 Ok(None) => {
-                    let found = self.describe();
-                    self.err::<()>(format!("expected a declaration (fun, class, val, import, ...), found {}", found)).ok();
+                    if !self.global_var() {
+                        let found = self.describe();
+                        self.err::<()>(format!("expected a declaration (fun, class, val, import, ...), found {}", found)).ok();
+                    }
                     self.recover_stmt();
                 }
                 Err(()) => self.recover_stmt(),
@@ -660,8 +662,10 @@ impl<'a> Parser<'a> {
             match self.item() {
                 Ok(Some(i)) => items.push(i),
                 Ok(None) => {
-                    let f = self.describe();
-                    self.err::<()>(format!("expected a declaration, found {}", f)).ok();
+                    if !self.global_var() {
+                        let f = self.describe();
+                        self.err::<()>(format!("expected a declaration, found {}", f)).ok();
+                    }
                     self.recover_stmt();
                 }
                 Err(()) => self.recover_stmt(),
@@ -671,6 +675,17 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(items)
+    }
+
+    /// A `var` outside functions and classes (at the top level, in an `object` or a companion
+    /// object): reports that Oxie has no mutable globals.
+    fn global_var(&mut self) -> bool {
+        if !self.is_kw("var") {
+            return false;
+        }
+        let msg = "a `var` outside a function or class would be a mutable global, which Rust allows only in `unsafe` code: keep the value in a class, or use a `static` holding a `Mutex` or an atomic (`static COUNT: AtomicI32 = AtomicI32(0)`)";
+        self.diags.push(Diag::error(self.span(), msg));
+        true
     }
 
     fn test_decl(&mut self, is_async: bool) -> PResult<TestDecl> {

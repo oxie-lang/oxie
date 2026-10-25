@@ -178,6 +178,8 @@ pub(crate) struct ClassCtx {
     /// Methods of implemented interfaces: their signatures follow the interface, so no bounds
     /// are inferred for them. `None` inside interfaces and trait impls (never inferred).
     pub(crate) trait_methods: Option<HashSet<String>>,
+    /// Associated constants, used without `Self::` inside the type.
+    pub(crate) consts: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -271,6 +273,9 @@ pub struct Lowerer<'a> {
     pub(crate) reused_iters: HashMap<u32, Option<u32>>,
     /// Variables a null check in the `if` being lowered unwraps, with their value types.
     pub(crate) narrowed_types: Vec<(String, Type)>,
+    /// The type of the value the pattern being lowered matches, when known: its bare variant
+    /// names are that enum's first.
+    pub(crate) pat_ty: Option<Type>,
     /// Methods of the shared class being lowered that use `this` as a value, or call one that
     /// does: their data methods take the handle as `__this` (see `shared.rs`).
     pub(crate) needs_this: HashSet<String>,
@@ -380,6 +385,7 @@ impl<'a> Lowerer<'a> {
             next_lambda_refs: false,
             reused_iters: HashMap::new(),
             narrowed_types: Vec::new(),
+            pat_ty: None,
             needs_this: HashSet::new(),
             this_recv: None,
             extra_param: None,
@@ -1055,6 +1061,66 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// A pattern matched against `subject`: bare variant names are cases of its enum first.
+    pub(crate) fn pat_against(&mut self, p: &Pat, subject: Option<&Expr>) -> String {
+        let ty = subject.and_then(|s| self.infer_type(s));
+        self.pat_typed(p, ty)
+    }
+
+    /// A pattern matching a value of type `ty` (when known).
+    pub(crate) fn pat_typed(&mut self, p: &Pat, ty: Option<Type>) -> String {
+        let saved = std::mem::replace(&mut self.pat_ty, ty);
+        let s = self.pat(p);
+        self.pat_ty = saved;
+        s
+    }
+
+    /// The enum the pattern being lowered matches (through references and boxes).
+    fn pat_enum(&self) -> Option<&'a sema::EnumInfo> {
+        let mut t = self.pat_ty.as_ref()?;
+        loop {
+            match t {
+                Type::Ref { inner, .. } => t = inner,
+                Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Box" => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(inner)]) => t = inner,
+                    _ => return None,
+                },
+                _ => break,
+            }
+        }
+        let name = t.last_name()?;
+        let name = if name == "Self" { self.class.as_ref()?.name.as_str() } else { name };
+        self.enum_info(name)
+    }
+
+    /// The types of the parts of a `path(elems)` pattern matching the current `pat_ty`.
+    fn tuple_pat_types(&self, path: &[String], shape: Option<&VariantShape>) -> Vec<Option<Type>> {
+        match shape {
+            Some(VariantShape::Tuple(ts)) => return ts.iter().cloned().map(Some).collect(),
+            Some(VariantShape::Named(fs)) => return fs.iter().map(|(_, t)| Some(t.clone())).collect(),
+            _ => {}
+        }
+        let mut t = self.pat_ty.as_ref();
+        while let Some(Type::Ref { inner, .. }) = t {
+            t = Some(inner);
+        }
+        let args = |t: &Type| match t {
+            Type::Path { segs, .. } => segs.last().and_then(|s| s.generics.clone()).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let arg = |t: &Type, i: usize| match args(t).get(i) {
+            Some(GenericArg::Type(t)) => vec![Some(t.clone())],
+            _ => Vec::new(),
+        };
+        match (path, t) {
+            ([n], Some(Type::Option(inner))) if n == "Some" => vec![Some((**inner).clone())],
+            ([n], Some(t)) if n == "Some" && t.last_name() == Some("Option") => arg(t, 0),
+            ([n], Some(t)) if n == "Ok" && t.last_name() == Some("Result") => arg(t, 0),
+            ([n], Some(t)) if n == "Err" && t.last_name() == Some("Result") => arg(t, 1),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn pat(&mut self, p: &Pat) -> String {
         match p {
             Pat::Wild => "_".into(),
@@ -1082,20 +1148,36 @@ impl<'a> Lowerer<'a> {
                 format!("{}{}{}", lo, if *inclusive { "..=" } else { ".." }, hi)
             }
             Pat::Tuple(v) => {
-                let parts: Vec<String> = v.iter().map(|p| self.pat(p)).collect();
+                let tys = match &self.pat_ty {
+                    Some(Type::Tuple(ts)) if ts.len() == v.len() => ts.iter().cloned().map(Some).collect(),
+                    _ => vec![None; v.len()],
+                };
+                let parts: Vec<String> = v.iter().zip(tys).map(|(p, t)| self.pat_typed(p, t)).collect();
                 if parts.len() == 1 {
                     format!("({},)", parts[0])
                 } else {
                     format!("({})", parts.join(", "))
                 }
             }
-            Pat::Slice(v) => format!("[{}]", v.iter().map(|p| self.pat(p)).collect::<Vec<_>>().join(", ")),
-            Pat::Ref { mutable, pat } => format!("&{}{}", if *mutable { "mut " } else { "" }, self.pat_operand(pat, true)),
+            Pat::Slice(v) => format!("[{}]", v.iter().map(|p| self.pat_typed(p, None)).collect::<Vec<_>>().join(", ")),
+            Pat::Ref { mutable, pat } => {
+                let inner = match &self.pat_ty {
+                    Some(Type::Ref { inner, .. }) => Some((**inner).clone()),
+                    _ => None,
+                };
+                let saved = std::mem::replace(&mut self.pat_ty, inner);
+                let s = format!("&{}{}", if *mutable { "mut " } else { "" }, self.pat_operand(pat, true));
+                self.pat_ty = saved;
+                s
+            }
             Pat::Or(v) => v.iter().map(|p| self.pat(p)).collect::<Vec<_>>().join(" | "),
-            Pat::Typed { pat, ty } => format!("{}: {}", self.pat(pat), self.ty(ty, TyPos::Local)),
+            Pat::Typed { pat, ty } => format!("{}: {}", self.pat_typed(pat, Some(ty.clone())), self.ty(ty, TyPos::Local)),
             Pat::Raw(s) => s.clone(),
-            Pat::Path(segs, _) => {
+            Pat::Path(segs, span) => {
                 let (path, shape) = self.resolve_variant_path(segs);
+                if shape.is_none() {
+                    self.check_bare_pat_name(segs, *span);
+                }
                 match shape {
                     Some(VariantShape::Named(_)) => format!("{} {{ .. }}", path),
                     Some(VariantShape::Tuple(_)) => format!("{}(..)", path),
@@ -1104,6 +1186,8 @@ impl<'a> Lowerer<'a> {
             }
             Pat::TupleStruct { path, elems, .. } => {
                 let (p, shape) = self.resolve_variant_path(path);
+                let tys = self.tuple_pat_types(path, shape.as_ref());
+                let ty_at = |i: usize| if elems.iter().any(|e| matches!(e, Pat::Rest)) { None } else { tys.get(i).cloned().flatten() };
                 if let Some(VariantShape::Named(fields)) = shape {
                     let mut parts = Vec::new();
                     let mut rest = false;
@@ -1113,7 +1197,7 @@ impl<'a> Lowerer<'a> {
                             continue;
                         }
                         if let Some((fname, _)) = fields.get(i) {
-                            let sub = self.pat(e);
+                            let sub = self.pat_typed(e, ty_at(i));
                             if sub == esc(fname) {
                                 parts.push(sub);
                             } else {
@@ -1126,14 +1210,18 @@ impl<'a> Lowerer<'a> {
                     }
                     return format!("{} {{ {} }}", p, parts.join(", "));
                 }
-                format!("{}({})", p, elems.iter().map(|e| self.pat(e)).collect::<Vec<_>>().join(", "))
+                format!("{}({})", p, elems.iter().enumerate().map(|(i, e)| self.pat_typed(e, ty_at(i))).collect::<Vec<_>>().join(", "))
             }
             Pat::Struct { path, fields, rest, .. } => {
-                let (p, _) = self.resolve_variant_path(path);
+                let (p, shape) = self.resolve_variant_path(path);
+                let field_ty = |n: &str| match &shape {
+                    Some(VariantShape::Named(fs)) => fs.iter().find(|(f, _)| f == n).map(|(_, t)| t.clone()),
+                    _ => None,
+                };
                 let mut parts: Vec<String> = fields
                     .iter()
                     .map(|(n, sub)| match sub {
-                        Some(sp) => format!("{}: {}", esc(n), self.pat(sp)),
+                        Some(sp) => format!("{}: {}", esc(n), self.pat_typed(sp, field_ty(n))),
                         None => esc(n),
                     })
                     .collect();
@@ -1149,10 +1237,40 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// A capitalized bare name in a pattern that names nothing Oxie knows (`is Int`) would bind
+    /// anything in Rust: say so instead.
+    fn check_bare_pat_name(&mut self, segs: &[String], span: Span) {
+        let [n] = segs else { return };
+        if !crate::parser::is_type_like(n) || matches!(n.as_str(), "None" | "Self") || self.is_local(n) {
+            return;
+        }
+        let known = self.k.is_class_name(n)
+            || self.k.variant_owner.contains_key(n)
+            || self.k.is_user_type(n)
+            || self.k.rust_types.iter().any(|(_, t)| t == n)
+            || self.local_imports.iter().any(|(name, _)| name == n || name == "*")
+            || self.k.imports.contains_key(&(self.module.clone(), n.clone()))
+            || self.k.globs.get(&self.module).is_some_and(|g| !g.is_empty());
+        if known {
+            return;
+        }
+        let msg = match self.pat_enum() {
+            Some(en) => format!("`{}` is not a case of `{}`", n, en.name),
+            None => format!("`{}` is not an enum case, constant or class without fields; Oxie has no type tests: to match on kinds of values, use an enum", n),
+        };
+        self.error(span, msg);
+    }
+
     /// Resolves `Circle`, `Shape.Circle`, `Shape::Circle` to a qualified variant path.
     pub(crate) fn resolve_variant_path(&self, segs: &[String]) -> (String, Option<VariantShape>) {
         if segs.len() == 1 {
             let n = &segs[0];
+            // a case of the matched value's enum, whatever else the name means
+            if let Some(en) = self.pat_enum() {
+                if let Some(shape) = en.variant(n) {
+                    return (format!("{}::{}", en.name, esc(n)), Some(shape.clone()));
+                }
+            }
             if !self.k.is_class_name(n) && !self.is_local(n) {
                 if let Some(en) = self.variant_enum(n) {
                     let shape = en.variant(n).cloned();
@@ -1813,7 +1931,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        ClassCtx { name: name.to_string(), fields, methods, self_name: "self".into(), is_static: false, generics: Vec::new(), trait_methods: Some(trait_methods) }
+        let consts = info.map(|c| c.consts.clone()).or_else(|| self.enum_info(name).map(|e| e.consts.clone())).unwrap_or_default().into_iter().collect();
+        ClassCtx { name: name.to_string(), fields, methods, self_name: "self".into(), is_static: false, generics: Vec::new(), trait_methods: Some(trait_methods), consts }
     }
 
     fn field_type(&mut self, f: &Field) -> Type {
@@ -2700,6 +2819,7 @@ impl<'a> Lowerer<'a> {
             is_static: false,
             generics: Vec::new(),
             trait_methods: None,
+            consts: t.members.iter().filter_map(|m| if let ItemKind::Const(c) = &m.kind { Some(c.name.clone()) } else { None }).collect(),
         });
         for m in &t.members {
             self.e.nl();
