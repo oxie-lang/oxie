@@ -642,7 +642,7 @@ fn fix_preview(lines: &[&str], f: &Fix) -> Option<String> {
 }
 
 /// Runs `cargo <args> --message-format=json-diagnostic-rendered-ansi` and prints mapped diagnostics.
-pub fn cargo_json(root: &Path, args: &[String], quiet: bool) -> std::io::Result<BuildResult> {
+pub fn cargo_json(root: &Path, args: &[String], quiet: bool, shown_name: Option<&str>) -> std::io::Result<BuildResult> {
     let fmt = if color() { "--message-format=json-diagnostic-rendered-ansi" } else { "--message-format=json" };
     let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cmd.args(args).arg(fmt).current_dir(root).stdout(Stdio::piped());
@@ -652,8 +652,37 @@ pub fn cargo_json(root: &Path, args: &[String], quiet: bool) -> std::io::Result<
     if color() {
         cmd.arg("--color=always");
     }
+    // cargo's error output passes through, apart from its summary lines, which are rewritten at
+    // the end. A terminal keeps cargo's progress bar, which needs the terminal's width.
+    let pipe_stderr = quiet || !std::io::stderr().is_terminal() || match terminal_width() {
+        Some(w) => {
+            cmd.env("CARGO_TERM_PROGRESS_WHEN", "always").env("CARGO_TERM_PROGRESS_WIDTH", w.to_string());
+            true
+        }
+        None => false,
+    };
+    if pipe_stderr {
+        cmd.stderr(Stdio::piped());
+    }
+    let pkg = std::fs::read_to_string(root.join("Cargo.toml")).ok().and_then(|m| crate::project::package_name(&m)).unwrap_or_default();
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().unwrap();
+    let summaries: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let summaries_thread = child.stderr.take().map(|err| {
+        let summaries = summaries.clone();
+        std::thread::spawn(move || {
+            let edit = move |l: &str| {
+                if is_summary(l.as_bytes()) {
+                    summaries.lock().unwrap().push(l.to_string());
+                    None
+                } else {
+                    Some(l.to_string())
+                }
+            };
+            let _ = std::io::copy(&mut crate::locations::EditLines::new(err, is_summary, edit), &mut std::io::stderr());
+        })
+    });
+    let (mut own_errors, mut own_warnings) = (0, 0);
     let mut mapper = Mapper::default();
     let mut seen = HashSet::new();
     let mut covered = Covered::default();
@@ -684,7 +713,7 @@ pub fn cargo_json(root: &Path, args: &[String], quiet: bool) -> std::io::Result<
                 let (rendered, key) = match mapped {
                     Some(d) if d.from_oxie => (render(&d, root), same_error(&d)),
                     Some(_) | None => {
-                        let r = msg.get("rendered").and_then(|r| r.as_str()).unwrap_or("").to_string();
+                        let r = relative_paths(msg.get("rendered").and_then(|r| r.as_str()).unwrap_or(""), root);
                         // summary lines like "aborting due to ..." have no spans
                         if msg.get("spans").and_then(|s| s.as_array()).is_none_or(|s| s.is_empty()) {
                             let m = msg.get("message").and_then(|m| m.as_str()).unwrap_or("");
@@ -704,9 +733,16 @@ pub fn cargo_json(root: &Path, args: &[String], quiet: bool) -> std::io::Result<
                     held.push(rendered);
                     continue;
                 }
+                let own = pkg_root == root;
                 match level {
-                    "error" => result.errors += 1,
-                    "warning" => result.warnings += 1,
+                    "error" => {
+                        result.errors += 1;
+                        own_errors += usize::from(own);
+                    }
+                    "warning" => {
+                        result.warnings += 1;
+                        own_warnings += usize::from(own);
+                    }
                     _ => {}
                 }
                 eprintln!("{}", rendered);
@@ -725,12 +761,85 @@ pub fn cargo_json(root: &Path, args: &[String], quiet: bool) -> std::io::Result<
     if result.errors == 0 {
         for rendered in held {
             result.warnings += 1;
+            own_warnings += 1;
             eprintln!("{}", rendered);
         }
     }
     let status = child.wait()?;
     result.success = result.success && status.success();
+    // cargo's summaries, with the counts of what was shown
+    if let Some(t) = summaries_thread {
+        let _ = t.join();
+    }
+    let mut first = true;
+    for line in summaries.lock().unwrap().iter() {
+        if let Some(l) = rewrite_summary(line, &pkg, shown_name, own_errors, own_warnings, &mut first) {
+            eprintln!("{}", l);
+        }
+    }
     Ok(result)
+}
+
+/// Is this (the start of) one of cargo's summary lines, `error: could not compile `app` (bin
+/// "app") due to 2 previous errors; 1 warning emitted` or `warning: `app` (bin "app") generated
+/// 1 warning`?
+fn is_summary(line: &[u8]) -> bool {
+    let plain = strip_ansi(&String::from_utf8_lossy(line));
+    ["error: could not compile `", "warning: `"].iter().any(|s| if plain.len() < s.len() { s.starts_with(plain.as_str()) } else { plain.starts_with(s) })
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // `ESC [ ... letter`
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// cargo's summary line with the numbers of errors and warnings shown, which differ from rustc's:
+/// explanations cover some of rustc's messages, `unused_mut` warnings wait for a build without
+/// errors, and the warnings of dependencies aren't shown. The first summary of the user's package
+/// gets its totals and later ones are dropped; a script is called by its file name, not by the
+/// name of its hidden crate. cargo's `cargo fix` hint would change the generated Rust, so it goes.
+fn rewrite_summary(line: &str, pkg: &str, shown_name: Option<&str>, errors: usize, warnings: usize, first: &mut bool) -> Option<String> {
+    let plain = strip_ansi(line.trim_end());
+    let name = plain.split('`').nth(1)?;
+    let plural = |n: usize, what: &str| format!("{} {}{}", n, what, if n == 1 { "" } else { "s" });
+    let (red, yellow, bold, reset) = if color() { ("\x1b[1m\x1b[31m", "\x1b[1m\x1b[33m", "\x1b[1m", "\x1b[0m") } else { ("", "", "", "") };
+    // `app` (bin "app"), or the script's file
+    let what = |head: &str| match shown_name {
+        Some(s) if name == pkg => format!("`{}`", s),
+        _ => head.to_string(),
+    };
+    if let Some(rest) = plain.strip_prefix("warning: ") {
+        let (head, _) = rest.split_once(" generated ")?;
+        if name != pkg || !std::mem::take(first) || warnings == 0 {
+            return None;
+        }
+        return Some(format!("{yellow}warning{reset}{bold}:{reset} {} generated {}", what(head), plural(warnings, "warning")));
+    }
+    let rest = plain.strip_prefix("error: could not compile ")?;
+    let (head, counts) = rest.split_once(" due to ")?;
+    let theirs = counts.split(';').next().unwrap_or(counts);
+    let counts = if name != pkg {
+        theirs.to_string()
+    } else if !std::mem::take(first) {
+        return None;
+    } else {
+        let errors = if errors == 0 { theirs.to_string() } else { plural(errors, "previous error") };
+        if warnings == 0 { errors } else { format!("{}; {} emitted", errors, plural(warnings, "warning")) }
+    };
+    Some(format!("{red}error{reset}{bold}:{reset} could not compile {} due to {}", what(head), counts))
 }
 
 /// The directory of the package a cargo message is about, when it is shown: every message of the
@@ -742,6 +851,24 @@ fn package_root(v: &Value, root: &Path, level: &str) -> Option<PathBuf> {
         Some(dir) if dir != root => (level == "error").then(|| dir.to_path_buf()),
         _ => Some(root.to_path_buf()),
     }
+}
+
+/// rustc's text with the paths of the project's files relative to the current directory, as
+/// `render` shows them: a hand-written `.rs` module is included by its absolute path.
+fn relative_paths(rendered: &str, root: &Path) -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let base = if root.starts_with(&cwd) && cwd.parent().is_some() { cwd } else { root.to_path_buf() };
+    rendered.replace(&format!("{}{}", base.display(), std::path::MAIN_SEPARATOR), "")
+}
+
+/// The width of the terminal, from `COLUMNS` or `stty size` on the terminal.
+fn terminal_width() -> Option<usize> {
+    if let Some(w) = std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()) {
+        return Some(w);
+    }
+    let tty = std::fs::File::open("/dev/tty").ok()?;
+    let out = Command::new("stty").arg("size").stdin(tty).stderr(Stdio::null()).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1)?.parse().ok().filter(|w| *w > 0)
 }
 
 /// Is this cargo message rustc's `unused_mut` warning?

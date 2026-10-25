@@ -1,0 +1,19 @@
+// printing a value that has no text form is explained, also for a class with a short name (not
+// a type parameter) and for `println(value)` outside a template
+class P(x: i32)
+
+data class Qq(v: i32)
+
+fun main() {
+    println(P(1))
+    // error: 8:13: `P` has no text form to print
+    // error: 8:13: add `override fun toString() = "..."` to `P`
+    val q = Qq(2)
+    println("q = $q")
+    // error: 12:18: `Qq` has no text form for `$` templates
+    // error: 12:18: print its debug form
+    var s = String.new()
+    write!(s, "{}", 1).unwrap()
+    // error: 16:12: fix: import `std::fmt::Write`
+    println(s)
+}

@@ -505,6 +505,11 @@ fn command_line_mistakes_are_reported() {
     fails(&["test", "broken.oxi"], "broken.oxi:2");
     let left: Vec<String> = std::fs::read_dir(&tmp).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
     assert!(!left.iter().any(|f| ["123", "-x", "aa", "fn"].contains(&f.as_str())), "{left:?}");
+    // a workspace's root has no package to build
+    std::fs::create_dir_all(tmp.join("ws")).unwrap();
+    std::fs::write(tmp.join("ws/Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    let out = oxie().arg("build").current_dir(tmp.join("ws")).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is a workspace without a package of its own"), "{}", String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -531,6 +536,10 @@ fn test_runs_show_warnings_once() {
     std::fs::write(tmp.join("failing.oxi"), "test \"fails\" {\n    assert_eq(1, 2)\n}\n").unwrap();
     let (ok, stdout, stderr) = test(&["test", "failing.oxi"], &tmp);
     assert!(!ok && stderr.contains("error: test failed") && !stderr.contains("to rerun"), "{stdout}{stderr}");
+    // the script's errors are counted under its own name, not its hidden crate's
+    std::fs::write(tmp.join("wrong.oxi"), "fun main() {\n    var unchanged = 1\n    val n: i32 = \"a\"\n    println(unchanged)\n}\n").unwrap();
+    let (ok, stdout, stderr) = test(&["run", "wrong.oxi"], &tmp);
+    assert!(!ok && stderr.contains("could not compile `wrong.oxi` due to 1 previous error\n") && !stderr.contains("wrong_"), "{stdout}{stderr}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

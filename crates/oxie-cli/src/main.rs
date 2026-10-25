@@ -136,7 +136,15 @@ fn cwd() -> PathBuf {
 }
 
 fn find_project() -> Result<Project, String> {
-    Project::find(&cwd()).ok_or_else(|| "no Cargo.toml found (run `oxie new <name>` to create a project, or `oxie run file.oxi` for a script)".to_string())
+    let dir = cwd();
+    Project::find(&dir).ok_or_else(|| {
+        // a virtual workspace has members but no package of its own
+        let workspace = dir.ancestors().map(|d| d.join("Cargo.toml")).find(|m| std::fs::read_to_string(m).is_ok_and(|t| t.lines().any(|l| l.trim() == "[workspace]")));
+        match workspace {
+            Some(m) => format!("{} is a workspace without a package of its own; run `oxie` in the directory of one of its members", m.display()),
+            None => "no Cargo.toml found (run `oxie new <name>` to create a project, or `oxie run file.oxi` for a script)".to_string(),
+        }
+    })
 }
 
 /// The arguments of `oxie <command>`: the flags given (by their first spelling), the other
@@ -321,6 +329,11 @@ fn project_of(file: Option<&str>) -> Result<(Project, Option<PathBuf>), String> 
     }
 }
 
+/// How a script is named in cargo's messages instead of its hidden crate: by its file.
+fn script_name(script: Option<&Path>) -> Option<String> {
+    script.map(|s| s.strip_prefix(cwd()).unwrap_or(s).display().to_string())
+}
+
 /// Checks a script with the Oxie compiler before cargo builds it, like `precheck`. A script runs
 /// its `fun main`, and `oxie test` may test one that only has `test` blocks.
 fn precheck_script(proj: &Project, abs: &Path, testing: bool) -> Result<bool, String> {
@@ -363,7 +376,7 @@ fn cmd_build(args: &[String], sub: &str) -> R {
         cargs.push("--release".into());
     }
     cargs.extend(a.rest);
-    let r = cargo::cargo_json(&p.root, &cargs, false).map_err(|e| e.to_string())?;
+    let r = cargo::cargo_json(&p.root, &cargs, false, None).map_err(|e| e.to_string())?;
     Ok(if r.success { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
@@ -395,7 +408,7 @@ fn cmd_run(args: &[String]) -> R {
     if script.is_some() {
         std::env::set_var("CARGO_TARGET_DIR", project::cache_dir().join("target"));
     }
-    let r = cargo::cargo_json(&proj.root, &cargs, script.is_some()).map_err(|e| e.to_string())?;
+    let r = cargo::cargo_json(&proj.root, &cargs, script.is_some(), script_name(script.as_deref()).as_deref()).map_err(|e| e.to_string())?;
     if !r.success {
         return Ok(ExitCode::FAILURE);
     }
@@ -439,7 +452,7 @@ fn cmd_test(args: &[String]) -> R {
     if a.has("--release") {
         cargs.push("--release".into());
     }
-    let r = cargo::cargo_json(&p.root, &cargs, true).map_err(|e| e.to_string())?;
+    let r = cargo::cargo_json(&p.root, &cargs, true, script_name(script.as_deref()).as_deref()).map_err(|e| e.to_string())?;
     if !r.success {
         return Ok(ExitCode::FAILURE);
     }

@@ -83,10 +83,10 @@ pub fn forward(mut from: impl Read, mut to: impl Write) {
 /// A reader that passes `inner` on with some of its lines changed: a line whose start `hold`
 /// accepts is held until it is complete and replaced by `edit` (`None` drops it); other lines
 /// pass as they arrive, so a partial line like a prompt isn't delayed.
-pub struct EditLines<R> {
+pub struct EditLines<R, H, E> {
     inner: R,
-    hold: fn(&[u8]) -> bool,
-    edit: fn(&str) -> Option<String>,
+    hold: H,
+    edit: E,
     /// The held start of the current line.
     line: Vec<u8>,
     holding: bool,
@@ -95,8 +95,8 @@ pub struct EditLines<R> {
     done: bool,
 }
 
-impl<R: Read> EditLines<R> {
-    pub fn new(inner: R, hold: fn(&[u8]) -> bool, edit: fn(&str) -> Option<String>) -> Self {
+impl<R: Read, H: Fn(&[u8]) -> bool, E: FnMut(&str) -> Option<String>> EditLines<R, H, E> {
+    pub fn new(inner: R, hold: H, edit: E) -> Self {
         EditLines { inner, hold, edit, line: Vec::new(), holding: false, at_start: true, ready: Vec::new(), done: false }
     }
 
@@ -109,7 +109,7 @@ impl<R: Read> EditLines<R> {
     }
 }
 
-impl<R: Read> Read for EditLines<R> {
+impl<R: Read, H: Fn(&[u8]) -> bool, E: FnMut(&str) -> Option<String>> Read for EditLines<R, H, E> {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         let mut buf = [0u8; 8192];
         while self.ready.is_empty() && !self.done {
@@ -136,7 +136,8 @@ impl<R: Read> Read for EditLines<R> {
                 } else {
                     self.ready.push(b);
                 }
-                if b == b'\n' {
+                // a `\r` starts a line too, as when a progress bar is cleared before a message
+                if b == b'\n' || (b == b'\r' && !self.holding) {
                     self.at_start = true;
                 }
             }
