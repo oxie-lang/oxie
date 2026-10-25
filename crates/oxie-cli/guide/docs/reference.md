@@ -117,15 +117,17 @@ fun short(x: i32) = x * 2
   literals) are passed as they are. Passing a field to a `&mut` parameter makes the method
   `&mut self`.
 * **Arguments that change `this`**: in a method, a call on a field whose arguments call a
-  method of `this` that takes `&mut self` (`items.push(next_id())`) computes those calls first,
-  into locals named after the method, in the order they are written:
-  `let next_id = self.next_id(); self.items.push(next_id);`. Rust borrows the field for the call
-  before it runs the arguments, so it rejects the statement as written. This applies to any
+  method of `this` that takes `&mut self` (`items.push(next_id())`, or a map index assignment
+  `ids[key] = next_id()`) computes those calls first, into locals named after the method, in
+  the order they are written: `let next_id = self.next_id(); self.items.push(next_id);`. Rust
+  borrows the field for the call before it runs the arguments, so it rejects the statement as
+  written. This applies to any
   statement (also a `val`'s initializer, a `when` arm or a lambda's body) when the call borrows
   the field (a std collection, `String`, `Box`, a `shared class`, or an Oxie class whose method
   takes `&self` or `&mut self`) and the calls always run (not in a lambda, an `if`, after `&&`
   or `?.`). Nothing that could notice them running earlier may run before them, like another
-  call or a read of a field, so `items.insert(count(), next_id())` stays as written. A `Copy`
+  call (a conversion of a local's text or number, such as `name.to_string()`, is fine) or a read
+  of a field, so `items.insert(count(), next_id())` stays as written. A `Copy`
   field is copied before the arguments run, so `next.min(next_id())`, which Rust accepts, is
   left as written too.
 * **Methods that take only the fields they use**: a method that changes `this`, called inside a
@@ -715,7 +717,7 @@ Each one is the iterator chain you would write by hand; the element is passed by
 | `xs.sum()`, `sum_of { }` | number | `iter().sum()`, `iter().map(..).sum()` |
 | `xs.max_of { }`, `min_of { }` | `S?` | `iter().map(..).max_by(..)` |
 | `xs.max_by_key { }`, `min_by_key { }` | `T?` (a reference) | works with `f64` keys too |
-| `xs.sorted()`, `sorted_descending()`, `sorted_by { }`, `sorted_by_descending { }` | `Vec<T>` | `to_vec()` + `sort` |
+| `xs.sorted()`, `sorted_descending()`, `sorted_by { }`, `sorted_by_descending { }` | `Vec<T>` | `to_vec()` + `sort` (also `f64`: NaN sorts last) |
 | `xs.reversed()`, `distinct()`, `distinct_by { }`, `chunked(n)` | `Vec<T>` / `Vec<Vec<T>>` | |
 | `xs.group_by { key }` | `HashMap<K, Vec<T>>` | |
 | `xs.associate_by { key }` | `HashMap<K, T>` | |

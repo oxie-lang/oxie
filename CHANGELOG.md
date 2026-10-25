@@ -25,6 +25,23 @@
   unknown options, and exits with status 1. Before, it said "0 file(s) already formatted" or
   counted the file as formatted. Outside a project it needs paths, instead of formatting every
   `.oxi` file below the current directory.
+* `x in set` works on a `HashSet` or `BTreeSet` of `String` with a `&str`, a `String` or a
+  `&String` item, and `in` on a list of `String` with a `&str` item (or a list of `&str` with a
+  `String`) compares the text. An item that already is a reference, like a loop variable over a
+  borrowed list, isn't lent again. Before, these failed with `Borrow<&str>` or
+  "expected `&String`, found `&&str`" errors.
+* Predicates compare their parameter with a text literal on any list: `words.any { it == "bob" }`
+  works on a `Vec<&str>`.
+* Reading a map by index with an owned key or a number works: `ages[name]`,
+  `mapOf(1 to "one")[1]`, `xs.group_by { it.len() }[2]`.
+* A map index assignment on a field whose value calls a method that changes `this`
+  (`ids[k] = alloc()`) computes that call first, like `items.push(next_id())`; so does a call
+  after a conversion of a parameter (`ids.insert(name.to_string(), alloc())`).
+* `sorted()` and `sorted_descending()` work on lists of `f64` (NaN sorts last, as in Kotlin).
+* `x in a..b` no longer makes rustc warn about unneeded parentheses (with a broken suggested
+  fix), and a `when` arm with several `in` conditions and a guard applies the guard to all of
+  them. Before, the guard applied only to the last.
+* Printing a value without a text form (`println(xs)`) suggests `println("${xs:?}")`.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.
