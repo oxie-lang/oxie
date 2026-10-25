@@ -861,6 +861,17 @@ impl Printer<'_> {
     fn call(&mut self, c: &syn::ExprCall) -> String {
         // `(self.f)(x)`: Oxie turns a parenthesized field call into a method call
         if let syn::Expr::Paren(p) = &*c.func {
+            // a field of this class: Oxie calls a callable field by its name, `f(x)`
+            if let syn::Expr::Field(f) = &*p.expr {
+                if let (true, syn::Member::Named(m)) = (is_path(&f.base, "self"), &f.member) {
+                    let name = m.to_string();
+                    let method = self.cx.class.as_ref().is_some_and(|c| c.methods.contains(&name));
+                    if self.implicit_field(&name) && !method && !self.cx.type_fns.contains(&name) {
+                        let args: Vec<String> = c.args.iter().map(|a| self.expr(a)).collect();
+                        return format!("{}({})", id(m), args.join(", "));
+                    }
+                }
+            }
             if matches!(&*p.expr, syn::Expr::Field(_)) {
                 self.todo(line_of(c), "kept as Rust: Oxie reads `(x.f)(args)` as a method call");
                 return format!("rust {{ {} }}", self.rust_expr_inline(&syn::Expr::Call(c.clone())));

@@ -497,14 +497,20 @@ impl Button {
         v + 1
     }
 }
+
+fn click_twice(b: &Button) -> i32 {
+    (b.on_click)() * 2
+}
 "#,
         r#"class Button(on_click: Box<dyn Fn() -> i32>) {
     fun click(): i32 {
-        // TODO(from-rust): kept as Rust: Oxie reads `(x.f)(args)` as a method call
-        val v = rust { (self.on_click)() }
+        val v = on_click()
         v + 1
     }
 }
+
+// TODO(from-rust): kept as Rust: Oxie reads `(x.f)(args)` as a method call
+fun click_twice(b: &Button): i32 = rust { (b.on_click)() } * 2
 "#,
     );
 }

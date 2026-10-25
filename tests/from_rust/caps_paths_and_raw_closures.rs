@@ -16,9 +16,15 @@ struct Label {
     name: Option<String>,
 }
 
+struct Loader(Box<dyn Fn(&str) -> String>);
+
 impl Label {
     fn render(&self) -> String {
         self.name.as_ref().map(|name| (self.text)(name, name.len())).unwrap_or_default()
+    }
+
+    fn load(&self, loader: &Loader) -> Option<String> {
+        self.name.as_ref().map(|name| (loader.0)(name))
     }
 }
 
@@ -28,4 +34,5 @@ fn main() {
     println!("{}", url.0);
     let l = Label { text: Box::new(|n, k| format!("{n}:{k}")), name: Some("ab".into()) };
     println!("{}", l.render());
+    println!("{:?}", l.load(&Loader(Box::new(|n| n.to_uppercase()))));
 }
