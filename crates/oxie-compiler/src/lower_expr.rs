@@ -2532,6 +2532,16 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("{}{}::new()", esc(&name), g));
                     return;
                 }
+                // a function from elsewhere (`gpui::list`) beside a field that can't be called
+                if self.implicit_field(&name).is_some() {
+                    self.e.w(&esc(&name));
+                    if let Some(g) = generics {
+                        let gt = self.generic_args_text(g);
+                        self.e.w(&format!("::{}", gt));
+                    }
+                    self.arg_list(args, None, TyPos::Param, span);
+                    return;
+                }
             } else {
                 self.path_call(segs, generics.as_ref(), args, span);
                 return;
