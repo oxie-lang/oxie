@@ -4383,6 +4383,7 @@ fn imported_names(tree: &UseTree, prefix: &[String], out: &mut Vec<(String, Vec<
                 imported_names(i, &prefix, out);
             }
         }
-        UseTree::Glob { .. } => {}
+        // a glob is kept as `*` with the path it imports from
+        UseTree::Glob { segments } => out.push(("*".into(), prefix.iter().chain(segments).cloned().collect())),
     }
 }

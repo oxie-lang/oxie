@@ -706,7 +706,13 @@ impl<'a> Lowerer<'a> {
                 return None;
             }
         }
-        self.k.variant_enum_in(n, Some(&self.module))
+        let en = self.k.variant_enum_in(n, Some(&self.module))?;
+        // `import TabSlot::*` brings the variants themselves, which stay bare (the enum may not be)
+        let globbed = |g: &Vec<String>| g.last() == Some(&en.name);
+        if self.local_imports.iter().any(|(name, g)| name == "*" && globbed(g)) || self.k.globs.get(&self.module).into_iter().flatten().any(globbed) {
+            return None;
+        }
+        Some(en)
     }
 
     pub(crate) fn is_trait_name(&self, n: &str) -> bool {
