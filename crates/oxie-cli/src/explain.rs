@@ -2099,8 +2099,14 @@ fn unused_variable(d: &mut MappedDiag, lines: &[&str], name: &str) {
 /// rustc suggestions that map exactly onto the source and read the same in Oxie.
 fn rustc_fixes(d: &mut MappedDiag, lines: &[&str]) {
     let suggestions = d.suggestions.clone();
+    // rustc offers `.as_str()` for `Some("text")` arms on an optional `String`, which has none
+    let optional_text = d.secondary.iter().any(|l| l.text.contains("has type `Option<String>`") || l.text.contains("has type `&Option<String>`"));
+    if optional_text && suggestions.iter().any(|s| s.replacement == ".as_str()") {
+        d.notes.retain(|n| !n.contains(".as_str()"));
+        d.notes.push(help("compare the text inside with `.as_deref()`, which turns a `String?` into a `&str?`."));
+    }
     for s in suggestions {
-        let r = s.replacement.as_str();
+        let r = if optional_text && s.replacement == ".as_str()" { ".as_deref()" } else { s.replacement.as_str() };
         let title = match r {
             ".clone()" => "use a copy (`.clone()`)".to_string(),
             "&" => "pass a reference (`&`)".to_string(),

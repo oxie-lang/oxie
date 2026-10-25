@@ -208,6 +208,10 @@ impl<'a> Lowerer<'a> {
                     return self.class.as_ref()?.fields.get(name).cloned();
                 }
                 let rt = self.infer_type(recv)?;
+                // `t.0` of a tuple
+                if let (Type::Tuple(ts), Ok(i)) = (&rt, name.parse::<usize>()) {
+                    return ts.get(i).cloned().filter(|t| *t != Type::Infer);
+                }
                 let tn = match &rt {
                     Type::Ref { inner, .. } => inner.single_name()?.to_string(),
                     t => t.single_name()?.to_string(),

@@ -232,6 +232,13 @@ fn appended_text_var(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
     Some(Stmt::Let { pat: pat.clone(), mutable: false, ty: None, init: Some(Expr::new(from, sp)), else_: None, span: *span })
 }
 
+/// See `text_when`.
+enum TextWhen {
+    Deref,
+    AsStr,
+    AsDeref,
+}
+
 impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ statements
 
@@ -1747,7 +1754,15 @@ impl<'a> Lowerer<'a> {
                     (Pat::Ident { by_ref: false, sub: None, .. }, Some(copy)) => {
                         self.elem_type(iter).map(|t| if copy && !writes_elements { t } else { Type::Ref { lifetime: None, mutable: writes_elements, inner: Box::new(t) } })
                     }
-                    (Pat::Ident { by_ref: false, sub: None, .. }, None) if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
+                    // `for (s in &names)` and `names.iter()`: references to the elements
+                    (Pat::Ident { by_ref: false, sub: None, .. }, None) => match &strip_paren(iter).kind {
+                        Unary(op @ (UnOp::Ref | UnOp::RefMut), x) => self.elem_type(x).map(|t| Type::Ref { lifetime: None, mutable: *op == UnOp::RefMut, inner: Box::new(t) }),
+                        MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "iter" | "iter_mut") => {
+                            self.elem_type(recv).map(|t| Type::Ref { lifetime: None, mutable: name == "iter_mut", inner: Box::new(t) })
+                        }
+                        _ if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 self.bind_pat(pat, elem);
@@ -3894,8 +3909,9 @@ impl<'a> Lowerer<'a> {
         self.e.w("}");
     }
 
-    /// A `when` on a `String` (`Some(false)`) or `&String` (`Some(true)`) with a string literal arm.
-    fn text_when(&self, subject: &Expr, arms: &[WhenArm]) -> Option<bool> {
+    /// How a `when` with string literal arms reaches the `&str` its literals have: `&*s` for a
+    /// `String`, `s.as_str()` for a `&String`, `s.as_deref()` for a `String?` with `Some("..")` arms.
+    fn text_when(&self, subject: &Expr, arms: &[WhenArm]) -> Option<TextWhen> {
         fn text(p: &Pat) -> bool {
             match p {
                 Pat::Lit(e) => matches!(e.kind, ExprKind::Str(_) | ExprKind::RawStr(_)),
@@ -3903,14 +3919,27 @@ impl<'a> Lowerer<'a> {
                 _ => false,
             }
         }
-        if !arms.iter().any(|a| a.conds.iter().any(|c| matches!(c, WhenCond::Pat(p) if text(p)))) {
+        fn some_text(p: &Pat) -> bool {
+            match p {
+                Pat::TupleStruct { path, elems, .. } => path.last().is_some_and(|n| n == "Some") && elems.len() == 1 && text(&elems[0]),
+                Pat::Or(ps) => ps.iter().any(some_text),
+                _ => false,
+            }
+        }
+        let has = |f: fn(&Pat) -> bool| arms.iter().any(|a| a.conds.iter().any(|c| matches!(c, WhenCond::Pat(p) if f(p))));
+        let is_string = |t: &Type| t.single_name() == Some("String");
+        let t = self.infer_type(subject)?;
+        let owned = match &t {
+            Type::Ref { inner, .. } => &**inner,
+            t => t,
+        };
+        if has(some_text) {
+            return matches!(owned, Type::Option(x) if is_string(x)).then_some(TextWhen::AsDeref);
+        }
+        if !has(text) || !is_string(owned) {
             return None;
         }
-        let is_string = |t: &Type| t.single_name() == Some("String");
-        match self.infer_type(subject)? {
-            Type::Ref { inner, .. } => is_string(&inner).then_some(true),
-            t => is_string(&t).then_some(false),
-        }
+        Some(if matches!(t, Type::Ref { .. }) { TextWhen::AsStr } else { TextWhen::Deref })
     }
 
     fn when_expr(&mut self, subject: Option<&Expr>, arms: &[WhenArm], rust_match: bool, mode: Option<&Target>, span: Span) {
@@ -3939,12 +3968,17 @@ impl<'a> Lowerer<'a> {
                 // (which a `&str` the inference took for a `String` gives too), `s.as_str()` for
                 // a `&String`
                 match self.text_when(s, arms) {
-                    Some(true) => {
+                    Some(TextWhen::AsStr) => {
                         self.expr(s, P_POSTFIX);
                         self.e.w(".as_str()");
                         self.e.decide(s.span, ".as_str()", "the arms compare text", None);
                     }
-                    Some(false) => {
+                    Some(TextWhen::AsDeref) => {
+                        self.expr(s, P_POSTFIX);
+                        self.e.w(".as_deref()");
+                        self.e.decide(s.span, ".as_deref()", "the arms compare optional text", None);
+                    }
+                    Some(TextWhen::Deref) => {
                         self.e.w("&*");
                         self.expr(s, P_UNARY);
                         self.e.decide(s.span, "&*", "the arms compare text", None);
