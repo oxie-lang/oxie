@@ -39,9 +39,9 @@ x86-64), which also has checksums. `cargo install` compiles it, which takes a mi
 Running the same command again updates `oxie`.
 
 New projects and scripts depend on the `oxie-build` release from crates.io that matches the
-installed `oxie` (`oxie-build = "0.2.0"` for `oxie` 0.2.0). After updating `oxie`, set the
+installed `oxie` (`oxie-build = "0.3.0"` for `oxie` 0.3.0). After updating `oxie`, set the
 same version in a project's Cargo.toml (`oxie` warns when the two differ); within one release
-series, such as 0.2.x, `cargo update -p oxie-build` is enough.
+series, such as 0.3.x, `cargo update -p oxie-build` is enough.
 
 ### Working on Oxie
 
@@ -383,7 +383,7 @@ other than lints, such as `#![cfg_attr(windows, windows_subsystem = "windows")]`
 ## Project layout
 
 ```
-Cargo.toml          [build-dependencies] oxie-build = "0.2.0"
+Cargo.toml          [build-dependencies] oxie-build = "0.3.0"
 build.rs            fn main() { oxie_build::compile(); }
 src/main.rs         include!(concat!(env!("OUT_DIR"), "/oxie/main.rs"));
 src/main.oxi        crate root (src/lib.oxi for libraries)

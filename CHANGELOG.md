@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-25
+
+Oxie 0.3.0 makes code look less like Rust. Lists and maps have short types, `[T]` and `[K: V]`,
+whose literals take the declared type, and methods borrow the parameters they only read, so
+`&str`, `&[T]` and `&T` mostly leave parameter lists. Context parameters declare GPUI's `window`
+and `cx` once, `oxie from-rust` translates whole crates into the new forms, and null checks
+unwrap optional variables.
+
+### Upgrading
+
+* Set `oxie-build = "0.3.0"` in the `[build-dependencies]` of each project (`cargo update`
+  doesn't move from 0.2 to 0.3). `oxie` warns when a project builds with another `oxie-build`.
+* Nothing that compiled stops compiling for the new syntax: `Vec<T>`, `HashMap<K, V>`,
+  `vec[...]` and `mapOf(...)` keep working, and `[T]` used to be an error everywhere but behind
+  `&`, `Box`, `Rc`, `Arc` and in a trait's arguments, where it is still a slice.
+* More parameters are borrowed: those of methods, maps, sets and `PathBuf`s, and in a program
+  (`main.oxi` without `lib.oxi`) those of `pub` functions and methods. Oxie lends the arguments
+  of the calls it compiles; Rust code in `rust { }` blocks and macro arguments keeps calling
+  them with the declared types. Hand-written Rust in the same crate (a Rust crate with Oxie
+  modules) that calls an Oxie function that isn't `pub` may need `&` where that function only
+  reads its parameter, as in 0.2.
+
+### Changes
 
 * Lists and maps have short types: `[T]` is a list (Rust's `Vec<T>`) and `[K: V]` a map (std's
   `HashMap<K, V>`), so `var log: [String] = []` and `val ages: [String: i32] = ["ada": 36]`
