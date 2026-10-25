@@ -504,7 +504,8 @@ the declared type of a variable, field, parameter or return value:
 * `$` starts a template only before a name or `{`; elsewhere (`$5`, `100$`) it is text, as in
   Kotlin. `\$` is a dollar sign in both kinds of strings (`"""` strings are otherwise raw).
   In `error enum` messages, `$0` is the case's first positional field.
-* A literal without `$` is a `&'static str`; a template is a `String`.
+* A literal without `$` is a `&'static str`; a template is a `String`. An `if` or `when` value
+  whose branches mix both is a `String` (`if (n == 0) "none" else "$n items"`).
 * Inside `println`, `print`, `eprintln`, `format`, `panic`, `assert`, `write`, `writeln`, ...
   a template is spliced directly into the format string (no extra allocation).
 * A string literal passed to these with extra arguments is a Rust format string:
