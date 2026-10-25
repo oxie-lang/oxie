@@ -2419,6 +2419,10 @@ impl<'a> Lowerer<'a> {
                 if n == "Self" || crate::lower::PRIMITIVES.contains(&n.as_str()) {
                     return Some((segs.clone(), PathKind::Type));
                 }
+                // Kotlin's names of the number types: `Int.MAX` is `i32::MAX`
+                if let Some(a) = crate::lower::kotlin_alias(n).filter(|a| *a != "()" && !self.k.is_user_type(n)) {
+                    return Some((vec![a.to_string()], PathKind::Type));
+                }
                 if is_type_like(n) {
                     // a unit variant is a value with members; `Extension.instantiate(..)` with a
                     // tuple variant `Extension(..)` goes through a type of that name
@@ -2466,7 +2470,17 @@ impl<'a> Lowerer<'a> {
                         Some((p, kind))
                     }
                     PathKind::Type => {
-                        p.push(name.clone());
+                        // and Kotlin's names of their constants: `Long.MAX_VALUE` is `i64::MAX`
+                        let primitive = p.len() == 1 && crate::lower::PRIMITIVES.contains(&p[0].as_str());
+                        let name = match name.as_str() {
+                            "MAX_VALUE" if primitive => "MAX",
+                            "MIN_VALUE" if primitive => "MIN",
+                            "POSITIVE_INFINITY" if primitive => "INFINITY",
+                            "NEGATIVE_INFINITY" if primitive => "NEG_INFINITY",
+                            "NaN" if primitive => "NAN",
+                            n => n,
+                        };
+                        p.push(name.to_string());
                         Some((p, PathKind::Value))
                     }
                     PathKind::Value => None,

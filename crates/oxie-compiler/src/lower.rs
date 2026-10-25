@@ -125,7 +125,7 @@ fn operator_trait(name: &str) -> Option<(&'static str, &'static str, bool, bool)
     })
 }
 
-fn kotlin_alias(name: &str) -> Option<&'static str> {
+pub(crate) fn kotlin_alias(name: &str) -> Option<&'static str> {
     Some(match name {
         "Int" => "i32",
         "Long" => "i64",
