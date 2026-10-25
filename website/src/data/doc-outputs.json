@@ -97,7 +97,7 @@
   {
     "file": "docs/guide.md",
     "output": "Ada, Grace\ntotal age 109, oldest Grace\nLinus < Ada < Grace\nLondon: 2\n",
-    "source": "data class User(name: String, age: u32, city: String)\n\nfun main() {\n    val users: [User] = [User(\"Ada\", 36, \"London\"), User(\"Linus\", 28, \"Helsinki\"), User(\"Grace\", 45, \"London\")]\n    println(users.filter { it.age > 30 }.map { it.name.clone() }.join_to_string(\", \"))\n    println(\"total age ${users.sum_of { it.age }}, oldest ${users.max_by_key { it.age }?.name ?: \"-\"}\")\n    println(users.sorted_by { it.age }.join_with(\" < \") { it.name.as_str() })\n    val by_city = users.group_by { it.city.clone() }\n    println(\"London: ${by_city[\"London\"].len()}\")\n}\n"
+    "source": "data class User(name: String, age: u32, city: String)\n\nfun main() {\n    val users: [User] = [User(\"Ada\", 36, \"London\"), User(\"Linus\", 28, \"Helsinki\"), User(\"Grace\", 45, \"London\")]\n    println(users.filter { it.age > 30 }.map { it.name.clone() }.join_to_string(\", \"))\n    println(\"total age ${users.sum_of { it.age }}, oldest ${users.max_by_key { it.age }?.name ?: \"-\"}\")\n    println(users.sorted_by { it.age }.join_with(\" < \") { it.name })\n    val by_city = users.group_by { it.city.clone() }\n    println(\"London: ${by_city[\"London\"].len()}\")\n}\n"
   },
   {
     "file": "docs/guide.md",

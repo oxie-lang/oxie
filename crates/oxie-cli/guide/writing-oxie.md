@@ -122,7 +122,7 @@ fun main() {
   new `Vec`s (`find`, `first()`, `max_by_key` return references). As in Kotlin, `sorted_by`
   takes a key (`sorted_by { it.age }`); to sort with a comparator, call Rust's `sort_by` on a
   `var` list: `xs.sort_by { a, b -> b.age.cmp(&a.age) }`. `join_to_string(", ")` joins,
-  `join_with(", ") { it.name.as_str() }` maps each element first. They exist on lists, arrays
+  `join_with(", ") { it.name }` maps each element first. They exist on lists, arrays
   and slices, not on iterators: what `iter()`, `split()`, `chars()`, `lines()` or a range
   `.map { }` return is a lazy iterator with Rust's methods, so call the operation on the list
   (`xs.map { }`, not `xs.iter().map { }`) or `collect()` first:

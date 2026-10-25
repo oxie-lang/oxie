@@ -2725,14 +2725,18 @@ impl<'a> Lowerer<'a> {
         args.iter().zip(&types).any(|(a, t)| converts(self, a, t)).then_some(types)
     }
 
-    /// `xs.sorted_by { it.word }` on a list: Oxie's key operations let the key borrow from the
-    /// element, so a field key is lent (`&it.word`) instead of moved out of the borrowed element.
+    /// `xs.sorted_by { it.word }`, `xs.join_with(", ") { it.name }` on a list: Oxie's key
+    /// operations let the key borrow from the element, so a field key is lent (`&it.word`) instead
+    /// of moved out of the borrowed element.
     /// The arguments with the key borrowed, or `None` to keep them.
     fn borrowed_key(&mut self, recv: &Expr, name: &str, args: &[Arg]) -> Option<Vec<Arg>> {
-        if !matches!(name, "sorted_by" | "sorted_by_descending" | "max_by_key" | "min_by_key") || args.len() != 1 {
-            return None;
-        }
-        let ExprKind::Lambda { params, body, .. } = &args[0].value.kind else { return None };
+        // the key lambda: the only argument, or `join_with`'s after the separator
+        let at = match (name, args.len()) {
+            ("sorted_by" | "sorted_by_descending" | "max_by_key" | "min_by_key", 1) => 0,
+            ("join_with", 2) => 1,
+            _ => return None,
+        };
+        let ExprKind::Lambda { params, body, .. } = &args[at].value.kind else { return None };
         let param = match params.as_slice() {
             [] => "it".to_string(),
             [p] => match &p.pat {
@@ -2758,11 +2762,11 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         let lent = Expr::new(ExprKind::Unary(UnOp::Ref, Box::new(key.clone())), key.span);
-        let mut arg = args[0].clone();
-        if let ExprKind::Lambda { body, .. } = &mut arg.value.kind {
+        let mut args = args.to_vec();
+        if let ExprKind::Lambda { body, .. } = &mut args[at].value.kind {
             **body = lent;
         }
-        Some(vec![arg])
+        Some(args)
     }
 
     /// `thread.spawn { .. }`, `tokio.spawn(async { .. })`: the lambda or `async` block runs on

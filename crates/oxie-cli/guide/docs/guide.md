@@ -220,7 +220,7 @@ fun main() {
     val users: [User] = [User("Ada", 36, "London"), User("Linus", 28, "Helsinki"), User("Grace", 45, "London")]
     println(users.filter { it.age > 30 }.map { it.name.clone() }.join_to_string(", "))
     println("total age ${users.sum_of { it.age }}, oldest ${users.max_by_key { it.age }?.name ?: "-"}")
-    println(users.sorted_by { it.age }.join_with(" < ") { it.name.as_str() })
+    println(users.sorted_by { it.age }.join_with(" < ") { it.name })
     val by_city = users.group_by { it.city.clone() }
     println("London: ${by_city["London"].len()}")
 }

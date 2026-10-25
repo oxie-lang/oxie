@@ -40,6 +40,7 @@ fun main() {
     val words: [Word] = [Word("pear", 2), Word("apple", 5), Word("fig", 2)]
     println(words.sorted_by { it.text }.map { it.text.clone() })
     println("${words.max_by_key { it.text }?.text} ${words.min_by_key { it.count }?.text}")
+    println(words.join_with(", ") { it.text })
 
     var names: [String] = []
     names.push("bob")

@@ -7,6 +7,7 @@ on
 2.5
 ["apple", "fig", "pear"]
 pear pear
+pear, apple, fig
 ["ann", "bob"] 1 {"ann": "36"}
 ABC!
 5

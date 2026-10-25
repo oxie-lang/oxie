@@ -845,7 +845,7 @@ Each one is the iterator chain you would write by hand; the element is passed by
 | `xs.group_by { key }` | `[K: [T]]` | |
 | `xs.associate_by { key }` | `[K: T]` | |
 | `xs.partition { }` | `([T], [T])` | |
-| `xs.join_to_string(", ")`, `join_with(", ") { it.name.as_str() }` | `String` | |
+| `xs.join_to_string(", ")`, `join_with(", ") { it.name }` | `String` | |
 | `xs.is_not_empty()` | `bool` | `!xs.is_empty()` |
 
 Inherent Rust methods win over these (arrays keep Rust's by-value `map`), and Rust's iterator
