@@ -187,6 +187,7 @@ impl<'a> Lowerer<'a> {
                 }
                 match name.as_str() {
                     "len" | "count" | "capacity" => Some(ty("usize")),
+                    "group_by" | "associate_by" => Some(generic("HashMap", 2)),
                     "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "join" | "concat" | "replace" | "trim_string" => Some(ty("String")),
                     "is_empty" | "contains" | "contains_key" | "starts_with" | "ends_with" | "is_some" | "is_none" | "is_ok" | "is_err" | "any" | "all"
                     | "is_alphabetic" | "is_numeric" | "is_alphanumeric" | "is_whitespace" | "is_digit" | "eq" | "ne" | "is_nan" => Some(ty("bool")),

@@ -1509,7 +1509,10 @@ impl<'a> Lowerer<'a> {
                 self.e.w("[");
                 // a list indexed with another integer type: `as usize` costs nothing, and a
                 // negative index fails the bounds check like one past the end
-                if self.int_index(r, i) {
+                if self.map_entry_types(e).is_some() {
+                    // a variable of unknown type is often a `&str` (`for (w in line.split(' '))`)
+                    self.map_key(i, false);
+                } else if self.int_index(r, i) {
                     self.expr(i, P_CAST);
                     self.e.w(" as usize");
                     self.e.decide(i.span, "as usize", "indexes are `usize`", None);
@@ -2519,6 +2522,27 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// A key looked up in a map or set, in a borrowed form the lookup takes: `"ada"` and a
+    /// `&String` as they are, a `String` or a number lent, a `&&str` read through once. A
+    /// variable of unknown type is lent only with `lend_unknown`.
+    fn map_key(&mut self, key: &Expr, lend_unknown: bool) {
+        let refs = self.infer_type(key).map_or(0, |t| ref_depth(&t).0);
+        let literal = match &strip_paren(key).kind {
+            ExprKind::Bool(_) | ExprKind::Char(_) => true,
+            ExprKind::Unary(UnOp::Neg, x) => matches!(x.kind, ExprKind::Int(_) | ExprKind::Float(_)),
+            _ => false,
+        };
+        if refs >= 2 {
+            self.e.w("*");
+            self.expr(key, P_UNARY);
+        } else if literal || self.auto_borrow(key, false) && (lend_unknown || !key.ident().is_some_and(|n| matches!(self.local(n), Some(None)))) {
+            self.e.w("&");
+            self.expr(key, P_UNARY);
+        } else {
+            self.expr(key, P_LOWEST);
+        }
+    }
+
     /// `coll.contains(..)` for `item in coll` (written without the `!` of `!in`).
     fn contains(&mut self, coll: &Expr, item: &Expr) {
         let kind = self.contains_kind(coll);
@@ -2530,15 +2554,7 @@ impl<'a> Lowerer<'a> {
             Contains::Key | Contains::Set => {
                 self.expr(coll, P_POSTFIX);
                 self.e.w(if kind == Contains::Key { ".contains_key(" } else { ".contains(" });
-                if item_refs >= 2 {
-                    self.e.w("*");
-                    self.expr(item, P_UNARY);
-                } else if self.auto_borrow(item, false) {
-                    self.e.w("&");
-                    self.expr(item, P_UNARY);
-                } else {
-                    self.expr(item, P_LOWEST);
-                }
+                self.map_key(item, true);
                 self.e.w(")");
             }
             Contains::Text => {
