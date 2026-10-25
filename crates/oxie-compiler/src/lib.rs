@@ -5,6 +5,7 @@
 
 pub mod ast;
 pub mod bounds;
+pub mod boxes;
 pub mod compile;
 pub mod contexts;
 pub mod diag;

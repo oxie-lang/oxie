@@ -1084,6 +1084,10 @@ impl<'a> Lowerer<'a> {
     }
 
     fn path_ty(&self, global: bool, segs: &[PathSeg], pos: TyPos) -> String {
+        // a box Oxie added to a recursive field (`boxes.rs`)
+        if global && segs.len() == 1 && segs[0].name == "Box" {
+            return self.seg(&segs[0], TyPos::Generic);
+        }
         // `[K: V]`: std's map, by its short name where the module imports it
         if global && segs.len() == 1 && segs[0].name == "HashMap" {
             let map = self.seg(&segs[0], TyPos::Generic);

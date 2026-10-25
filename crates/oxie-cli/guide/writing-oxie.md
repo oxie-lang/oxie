@@ -217,6 +217,8 @@ Rust habits compile, but they skip what Oxie infers and don't read as Oxie. Writ
   possible) on their own. Other derives: `@derive(Hash)` or `class C : Hash`.
 * Operators are `operator fun`s in the class body (`operator fun plus(o: Vec2): Vec2`), not
   `impl Add` blocks.
+* Recursive types need no `Box`: write `enum Expr { Neg(Expr) }` and `class Node(next: Node?)`,
+  and build them as `Expr.Neg(x)` and `Node(next)`. Oxie boxes the field and the values put in.
 * `error enum` (or `error class`) declares an error type with its messages, in place of a
   hand-written `Display` and `Error` impl.
 

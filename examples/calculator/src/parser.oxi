@@ -4,9 +4,9 @@ import lexer::Token
 enum Expr {
     Num(f64)
     Var(String)
-    Neg(Box<Expr>)
-    Bin(op: char, left: Box<Expr>, right: Box<Expr>)
-    Call(name: String, arg: Box<Expr>)
+    Neg(Expr)
+    Bin(op: char, left: Expr, right: Expr)
+    Call(name: String, arg: Expr)
 }
 
 error enum ParseError {
@@ -36,7 +36,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
             if (op != '+' && op != '-') break
             advance()
             val right = term()?
-            left = Expr.Bin(op, Box.new(left), Box.new(right))
+            left = Expr.Bin(op, left, right)
         }
         left
     }
@@ -47,7 +47,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
             if (op != '*' && op != '/') break
             advance()
             val right = power()?
-            left = Expr.Bin(op, Box.new(left), Box.new(right))
+            left = Expr.Bin(op, left, right)
         }
         left
     }
@@ -56,8 +56,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
         val base = unary()?
         if (peek() == Token.Op('^')) {
             advance()
-            val exp = power()?
-            return Expr.Bin('^', Box.new(base), Box.new(exp))
+            return Expr.Bin('^', base, power()?)
         }
         base
     }
@@ -65,7 +64,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
     fun unary(): Expr throws ParseError {
         if (peek() == Token.Op('-')) {
             advance()
-            return Expr.Neg(Box.new(unary()?))
+            return Expr.Neg(unary()?)
         }
         primary()
     }
@@ -79,7 +78,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
                     advance()
                     val arg = expression()?
                     expect_rparen()?
-                    Expr.Call(name, Box.new(arg))
+                    Expr.Call(name, arg)
                 } else {
                     Expr.Var(name)
                 }

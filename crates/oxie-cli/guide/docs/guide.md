@@ -390,6 +390,32 @@ fun main() {
 Variants can carry named fields `Circle(radius: f64)`, positional fields `Pair(i32, i32)`, or
 nothing. Enums derive `Debug`, `Clone`, `PartialEq` (and `Copy`/`Eq`/`Hash` when possible).
 
+A type can hold itself: a tree, an expression, a linked list. Oxie stores such a field in a box
+(Rust's `Box<Expr>`), since a value can't contain a whole copy of itself, and boxes the values
+you put in:
+
+```oxie
+enum Expr {
+    Num(f64)
+    Neg(Expr)                             // Box<Expr> in the generated Rust
+    Add(left: Expr, right: Expr)
+}
+
+fun eval(e: &Expr): f64 = when (e) {
+    Num(n) -> *n
+    Neg(x) -> -eval(x)
+    Add(l, r) -> eval(l) + eval(r)
+}
+
+class Node(value: i32, next: Node? = null)   // a linked list: Option<Box<Node>>
+
+fun main() {
+    println(eval(Expr.Add(Expr.Num(1.0), Expr.Neg(Expr.Num(3.0)))))
+    val list = Node(1, Node(2))
+    println(list.next?.value)
+}
+```
+
 ## Interfaces
 
 ```oxie

@@ -9,7 +9,9 @@ This document is for people working on Oxie itself.
   │ lexer.rs      tokens with byte spans; significant newlines; string interpolation parts
   ▼
   │ parser.rs     recursive descent → ast.rs; error recovery per statement
-  │ lists.rs      array literals of `var`s that grow (`xs.push(..)`) become lists
+  │ lists.rs      array literals of `var`s that grow (`xs.push(..)`) become lists, and so do
+  │               `&mut [T]` parameters that grow (crate-wide)
+  │ boxes.rs      fields that hold their own type (`Neg(Expr)`) become `Box<Expr>` (crate-wide)
   ▼
   │ contexts.rs   context parameters: `context(...)` clauses become parameters whose default is
   │               the caller's variable of that name; a class's methods get the ones they use

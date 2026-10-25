@@ -388,6 +388,21 @@ impl Type {
         let generics = Some(vec![GenericArg::Type(key), GenericArg::Type(value)]);
         Type::Path { global: true, segs: vec![PathSeg { name: "HashMap".into(), generics, fn_sugar: None }], span }
     }
+    /// `Box<T>` that Oxie added to a recursive field (`boxes.rs`). Its path starts at the crate
+    /// root, as for `[K: V]`, so it is told apart from a `Box` written in the source.
+    pub fn auto_box(inner: Type) -> Type {
+        Type::Path { global: true, segs: vec![PathSeg { name: "Box".into(), generics: Some(vec![GenericArg::Type(inner)]), fn_sugar: None }], span: Span::default() }
+    }
+    /// The type inside a box Oxie added (`auto_box`).
+    pub fn auto_boxed(&self) -> Option<&Type> {
+        match self {
+            Type::Path { global: true, segs, .. } if segs.len() == 1 && segs[0].name == "Box" => match segs[0].generics.as_deref() {
+                Some([GenericArg::Type(t)]) => Some(t),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     /// Was the type written `[K: V]`?
     pub fn is_map(&self) -> bool {
         matches!(self, Type::Path { global: true, segs, .. } if segs.len() == 1 && segs[0].name == "HashMap")

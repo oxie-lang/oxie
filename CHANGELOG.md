@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+* Recursive types need no `Box`: a field that holds its own type, directly (`Neg(Expr)`), as an
+  optional (`next: Node?`) or through another type of the crate, is boxed, values going into it
+  are boxed (`Expr.Neg(x)`), and `when` arms, calls and fields read through the box. Before,
+  rustc reported a recursive type with infinite size. The calculator example's `Expr` drops its
+  `Box<Expr>` fields and `Box.new` calls.
 * `when`, `if (val ...)`, `while (val ...)` and `==` on an optional match and compare its value
   without `Some(..)`: `when (light) { Light.Red -> ...; null -> ... }`,
   `while (val Token.Op(op) = peek())`, `xs.first() == 3`, `name == "ada"` on a `String?`.

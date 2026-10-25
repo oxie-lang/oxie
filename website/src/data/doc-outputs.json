@@ -126,6 +126,11 @@
   },
   {
     "file": "docs/guide.md",
+    "output": "-2\n2\n",
+    "source": "enum Expr {\n    Num(f64)\n    Neg(Expr)                             // Box<Expr> in the generated Rust\n    Add(left: Expr, right: Expr)\n}\n\nfun eval(e: &Expr): f64 = when (e) {\n    Num(n) -> *n\n    Neg(x) -> -eval(x)\n    Add(l, r) -> eval(l) + eval(r)\n}\n\nclass Node(value: i32, next: Node? = null)   // a linked list: Option<Box<Node>>\n\nfun main() {\n    println(eval(Expr.Add(Expr.Num(1.0), Expr.Neg(Expr.Num(3.0)))))\n    val list = Node(1, Node(2))\n    println(list.next?.value)\n}\n"
+  },
+  {
+    "file": "docs/guide.md",
     "output": "Dog says woof\nTom says meow\n",
     "source": "interface Animal {\n    fun name(): String\n    fun sound(): String\n    fun speak(): String = \"${name()} says ${sound()}\"    // default method\n}\n\nclass Dog : Animal {\n    override fun name() = \"Dog\"\n    override fun sound() = \"woof\"\n}\n\nclass Cat(name: String) : Animal {\n    override fun name() = name.clone()\n    override fun sound() = \"meow\"\n}\n\nfun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`\n\nfun main() {\n    val zoo: [Animal] = [Dog(), Cat(\"Tom\")]\n    for (a in zoo) introduce(a)                           // lends the boxed value\n}\n"
   },

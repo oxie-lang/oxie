@@ -16,6 +16,28 @@ const INFERENCE_DEPENDENT: &[&str] = &[
     "get", "first", "last", "find", "max", "min", "pop", "next", "cloned", "copied", "as_ref", "as_deref", "take", "filter",
 ];
 
+/// The type a `when` on a value of type `t` matches: the value in a box (`Box<T>` is `T`,
+/// `&Box<T>` is `&T`), or `t` itself.
+fn unboxed(t: Type) -> Type {
+    match t {
+        Type::Ref { lifetime, mutable, inner } if is_box(&inner) => Type::Ref { lifetime, mutable, inner: Box::new(unboxed(*inner)) },
+        Type::Path { ref segs, .. } if is_box(&t) => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(inner)]) => inner.clone(),
+            _ => t,
+        },
+        t => t,
+    }
+}
+
+/// Is `t` a box (`Box<T>`, behind any references)?
+fn is_box(t: &Type) -> bool {
+    match t {
+        Type::Ref { inner, .. } => is_box(inner),
+        Type::Path { segs, .. } => segs.len() == 1 && segs[0].name == "Box",
+        _ => false,
+    }
+}
+
 /// How a template prints a value (`template_form`).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Form {
@@ -1235,6 +1257,48 @@ impl<'a> Lowerer<'a> {
             }
         }
         match ty {
+            // an owned box (a recursive field bound by a `when` arm) where its value is expected: `*x`
+            Type::Path { segs, .. }
+                if ty.auto_boxed().is_none()
+                    && e.ident().is_some()
+                    && self.infer_type(e).is_some_and(|t| t.auto_boxed().is_some_and(|i| i.last_name() == segs.last().map(|s| s.name.as_str()))) =>
+            {
+                self.e.w("*");
+                self.expr(e, P_UNARY);
+            }
+            // a value for a recursive field Oxie boxed (`boxes.rs`): `Box::new(x)`, unless it is a
+            // box already (another value's field)
+            Type::Path { .. } if ty.auto_boxed().is_some() => {
+                let inner = ty.auto_boxed().unwrap().clone();
+                let box_new = match &e.kind {
+                    ExprKind::MethodCall { recv, name, .. } => name == "new" && recv.ident() == Some("Box"),
+                    ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Path { segs, .. } if segs.len() == 2 && segs[0] == "Box" && segs[1] == "new"),
+                    _ => false,
+                };
+                if box_new || self.infer_type(e).is_some_and(|t| is_box(&t)) {
+                    self.expr(e, P_LOWEST);
+                } else {
+                    self.e.w("Box::new(");
+                    self.coerce(e, &inner, TyPos::Generic);
+                    self.e.w(")");
+                }
+            }
+            // `T?` for a recursive field: `Some(Box::new(x))`, `opt.map(Box::new)` for an optional
+            Type::Option(inner) if inner.auto_boxed().is_some() => match &e.kind {
+                ExprKind::Null => self.e.w("None"),
+                _ => match self.optional_inner(e) {
+                    Some(Some(t)) if is_box(&t) => self.expr(e, P_LOWEST),
+                    Some(_) => {
+                        self.expr(e, P_POSTFIX);
+                        self.e.w(".map(Box::new)");
+                    }
+                    None => {
+                        self.e.w("Some(");
+                        self.coerce(e, inner, TyPos::Generic);
+                        self.e.w(")");
+                    }
+                },
+            },
             // `&["a": 1]` for a `&[String: i32]` parameter
             Type::Ref { mutable: false, inner, .. } if matches!(&e.kind, ExprKind::Unary(UnOp::Ref, x) if is_collection_lit(x)) => {
                 let ExprKind::Unary(_, x) = &e.kind else { unreachable!() };
@@ -2836,6 +2900,9 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&p);
                 }
                 self.bind_pat(pat, None);
+                for (name, t) in self.boxed_bindings(pat, Some(expr)) {
+                    self.bind_name(&name, Some(t));
+                }
                 // a variable a null check unwrapped keeps its type (`narrow_cond`)
                 if let Pat::Ident { name, .. } = pat {
                     if let Some(i) = self.narrowed_types.iter().position(|(n, _)| n == name) {
@@ -3083,6 +3150,9 @@ impl<'a> Lowerer<'a> {
                 }
                 self.let_subject(pat, expr, *implicit_some);
                 self.bind_pat(pat, None);
+                for (name, t) in self.boxed_bindings(pat, Some(expr)) {
+                    self.bind_name(&name, Some(t));
+                }
             }
         }
     }
@@ -4247,6 +4317,61 @@ impl<'a> Lowerer<'a> {
             ExprKind::Field { recv, name, safe: false } => name.chars().next().is_some_and(char::is_uppercase) && recv.ident().is_some_and(|n| n.chars().next().is_some_and(char::is_uppercase)),
             _ => false,
         }
+    }
+
+    /// The names `p` binds to boxed fields of an enum case (`Neg(x)` of `Neg(Box<Expr>)`), with
+    /// their types: `Box<T>`, or `&Box<T>` when `subject` is matched through a reference.
+    fn boxed_bindings(&mut self, p: &Pat, subject: Option<&Expr>) -> Vec<(String, Type)> {
+        let Some(s) = subject else { return Vec::new() };
+        let Some(subject_ty) = self.infer_type(s) else { return Vec::new() };
+        let by_ref = matches!(subject_ty, Type::Ref { .. }) || {
+            let field = matches!(&strip_paren(s).kind, ExprKind::Field { recv, safe: false, .. } if matches!(recv.kind, ExprKind::SelfValue))
+                || s.ident().is_some_and(|n| self.implicit_field(n).is_some());
+            field && !self.self_by_value
+        };
+        let (path, elems): (&[String], Vec<(Option<&str>, &Pat)>) = match p {
+            Pat::TupleStruct { path, elems, .. } => (path, elems.iter().map(|e| (None, e)).collect()),
+            Pat::Struct { path, fields, .. } => (path, fields.iter().filter_map(|(n, p)| p.as_ref().map(|p| (Some(n.as_str()), p))).collect()),
+            _ => return Vec::new(),
+        };
+        let Some(case) = path.last() else { return Vec::new() };
+        let mut owner = Some(&subject_ty);
+        while let Some(Type::Ref { inner, .. }) = owner {
+            owner = Some(inner);
+        }
+        if let Some(t) = owner.filter(|t| is_box(t)) {
+            owner = match t {
+                Type::Path { segs, .. } => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(t)]) => Some(t),
+                    _ => None,
+                },
+                _ => None,
+            };
+        }
+        let en = match path {
+            [.., e, _] => self.enum_info(e),
+            _ => owner.and_then(|t| t.last_name()).and_then(|n| self.enum_info(n)),
+        };
+        let Some(shape) = en.and_then(|e| e.variant(case)) else { return Vec::new() };
+        let types: Vec<(Option<&str>, &Type)> = match shape {
+            crate::sema::VariantShape::Tuple(ts) => ts.iter().map(|t| (None, t)).collect(),
+            crate::sema::VariantShape::Named(fs) => fs.iter().map(|(n, t)| (Some(n.as_str()), t)).collect(),
+            crate::sema::VariantShape::Unit => Vec::new(),
+        };
+        let mut out = Vec::new();
+        for (i, (field, p)) in elems.iter().enumerate() {
+            let t = match field {
+                Some(f) => types.iter().find(|(n, _)| *n == Some(*f)).map(|(_, t)| *t),
+                None => types.get(i).map(|(_, t)| *t),
+            };
+            if let (Some(t), Pat::Ident { name, sub: None, .. }) = (t, p) {
+                if t.auto_boxed().is_some() {
+                    let t = if by_ref { Type::Ref { lifetime: None, mutable: false, inner: Box::new(t.clone()) } } else { t.clone() };
+                    out.push((name.clone(), t));
+                }
+            }
+        }
+        out
     }
 
     /// Is `name` a case of the enum `subject` is (or holds, as an optional)? Then a bare `name`
@@ -5504,6 +5629,12 @@ impl<'a> Lowerer<'a> {
                         self.expr(s, P_UNARY);
                         self.e.decide(s.span, "&*", "the arms compare text", None);
                     }
+                    // a boxed value (a recursive field) matches the value in the box
+                    None if self.infer_type(s).is_some_and(|t| is_box(&t)) => {
+                        let by_ref = matches!(self.infer_type(s), Some(Type::Ref { .. }));
+                        self.e.w(if by_ref { "&**" } else { "*" });
+                        self.expr(s, P_UNARY);
+                    }
                     None => {
                         let pats: Vec<&Pat> = arms.iter().flat_map(|a| a.conds.iter()).filter_map(|c| if let WhenCond::Pat(p) = c { Some(p) } else { None }).collect();
                         if self.match_field_by_ref(s, &pats) {
@@ -5634,12 +5765,15 @@ impl<'a> Lowerer<'a> {
                         self.e.w(&pats.join(" | "));
                         // a name that catches every value is the subject, of its type
                         let catch_all = match arm.conds.as_slice() {
-                            [WhenCond::Pat(Pat::Ident { name, sub: None, .. })] if !self.pat_enum_has_variant(subject, name) => subject.and_then(|s| self.infer_type(s)),
+                            [WhenCond::Pat(Pat::Ident { name, sub: None, .. })] if !self.pat_enum_has_variant(subject, name) => subject.and_then(|s| self.infer_type(s)).map(unboxed),
                             _ => None,
                         };
                         for c in &arm.conds {
                             if let WhenCond::Pat(p) = c {
                                 self.bind_pat(p, catch_all.clone());
+                                for (name, t) in self.boxed_bindings(p, subject) {
+                                    self.bind_name(&name, Some(t));
+                                }
                             }
                         }
                         if let Some(g) = &arm.guard {

@@ -1,0 +1,29 @@
+// Recursive fields are boxed: built with Box::new, matched and read through the box.
+enum Expr {
+    Num(f64)
+    Neg(Expr)
+    Add(left: Expr, right: Expr)
+}
+
+fun eval(e: &Expr): f64 = when (e) {
+    Num(n) -> *n
+    Neg(x) -> -eval(x)
+    Add(l, r) -> eval(l) + eval(r)
+}
+
+fun simplify(e: Expr): Expr = when (e) {
+    Neg(x) -> when (x) {
+        Neg(y) -> simplify(y)
+        other -> Expr.Neg(simplify(other))
+    }
+    other -> other
+}
+
+class Node(value: i32, next: Node? = null)
+
+fun main() {
+    val e = Expr.Add(Expr.Num(1.0), Expr.Neg(Expr.Num(2.0)))
+    println(eval(&simplify(e)))
+    val list = Node(1, Node(2))
+    println(list.next?.value ?: 0)
+}

@@ -408,6 +408,16 @@ enum Shape : Display {
 * `enum class Color { ... }` (Kotlin) is accepted as `enum`.
 * Enums derive `Debug`, `Clone`, `PartialEq` (and `Copy`, `Eq`, `Hash` when possible).
 * `error enum` — see [Errors](#errors).
+* **Recursive types.** A field of an enum, class or data class that holds its own type by
+  value, directly (`Neg(Expr)`), as an optional (`next: Node?`) or through other types of the
+  crate (`Block(body: Body)` with `class Body(first: Stmt)`), is boxed: `Box<Expr>`,
+  `Option<Box<Node>>`. Values going in are boxed (`Expr.Neg(x)` is
+  `Expr::Neg(Box::new(x))`, `Node(1, next)` is `Node::new(1, Some(Box::new(next)))`; one written
+  `Box.new(x)` is left as it is), and reads see through the box: calls, fields and `&T`
+  parameters as in Rust, a `when` on a boxed value matches the value (`match &**x`, or
+  `match *x` for an owned one), and an owned boxed value where its value is expected is taken
+  out (`simplify(*y)`). Lists, maps and boxes already hold their elements on the heap, and a
+  `shared class` is a handle, so those need no box.
 
 ## Interfaces and impl blocks
 

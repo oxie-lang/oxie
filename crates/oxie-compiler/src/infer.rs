@@ -331,10 +331,19 @@ impl<'a> Lowerer<'a> {
                 if let (Type::Tuple(ts), Ok(i)) = (&rt, name.parse::<usize>()) {
                     return ts.get(i).cloned().filter(|t| *t != Type::Infer);
                 }
-                let tn = match &rt {
-                    Type::Ref { inner, .. } => inner.single_name()?.to_string(),
-                    t => t.single_name()?.to_string(),
-                };
+                // through references and boxes (a recursive field), as Rust reads fields
+                let mut t = &rt;
+                loop {
+                    match t {
+                        Type::Ref { inner, .. } => t = inner,
+                        Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Box" => match segs[0].generics.as_deref() {
+                            Some([GenericArg::Type(inner)]) => t = inner,
+                            _ => return None,
+                        },
+                        _ => break,
+                    }
+                }
+                let tn = t.single_name()?.to_string();
                 let c = self.class_info(&tn)?;
                 c.fields.iter().find(|f| f.name == *name).map(|f| f.ty.clone())
             }

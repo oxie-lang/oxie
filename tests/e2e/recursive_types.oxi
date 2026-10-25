@@ -1,0 +1,76 @@
+// A field that holds its own type (`Neg(Expr)`, `next: Node?`), directly or through another type,
+// is boxed by Oxie: values going in are boxed, and arms, calls and fields read through the box.
+
+enum Expr {
+    Num(f64)
+    Neg(Expr)
+    Bin(op: char, left: Expr, right: Expr)
+}
+
+fun eval(e: &Expr): f64 = when (e) {
+    Num(n) -> *n
+    Neg(x) -> -eval(x)
+    Bin(op, l, r) -> when (op) {
+        '+' -> eval(l) + eval(r)
+        else -> eval(l) * eval(r)
+    }
+}
+
+fun show(e: &Expr): String = when (e) {
+    Num(n) -> "$n"
+    Neg(x) -> when (x) {
+        Num(n) -> "-$n"
+        else -> "-(${show(x)})"
+    }
+    Bin(op, l, r) -> "(${show(l)} $op ${show(r)})"
+}
+
+// an owned value: the arms take the boxed values out
+fun simplify(e: Expr): Expr = when (e) {
+    Neg(x) -> when (x) {
+        Neg(y) -> simplify(y)
+        other -> Expr.Neg(simplify(other))
+    }
+    Bin(op, l, r) -> Expr.Bin(op, simplify(l), simplify(r))
+    other -> other
+}
+
+fun strip(e: Expr): Expr {
+    if (val Expr.Neg(x) = e) return strip(x)
+    e
+}
+
+data class Node(value: i32, next: Node? = null) {
+    fun sum(): i32 = value + (next?.sum() ?: 0)
+}
+
+// a cycle through two types boxes the fields on it, not the list
+enum Stmt { Print(text: String), Block(body: Body) }
+data class Body(first: Stmt, rest: [Stmt] = [])
+
+fun run(s: &Stmt) {
+    when (s) {
+        Stmt.Print(t) -> println(t)
+        Stmt.Block(b) -> {
+            run(&b.first)
+            for (x in b.rest) run(x)
+        }
+    }
+}
+
+fun main() {
+    val e = Expr.Bin('+', Expr.Num(1.0), Expr.Neg(Expr.Bin('*', Expr.Num(2.0), Expr.Num(3.0))))
+    println("${show(e)} = ${eval(e)}")
+    println(show(simplify(Expr.Neg(Expr.Neg(Expr.Bin('+', Expr.Neg(Expr.Neg(Expr.Num(1.0))), Expr.Num(2.0)))))))
+    println(show(strip(Expr.Neg(Expr.Neg(Expr.Num(7.0))))))
+    println(e == e.clone())
+    val written = Expr.Neg(Box.new(Expr.Num(5.0)))     // a box written out still works
+    println(eval(written))
+
+    val list = Node(1, Node(2, Node(3)))
+    val tail = Node(5)
+    val two = Node(4, tail)
+    println("${list.sum()} ${two.sum()} ${list.next?.value} ${list == list.clone()}")
+
+    run(Stmt.Block(Body(Stmt.Print("hi"), [Stmt.Print("there")])))
+}
