@@ -869,6 +869,14 @@ impl<'a> Lowerer<'a> {
 
     /// Emits `e` converted to `ty` where Oxie allows implicit conversion.
     pub(crate) fn coerce(&mut self, e: &Expr, ty: &Type, pos: TyPos) {
+        // an alias of a function type is a boxed function wherever it is used
+        if let Type::Path { segs, .. } = ty {
+            if let [seg] = &segs[..] {
+                if let Some(f) = self.fn_aliases.get(&seg.name).filter(|_| seg.generics.is_none()).cloned() {
+                    return self.coerce(e, &f, TyPos::Field);
+                }
+            }
+        }
         // a block ending in a lambda (`{ [a] -> ... }`) for an `impl Fn` parameter stays unboxed
         let unboxed_fn = matches!(ty, Type::Fn { .. }) && !matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local);
         if matches!(e.kind, ExprKind::If { .. } | ExprKind::When { .. } | ExprKind::Block(_) | ExprKind::LabeledBlock { .. }) && !matches!(&e.kind, ExprKind::If { else_: None, .. }) && !unboxed_fn {

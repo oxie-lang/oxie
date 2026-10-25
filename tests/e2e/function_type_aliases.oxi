@@ -1,0 +1,17 @@
+// An alias of a function type is a boxed function: lambdas passed as one are boxed
+typealias Handler = (i32) -> String
+
+fun run_handler(h: Handler, x: i32): String = h(x)
+
+fun make(prefix: String): Handler = move { "$prefix$it" }
+
+class Router(handlers: Vec<Handler>)
+
+fun main() {
+    println(run_handler({ "got $it" }, 1))
+    val r = Router(vec[{ "h$it" }, make("m")])
+    println(r.handlers.len())
+    println((r.handlers[1])(5))
+    val h: Handler = { "local $it" }
+    println(h(2))
+}

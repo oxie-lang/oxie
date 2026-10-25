@@ -15,6 +15,7 @@ use oxie_compiler::ast::{Block, Cond, Expr, ExprKind, File, FunBody, FunDecl, It
 use oxie_compiler::diag::Span;
 
 pub fn explain(d: &mut MappedDiag, sources: &Sources) {
+    hide_closure_paths(d);
     let Some(here) = sources.file(&d.file) else { return };
     let src = here.text.as_str();
     let lines = here.lines();
@@ -2226,6 +2227,32 @@ fn type_paths(code: &str) -> String {
         out.push_str(&segs.join(if types { "." } else { "::" }));
     }
     out + rest
+}
+
+/// rustc names a closure's type by its place in the generated Rust
+/// (`{closure@/home/.../out/oxie/main.rs:29:32: 29:36}`): it is a lambda.
+fn hide_closure_paths(d: &mut MappedDiag) {
+    fn hide(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(i) = rest.find("{closure@") {
+            out.push_str(&rest[..i]);
+            out.push_str("{lambda}");
+            rest = &rest[i..];
+            rest = rest.find('}').map_or("", |e| &rest[e + 1..]);
+        }
+        out + rest
+    }
+    d.message = hide(&d.message);
+    for n in &mut d.notes {
+        *n = hide(n);
+    }
+    for l in &mut d.secondary {
+        l.text = hide(&l.text);
+    }
+    if let Some(l) = &mut d.label {
+        *l = hide(l);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
