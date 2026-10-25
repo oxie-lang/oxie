@@ -54,7 +54,7 @@ impl<'a> Lowerer<'a> {
     /// constructed class (`a.Counter(1)`).
     fn path_call_type(&self, path: &[String], through_try: bool) -> Option<Type> {
         if let Some(f) = self.fun_at(path) {
-            return if f.throws && !through_try { None } else { f.ret.clone() };
+            return if f.throws && !through_try || f.generic_ret { None } else { f.ret.clone() };
         }
         let c = self.k.classes.get(&self.k.type_key_at(path, &self.module)?)?;
         (!c.has_generics).then(|| self.named_ty(path))
@@ -117,7 +117,7 @@ impl<'a> Lowerer<'a> {
                     return if c.has_generics { None } else { Some(ty(n)) };
                 }
                 if let Some(f) = self.fun_info(n) {
-                    return if f.throws && !through_try { None } else { f.ret.clone() };
+                    return if f.throws && !through_try || f.generic_ret { None } else { f.ret.clone() };
                 }
                 if let Some(en) = self.k.variant_enum_in(n, Some(&self.module)) {
                     return Some(ty(&en.name));

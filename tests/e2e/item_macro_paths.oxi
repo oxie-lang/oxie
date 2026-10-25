@@ -1,0 +1,9 @@
+// An item macro called through a path, as `wasmtime::component::bindgen!(..)` is.
+std::thread_local! {
+    static COUNT: std::cell::Cell<u32> = std::cell::Cell::new(40);
+}
+
+fun main() {
+    COUNT.with { it.set(it.get() + 2) }
+    println(COUNT.with { it.get() })
+}

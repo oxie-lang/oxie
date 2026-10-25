@@ -1,0 +1,7 @@
+// `\u{..}` escapes in strings with templates keep their braces; other braces are text.
+fun main() {
+    val i = 7
+    println("${i:03}\t\u{41}b {braces} \\u{not an escape}")
+    val s = "x\u{263A}"
+    println("$s \u{263A} {}")
+}

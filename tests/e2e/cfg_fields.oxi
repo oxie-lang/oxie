@@ -1,0 +1,25 @@
+// A field that exists only in some builds (`@cfg(..)`) is no constructor parameter: it starts
+// with its default value there.
+class Layer(
+    rows: Vec<u32>,
+    @cfg(test) var built: usize,
+    @cfg(not(test)) label: String = "rows".into(),
+) {
+    fun size(): usize = rows.len()
+}
+
+@cfg(not(test))
+fun describe(l: &Layer): String = "${l.label}: ${l.size()}"
+
+@cfg(test)
+fun describe(l: &Layer): String = "built ${l.built}"
+
+fun main() {
+    println(describe(&Layer(vec[1, 2])))
+}
+
+test "the test build counts" {
+    var l = Layer(vec[1])
+    l.built += 3
+    assert_eq(l.built + l.size(), 4)
+}

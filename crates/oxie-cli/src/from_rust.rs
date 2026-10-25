@@ -60,11 +60,21 @@ fn translate_dir(dir: &Path, out: &Path) -> Result<ExitCode, String> {
                 for w in &t.warnings {
                     eprintln!("warning: {}: {}", name, w);
                 }
-                let dest = out.join(f.strip_prefix(dir).unwrap_or(f)).with_extension("oxi");
+                let rel = f.strip_prefix(dir).unwrap_or(f);
+                let dest = out.join(rel).with_extension("oxi");
                 if let Some(parent) = dest.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| format!("{}: {}", parent.display(), e))?;
                 }
-                std::fs::write(&dest, &t.oxie).map_err(|e| format!("{}: {}", dest.display(), e))?;
+                let mut oxie = t.oxie.clone();
+                // the crate root: Oxie projects compile `main.oxi` from a `main.rs` that includes the
+                // generated code, and crate attributes other than lints go there
+                if let Some(kind) = rel.to_str().and_then(|r| r.strip_suffix(".rs")).filter(|k| *k == "main" || *k == "lib") {
+                    let (attrs, rest) = crate_attrs(&oxie);
+                    oxie = rest;
+                    let stub = out.join(rel);
+                    std::fs::write(&stub, format!("{}{}", attrs, crate::project::root_stub(kind))).map_err(|e| format!("{}: {}", stub.display(), e))?;
+                }
+                std::fs::write(&dest, &oxie).map_err(|e| format!("{}: {}", dest.display(), e))?;
             }
             Err(e) => {
                 eprintln!("error: {}:{}", name, e);
@@ -73,6 +83,21 @@ fn translate_dir(dir: &Path, out: &Path) -> Result<ExitCode, String> {
         }
     }
     Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
+/// Splits the `#![...]` lines of a crate root's translation that only `src/main.rs` (or
+/// `lib.rs`) can hold, all but lint attributes, from the rest.
+fn crate_attrs(oxie: &str) -> (String, String) {
+    let (mut attrs, mut rest) = (String::new(), String::new());
+    for line in oxie.split_inclusive('\n') {
+        let lint = ["allow", "warn", "deny", "forbid", "expect"].iter().any(|l| line.starts_with(&format!("#![{}(", l)));
+        if line.starts_with("#![") && !lint {
+            attrs.push_str(line);
+        } else {
+            rest.push_str(line);
+        }
+    }
+    (attrs, rest.trim_start_matches('\n').to_string())
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -85,4 +110,16 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crate_attrs;
+
+    #[test]
+    fn crate_attributes_go_to_the_root_stub() {
+        let (attrs, rest) = crate_attrs("#![cfg_attr(windows, windows_subsystem = \"windows\")]\n#![allow(dead_code)]\n\nfun main() {}\n");
+        assert_eq!(attrs, "#![cfg_attr(windows, windows_subsystem = \"windows\")]\n");
+        assert_eq!(rest, "#![allow(dead_code)]\n\nfun main() {}\n");
+    }
 }

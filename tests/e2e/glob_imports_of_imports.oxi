@@ -1,0 +1,20 @@
+// A module that imports its parent with `*` sees what the parent imports, even where an enum of
+// the crate has a variant of that name (as `mod tests { import super::* }` does).
+enum Marker { PhantomPinned, Plain }
+
+mod pinning {
+    import std::marker::PhantomPinned
+
+    fun pinned(): PhantomPinned = PhantomPinned
+
+    mod tests {
+        import super::*
+
+        fun check(): String = "${PhantomPinned:?} ${pinned():?}"
+    }
+}
+
+fun main() {
+    println(pinning.tests.check())
+    println(match (Marker.Plain) { Marker.PhantomPinned -> "pinned", Marker.Plain -> "plain" })
+}

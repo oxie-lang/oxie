@@ -1,0 +1,35 @@
+// A class, enum or type alias of the module is a plain type, even where another module has a
+// trait of its name or the name is a std trait Oxie would make `dyn`.
+mod panes {
+    interface Item {
+        fun title(): String
+    }
+
+    class Tab(name: String) : Item {
+        override fun title(): String = "tab $name"
+    }
+
+    fun titles(items: &Vec<Box<dyn Item>>): Vec<String> = items.iter().map { it.title() }.collect()
+}
+
+mod picker {
+    enum Item { Create(String), Branch(String) }
+
+    fun label(items: &Vec<Item>): String = items.iter().map {
+        when (it) {
+            Item.Create(n) -> "+$n"
+            Item.Branch(n) -> n.clone()
+        }
+    }.collect::<Vec<_>>().join(" ")
+}
+
+typealias Read = (String, usize)
+
+fun read(text: &str): Read = (text.to_uppercase(), text.len())
+
+fun main() {
+    println(picker.label(&vec[picker.Item.Create("x".into()), picker.Item.Branch("main".into())]))
+    val tabs: Vec<Box<dyn panes.Item>> = vec[Box.new(panes.Tab("a".into()))]
+    println(panes.titles(&tabs).join(", "))
+    println(read("abc").0)
+}

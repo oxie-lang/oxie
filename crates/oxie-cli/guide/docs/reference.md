@@ -382,7 +382,8 @@ interface Named : Display {
 ```
 
 * `interface` (or `trait`) → `trait`. Methods take `&self` unless declared otherwise (or their
-  default body or an implementation needs `&mut self`).
+  default body or an implementation needs `&mut self`). Its supertypes may include a lifetime
+  bound: `interface Ext : IntoElement + 'static`.
 * A class lists interfaces after `:` and implements methods with `override fun`; the
   matching `impl Trait for Class` is generated. Methods named like the trait's (and `type`
   members) go to the right trait even without `override`.
@@ -750,7 +751,9 @@ optimizer treat them like private Rust functions; mark library APIs `pub`.
 `@name` and `@name(args)` become `#[name]` / `#[name(args)]`: `@derive(Serialize)`,
 `@serde(rename_all = "camelCase")`, `@inline`, `@cfg(test)`, `@tokio::main`, ... Rust's `#[...]`
 syntax works too. Oxie-specific: `@no_auto_derive` (classes/enums), `@from` (error enum cases).
-Attributes also work on statements (see [Statements](#statements)).
+Attributes also work on statements (see [Statements](#statements)). A class property that exists
+only in some builds (`@cfg(test) var built: usize`) is no constructor parameter: it starts with
+its default value, or the type's `Default`.
 
 `#![...]` at the top of a file:
 

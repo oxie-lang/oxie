@@ -1,0 +1,31 @@
+// A name a module imports from another crate means that one there, even where this crate
+// declares a class, enum or function with the name.
+class Duration(minutes: u32) {
+    fun hours(): u32 = minutes / 60
+}
+
+enum Ordering { Before, After }
+
+fun sleep(label: &str, ms: u64): String = "$label slept ${ms}ms"
+
+mod timing {
+    import std::time::Duration
+    import std::thread::sleep
+    import std::cmp::Ordering
+
+    fun nap(): Duration {
+        val d = Duration.from_millis(1)
+        sleep(d)
+        d
+    }
+
+    fun order(a: i32, b: i32): bool = a.cmp(&b) == Ordering.Less
+}
+
+fun main() {
+    println(timing.nap().as_millis())
+    println(timing.order(1, 2))
+    println(Duration(120).hours())
+    println(sleep("cat", 5))
+    println(match (Ordering.After) { Ordering.Before -> "before", Ordering.After -> "after" })
+}

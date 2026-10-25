@@ -34,6 +34,9 @@ pub struct Fixes {
 /// on its own (`m3:5`) begins, or where it ends (`/`); see [`Printer::strip_marks`].
 const MARK: char = '\u{1}';
 
+/// What an item macro is printed for the first time: as itself, an Oxie item.
+const ITEM_MACRO: &str = "item macro";
+
 /// A method's text between marks.
 fn mark_method(item: usize, index: usize, text: &str) -> String {
     format!("{MARK}m{item}:{index}\n{text}\n{MARK}/")
@@ -103,6 +106,13 @@ pub struct Cx {
     pub type_fns: HashSet<String>,
     /// the class whose method this is, when it has contexts (see `contexts`)
     pub ctx_class: Option<String>,
+    /// a closure's parameter keeps its name: its body is kept as Rust, which can't say `it`
+    pub no_it: bool,
+    /// the fields of the type whose method this is: Oxie reads `name.x` as one of them, so a
+    /// module of the same name is written `name::x`
+    pub type_fields: HashSet<String>,
+    /// the variable a `throws` function's body ends with, whose `Result` it returns
+    pub tail_var: Option<String>,
 }
 
 pub struct Printer<'a> {
@@ -357,8 +367,10 @@ impl<'a> Printer<'a> {
             s.push_str(&c);
             s.push('\n');
         }
+        // Oxie calls item macros as Rust does (`actions!(editor, [Newline])`), unless it rejected
+        // this one
         if let syn::Item::Macro(m) = it {
-            if m.mac.path.is_ident("macro_rules") {
+            if m.mac.path.is_ident("macro_rules") || reason == ITEM_MACRO {
                 s.push_str(&rust_item(it));
                 return s;
             }
@@ -640,6 +652,9 @@ impl<'a> Printer<'a> {
 
     fn item(&mut self, it: &syn::Item, plan: &Plan, idx: usize, items: &[syn::Item]) -> String {
         match it {
+            // `#[cfg(a)] { .. } #[cfg(not(a))] { .. }` at the end: the block a build keeps is the
+            // function's value, which Oxie can't say
+            syn::Item::Fn(f) if cfg_value_blocks(&f.block) => self.raw_item(it, "its value is a block chosen by `#[cfg]`, which Oxie has no syntax for"),
             syn::Item::Fn(f) => {
                 let saved = std::mem::take(&mut self.cx);
                 let s = self.fun(&f.attrs, &f.vis, &f.sig, Some(&f.block), FunKind::Free);
@@ -722,7 +737,7 @@ impl<'a> Printer<'a> {
                 ));
                 lines.join("\n")
             }
-            syn::Item::Macro(_) => self.raw_item(it, "item macro"),
+            syn::Item::Macro(_) => self.raw_item(it, ITEM_MACRO),
             _ => self.raw_item(it, "no Oxie syntax for this item"),
         }
     }
@@ -1119,6 +1134,7 @@ impl<'a> Printer<'a> {
             }
         }
         class.methods = methods.clone();
+        cx.type_fields = class.fields.clone();
         cx.class = Some(class);
         cx.bound = bound_names(sig, block);
         let name = match decl {
@@ -1291,6 +1307,12 @@ impl<'a> Printer<'a> {
                     self.cx.impl_key = Some((tkey.clone(), trait_key.clone()));
                     self.cx.type_fns = self.type_fns(&facts::type_name(&imp.self_ty));
                     self.cx.ctx_class = Some(facts::type_name(&imp.self_ty)).filter(|n| self.krate.class(n).is_some());
+                    let ty = facts::type_name(&imp.self_ty);
+                    self.cx.type_fields = match self.info.structs.get(&ty) {
+                        Some(s) => s.fields.iter().map(|(n, _)| n.clone()).collect(),
+                        // a struct of another file
+                        None => self.krate.struct_fields.get(&ty).cloned().unwrap_or_default(),
+                    };
                     s.push_str(&self.fun(&f.attrs, &f.vis, &f.sig, Some(&f.block), FunKind::Method { class: false, overrides: false }));
                     self.cx = saved;
                     method = true;
@@ -1504,6 +1526,11 @@ impl<'a> Printer<'a> {
         self.cx.ret = ret_ty.clone();
         self.cx.result_ty = match &sig.output {
             syn::ReturnType::Type(_, t) if throws.is_some() => Some((**t).clone()),
+            _ => None,
+        };
+        // `let r = ..; r` in a function that becomes `throws`: the body ends in `r?`
+        self.cx.tail_var = match block.stmts.last() {
+            Some(syn::Stmt::Expr(syn::Expr::Path(p), None)) if throws.is_some() => p.path.get_ident().map(|i| i.to_string()),
             _ => None,
         };
         let unit = ret_ty.is_none();
@@ -1790,4 +1817,11 @@ pub enum BlockMode {
     ValueFn,
     /// a block whose value is used (closures, `run { }`, `let x = if ...`)
     Value,
+}
+
+/// Whether a function body ends in blocks with `#[cfg]` attributes and no semicolons: the one
+/// the build keeps gives the function's value.
+fn cfg_value_blocks(b: &syn::Block) -> bool {
+    let cfg_block = |s: &syn::Stmt| matches!(s, syn::Stmt::Expr(syn::Expr::Block(eb), None) if eb.attrs.iter().any(|a| a.path().is_ident("cfg")));
+    b.stmts.len() >= 2 && b.stmts[b.stmts.len() - 2..].iter().all(cfg_block)
 }

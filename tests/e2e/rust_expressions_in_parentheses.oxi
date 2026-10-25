@@ -1,0 +1,9 @@
+// A Rust expression in parentheses keeps them where what follows binds tighter.
+fun main() {
+    var n: u32 = 7
+    val p = (rust { &raw mut n }).cast::<u8>()
+    unsafe { *p = 9 }
+    println(n)
+    println((rust { 1u32 + 2 }).pow(2))
+    println((rust { -3i32 }).abs())
+}

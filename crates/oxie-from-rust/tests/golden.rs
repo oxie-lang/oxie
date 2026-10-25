@@ -497,14 +497,20 @@ impl Button {
         v + 1
     }
 }
+
+fn click_twice(b: &Button) -> i32 {
+    (b.on_click)() * 2
+}
 "#,
         r#"class Button(on_click: Box<dyn Fn() -> i32>) {
     fun click(): i32 {
-        // TODO(from-rust): kept as Rust: Oxie reads `(x.f)(args)` as a method call
-        val v = rust { (self.on_click)() }
+        val v = on_click()
         v + 1
     }
 }
+
+// TODO(from-rust): kept as Rust: Oxie reads `(x.f)(args)` as a method call
+fun click_twice(b: &Button): i32 = rust { (b.on_click)() } * 2
 "#,
     );
 }
@@ -959,6 +965,119 @@ pub class Pane(items: Vec<String>) {
     }
 
     pub fun len(): usize = items.len()
+}
+"#,
+    );
+}
+
+#[test]
+fn returns_inside_values() {
+    // a `return` in a branch whose value is used returns from the function, in Oxie too
+    check(
+        r#"
+fn name(n: i32) -> Option<String> {
+    Some(match n {
+        1 => "one",
+        _ => return None,
+    }.to_string())
+}
+"#,
+        r#"fun name(n: i32): String? {
+    Some((when (n) {
+        1 -> "one"
+        else -> return null
+    }).to_string())
+}
+"#,
+    );
+}
+
+#[test]
+fn module_paths_beside_fields_of_another_file() {
+    // the struct is in the first file and its method in the second: `servers::COPILOT` stays a
+    // path, since `servers.COPILOT` would read the field
+    let main = r#"
+mod servers;
+mod copilot;
+
+pub struct Store {
+    servers: Vec<String>,
+    #[cfg(test)]
+    tested: bool,
+}
+"#;
+    let copilot = r#"
+use crate::{servers, Store};
+
+impl Store {
+    pub fn sign_in(&mut self) {
+        self.servers.push(servers::COPILOT.to_string());
+    }
+}
+"#;
+    let out: Vec<String> = oxie_from_rust::translate_crate(&[main, copilot]).into_iter().map(|t| t.unwrap().oxie).collect();
+    assert!(out[1].contains("self.servers.push(servers::COPILOT.to_string())"), "{}", out[1]);
+}
+
+#[test]
+fn ignored_results_in_arms_keep_braces() {
+    // `push` is also a throwing function of the file, so the ignored `Vec::push` becomes `val _ =`
+    check(
+        r#"
+fn push(line: &str) -> Result<(), String> {
+    if line.is_empty() { Err("empty".into()) } else { Ok(()) }
+}
+
+fn record(n: usize, seen: &mut Vec<usize>) {
+    match n {
+        3 => {
+            seen.push(n);
+        }
+        _ => {}
+    }
+}
+"#,
+        r#"fun push(line: &str) throws String {
+    if (line.is_empty()) throw "empty"
+}
+
+fun record(n: usize, seen: &mut Vec<usize>) {
+    when (n) {
+        3 -> {
+            val _ = seen.push(n)
+        }
+        else -> {}
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn item_macros_stay_items() {
+    // Oxie calls an item macro as Rust does, so it needs no `rust { }` block
+    check(
+        r#"
+thread_local! {
+    static COUNT: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+
+fn bump() -> u32 {
+    COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    })
+}
+"#,
+        r#"thread_local! {
+    static COUNT : std::cell::Cell < u32 > = std::cell::Cell::new(0);
+}
+
+fun bump(): u32 {
+    COUNT.with { c ->
+        c.set(c.get() + 1)
+        c.get()
+    }
 }
 "#,
     );

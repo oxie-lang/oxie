@@ -1,0 +1,82 @@
+// A name a module imports is that one, even where an enum of the crate has a variant with the
+// name; a variant imported through its enum stays the variant. So is a name a function imports,
+// or one that Rust code of the module (or of a module it imports with `*`) declares.
+enum Icon { Redo, Undo, Again, Save, Config }
+
+mod actions {
+    data class Redo(times: u32)
+    class Undo
+
+    rust {
+        /// A unit struct, as `actions!` declares them.
+        #[derive(Debug)]
+        pub struct Again;
+    }
+}
+
+mod editor {
+    import super::actions::{Again, Redo, Undo}
+    import super::Icon
+
+    fun redo(r: &Redo): String = "redo ${r.times}"
+    fun undo(_: &Undo): String = "undo"
+    fun icon(): Icon = Icon.Redo
+    fun again(): String = describe(&Again)
+    fun describe(a: &Again): String = "${a:?}"
+}
+
+mod menus {
+    rust {
+        macro_rules! unit_structs {
+            ($($name:ident),*) => { $(#[derive(Debug)] pub struct $name;)* };
+        }
+        unit_structs!(Save, Quit);
+    }
+
+    fun save(): String = "${Save:?}"
+}
+
+mod main_menu {
+    import super::menus::*
+
+    fun first(): String = "${Save:?}"
+}
+
+mod settings {
+    fun config(): String {
+        import std::fmt::Write as _
+        import super::local::Config
+        var s = String()
+        write(s, "${Config.DEFAULT:?}").unwrap()
+        s
+    }
+}
+
+mod local {
+    rust {
+        #[derive(Debug)]
+        pub struct Config {
+            pub level: u8,
+        }
+
+        impl Config {
+            pub const DEFAULT: Config = Config { level: 3 };
+        }
+    }
+}
+
+mod toolbar {
+    import super::Icon::Undo
+
+    fun first(): super::Icon = Undo
+}
+
+fun main() {
+    println(editor.redo(&actions.Redo(2)))
+    println(editor.undo(&actions.Undo()))
+    println(editor.again())
+    println("${menus.save()} ${main_menu.first()}")
+    println(settings.config())
+    println(match (editor.icon()) { Icon.Redo -> "redo icon", else -> "another icon" })
+    println(match (toolbar.first()) { Icon.Undo -> "undo icon", else -> "another icon" })
+}

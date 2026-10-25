@@ -1,0 +1,12 @@
+// `include_str!` and `include_bytes!` read paths relative to the .oxi file, also in Rust code.
+val GREETING: &str = include_str!("data/greeting.txt")
+
+rust {
+    const BYTES: &[u8] = include_bytes!(concat!("data/", "greeting.txt"));
+}
+
+fun main() {
+    print(GREETING)
+    println(BYTES.len())
+    println(include_str("data/greeting.txt").trim().to_uppercase())
+}

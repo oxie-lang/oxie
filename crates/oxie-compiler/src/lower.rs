@@ -259,6 +259,11 @@ pub struct Lowerer<'a> {
     /// Lambda parameters without a known type: (scope depth, name). Rust passes collection
     /// elements by reference, so comparisons of these with literals read the value first.
     pub(crate) lambda_params: Vec<(usize, String)>,
+    /// The parameters without types of lambdas kept in variables, like `lambda_params`: Rust
+    /// infers their types from their uses, which must not borrow them.
+    pub(crate) untyped_params: Vec<(usize, String)>,
+    /// The next lambda lowered is a variable's value (see `untyped_params`).
+    pub(crate) typed_by_body: bool,
     /// The next lambda lowered is a predicate whose parameters are element references.
     pub(crate) next_lambda_refs: bool,
     /// Span starts of `for` iterables that are used again after the loop, with the start of
@@ -284,6 +289,27 @@ pub struct Lowerer<'a> {
     /// What happened to the `String`/`Vec` parameters of this file's functions that could be
     /// lent, by (the function's name span, parameter index).
     pub param_notes: HashMap<(Span, usize), crate::params::ParamNote>,
+    /// Functions declared in the blocks being lowered, with their parameters: calls go to them
+    /// rather than to the crate's functions with their names.
+    pub(crate) local_funs: Vec<(String, Vec<sema::ParamInfo>)>,
+    /// The type aliases this file declares at its top level.
+    pub(crate) aliases: HashSet<String>,
+    /// Names imported inside the blocks being lowered (`import nucleo_matcher::Config` in a
+    /// function), with the paths they stand for.
+    pub(crate) local_imports: Vec<(String, Vec<String>)>,
+}
+
+/// The `#[cfg(..)]` attributes among `attrs`, each followed by a space.
+fn cfg_attrs(attrs: &[Attr]) -> String {
+    let mut out = String::new();
+    for a in attrs.iter().filter(|a| a.name() == "cfg") {
+        match a {
+            Attr::Oxie { name, args: Some(args), .. } => out.push_str(&format!("#[{}({})] ", name, args)),
+            Attr::Raw(s) => out.push_str(&format!("#[{}] ", s)),
+            Attr::Oxie { .. } => {}
+        }
+    }
+    out
 }
 
 pub fn esc(name: &str) -> String {
@@ -349,6 +375,8 @@ impl<'a> Lowerer<'a> {
             crate_attrs_allowed: false,
             root_lints: Vec::new(),
             lambda_params: Vec::new(),
+            untyped_params: Vec::new(),
+            typed_by_body: false,
             next_lambda_refs: false,
             reused_iters: HashMap::new(),
             narrowed_types: Vec::new(),
@@ -359,6 +387,9 @@ impl<'a> Lowerer<'a> {
             self_by_value: false,
             keep_args: false,
             param_notes: HashMap::new(),
+            local_funs: Vec::new(),
+            aliases: HashSet::new(),
+            local_imports: Vec::new(),
         }
     }
 
@@ -386,6 +417,15 @@ impl<'a> Lowerer<'a> {
         if let Pat::Ident { name, sub: None, .. } = p {
             self.bind_name(name, ty);
             return;
+        }
+        // `val (label, action): (&str, &dyn Action)`: each name has its element's type
+        if let (Pat::Tuple(ps), Some(Type::Tuple(ts))) = (p, &ty) {
+            if ps.len() == ts.len() && !ps.iter().any(|p| matches!(p, Pat::Rest)) {
+                for (p, t) in ps.iter().zip(ts.clone()) {
+                    self.bind_pat(p, Some(t));
+                }
+                return;
+            }
         }
         let mut names = Vec::new();
         p.bindings(&mut names);
@@ -470,9 +510,14 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+        self.aliases = file.items.iter().filter_map(|it| if let ItemKind::TypeAlias { name, .. } = &it.kind { Some(name.clone()) } else { None }).collect();
         let mut inline = Vec::new();
         mods(&file.items, &mut inline);
         self.path_roots.extend(inline);
+        // the module's children in files (`lint/js.oxi` for `js.lint(..)` in `lint`)
+        let n = self.module.len();
+        let children = self.k.module_paths.iter().filter(|p| p.len() == n + 1 && p[..n] == self.module[..]).map(|p| p[n].clone());
+        self.path_roots.extend(children.collect::<Vec<_>>());
         for it in &file.items {
             self.e.nl();
             self.item(it, ItemCtx::Top);
@@ -659,8 +704,64 @@ impl<'a> Lowerer<'a> {
 
     // ------------------------------------------------------------------ types
 
+    /// The enum whose variant a bare `n` is in this module: none when a block imports `n` from
+    /// elsewhere.
+    pub(crate) fn variant_enum(&self, n: &str) -> Option<&'a sema::EnumInfo> {
+        if let Some((_, path)) = self.local_imports.iter().rev().find(|(name, _)| name == n) {
+            let owner = path.len().checked_sub(2).map(|i| &path[i]);
+            if !self.k.variant_owner.get(n).is_some_and(|owners| owners.iter().any(|(_, e)| Some(e) == owner)) {
+                return None;
+            }
+        }
+        let en = self.k.variant_enum_in(n, Some(&self.module))?;
+        // `import TabSlot::*` brings the variants themselves, which stay bare (the enum may not be)
+        let globbed = |g: &Vec<String>| g.last() == Some(&en.name);
+        if self.local_imports.iter().any(|(name, g)| name == "*" && globbed(g)) || self.k.globs.get(&self.module).into_iter().flatten().any(globbed) {
+            return None;
+        }
+        Some(en)
+    }
+
     pub(crate) fn is_trait_name(&self, n: &str) -> bool {
+        // a class, enum or type alias the module has by that name is no trait here
+        if self.class_info(n).is_some() || self.enum_info(n).is_some() || self.aliases.contains(n) {
+            return false;
+        }
         self.k.is_trait(n) || (STD_AUTO_DYN.contains(&n) && !self.k.is_user_type(n))
+    }
+
+    /// Rust text with the relative paths of its `include_str!`, `include_bytes!` and `include!`
+    /// calls made absolute: they are relative to the .oxi file, not to the generated code.
+    pub(crate) fn include_paths(&self, text: &str) -> String {
+        let Some(dir) = &self.src_dir else { return text.to_string() };
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = ["include_str!", "include_bytes!", "include!"].iter().filter_map(|m| rest.find(m).map(|i| (i, m.len()))).min() {
+            let (i, len) = at;
+            let start = i + len;
+            out.push_str(&rest[..start]);
+            rest = &rest[start..];
+            // `("path")` or `(concat!("path", ..))`
+            let lead = rest.len() - rest.trim_start_matches(|c: char| c == '(' || c.is_whitespace()).len();
+            let mut lit = lead;
+            if rest[lead..].starts_with("concat!(") {
+                lit = lead + "concat!(".len();
+                lit += rest[lit..].len() - rest[lit..].trim_start().len();
+            }
+            if !rest[..lead].starts_with('(') || !rest[lit..].starts_with('"') {
+                continue;
+            }
+            let Some(end) = rest[lit + 1..].find('"').map(|e| lit + 1 + e) else { continue };
+            let path = &rest[lit + 1..end];
+            if path.contains('\\') || std::path::Path::new(path).is_absolute() {
+                continue;
+            }
+            out.push_str(&rest[..lit]);
+            out.push_str(&format!("{:?}", dir.join(path).display().to_string().replace('\\', "/")));
+            rest = &rest[end + 1..];
+        }
+        out.push_str(rest);
+        out
     }
 
     /// The class `name` means in this module (of a name several modules declare, the module's
@@ -786,7 +887,7 @@ impl<'a> Lowerer<'a> {
             s.push_str("::");
         }
         // crate-relative module paths
-        if segs.len() > 1 && self.k.modules.contains(&segs[0].name) && !self.is_local(&segs[0].name) {
+        if segs.len() > 1 && self.k.root_module(&segs[0].name, &self.module) && !self.is_local(&segs[0].name) {
             s.push_str("crate::");
         }
         for (i, seg) in segs.iter().enumerate() {
@@ -824,7 +925,8 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn seg(&self, seg: &PathSeg, _pos: TyPos) -> String {
-        let mut s = esc(&seg.name);
+        // `impl Trait + use<'a, T>` says what the type captures; `use` is no name there
+        let mut s = if seg.name == "use" && seg.generics.is_some() { seg.name.clone() } else { esc(&seg.name) };
         let container = CONTAINERS.contains(&seg.name.as_str());
         if let Some(g) = &seg.generics {
             s.push('<');
@@ -943,6 +1045,16 @@ impl<'a> Lowerer<'a> {
 
     // ------------------------------------------------------------------ patterns
 
+    /// A pattern after `@` or `&`, where alternatives need parentheses (`q @ (b'"' | b'\'')`), and
+    /// after `&` ranges too (`&(b'0'..=b'9')`).
+    fn pat_operand(&mut self, p: &Pat, after_ref: bool) -> String {
+        match p {
+            Pat::Or(_) => format!("({})", self.pat(p)),
+            Pat::Range { .. } if after_ref => format!("({})", self.pat(p)),
+            _ => self.pat(p),
+        }
+    }
+
     pub(crate) fn pat(&mut self, p: &Pat) -> String {
         match p {
             Pat::Wild => "_".into(),
@@ -959,7 +1071,7 @@ impl<'a> Lowerer<'a> {
                 s.push_str(&esc(name));
                 if let Some(sub) = sub {
                     s.push_str(" @ ");
-                    s.push_str(&self.pat(sub));
+                    s.push_str(&self.pat_operand(sub, false));
                 }
                 s
             }
@@ -978,7 +1090,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Pat::Slice(v) => format!("[{}]", v.iter().map(|p| self.pat(p)).collect::<Vec<_>>().join(", ")),
-            Pat::Ref { mutable, pat } => format!("&{}{}", if *mutable { "mut " } else { "" }, self.pat(pat)),
+            Pat::Ref { mutable, pat } => format!("&{}{}", if *mutable { "mut " } else { "" }, self.pat_operand(pat, true)),
             Pat::Or(v) => v.iter().map(|p| self.pat(p)).collect::<Vec<_>>().join(" | "),
             Pat::Typed { pat, ty } => format!("{}: {}", self.pat(pat), self.ty(ty, TyPos::Local)),
             Pat::Raw(s) => s.clone(),
@@ -1042,7 +1154,7 @@ impl<'a> Lowerer<'a> {
         if segs.len() == 1 {
             let n = &segs[0];
             if !self.k.is_class_name(n) && !self.is_local(n) {
-                if let Some(en) = self.k.variant_enum_in(n, Some(&self.module)) {
+                if let Some(en) = self.variant_enum(n) {
                     let shape = en.variant(n).cloned();
                     return (format!("{}::{}", en.name, n), shape);
                 }
@@ -1069,7 +1181,7 @@ impl<'a> Lowerer<'a> {
             return self.join_path(&segs[1..]);
         }
         let mut s = String::new();
-        if segs.len() > 1 && self.k.modules.contains(&segs[0]) && !self.is_local(&segs[0]) {
+        if segs.len() > 1 && self.k.root_module(&segs[0], &self.module) && !self.is_local(&segs[0]) {
             if self.k.has_lib && self.is_root && self.module.is_empty() && self.is_main_file() {
                 s.push_str(&self.k.crate_name.replace('-', "_"));
                 s.push_str("::");
@@ -1210,7 +1322,16 @@ impl<'a> Lowerer<'a> {
                 self.tests.push((it.attrs.clone(), t.clone()));
             }
             ItemKind::Raw(s) => {
-                // `mod name` refers to `name.rs` next to the .oxi file, not to the generated code
+                // `mod name` refers to `name.rs` next to the .oxi file, not to the generated code;
+                // with a `name.oxi`, Oxie declares the module itself
+                let declared = s.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')).map(|name| {
+                    let mut path = self.module.clone();
+                    path.push(name.to_string());
+                    path
+                });
+                if declared.is_some_and(|path| self.k.module_paths.contains(&path)) {
+                    return;
+                }
                 let text = match (s.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')), &self.src_dir) {
                     (Some(name), Some(dir)) if name.chars().all(|c| c.is_alphanumeric() || c == '_') => {
                         let file = if dir.join(format!("{}.rs", name)).exists() { dir.join(format!("{}.rs", name)) } else { dir.join(name).join("mod.rs") };
@@ -1218,13 +1339,15 @@ impl<'a> Lowerer<'a> {
                     }
                     _ => s.clone(),
                 };
+                let text = self.include_paths(&text);
                 self.e.raw_lines(&text);
                 self.e.nl();
             }
             ItemKind::Macro(s) => {
                 self.docs(&it.docs);
                 self.attrs(&it.attrs, &[]);
-                self.e.raw_lines(s);
+                let s = self.include_paths(s);
+                self.e.raw_lines(&s);
                 self.e.nl();
             }
         }
@@ -1232,7 +1355,7 @@ impl<'a> Lowerer<'a> {
 
     fn use_tree(&self, t: &UseTree, top: bool) -> String {
         let prefix = |segs: &[String]| -> String {
-            if top && !segs.is_empty() && self.k.modules.contains(&segs[0]) {
+            if top && !segs.is_empty() && self.k.root_module(&segs[0], &self.module) {
                 format!("crate::{}", segs.iter().map(|s| esc(s)).collect::<Vec<_>>().join("::"))
             } else {
                 segs.iter().map(|s| if s.is_empty() { String::new() } else { esc(s) }).collect::<Vec<_>>().join("::")
@@ -1969,6 +2092,8 @@ impl<'a> Lowerer<'a> {
             let saved = self.class.take();
             for (f, ty) in fields {
                 self.e.nl();
+                // a field that exists only in some builds (`@cfg(test)`) is set only there
+                self.e.w(&cfg_attrs(&f.attrs));
                 if f.in_ctor {
                     self.e.w(&format!("{},", esc(&f.name)));
                 } else {

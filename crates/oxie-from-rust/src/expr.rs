@@ -323,7 +323,14 @@ impl Printer<'_> {
             syn::Pat::Type(pt) => (&*pt.pat, Some(&*pt.ty)),
             p => (p, None),
         };
-        let ty_text = ty.map(|t| format!(": {}", self.ty(t))).unwrap_or_default();
+        let mut ty_text = ty.map(|t| format!(": {}", self.ty(t))).unwrap_or_default();
+        // the `Result` the function returns: its error type no longer follows from the
+        // function's once the body ends in `r?` (`let r = (|| { .. })(); r`)
+        if let (None, syn::Pat::Ident(pi), Some(rt)) = (ty, pat, self.cx.result_ty.clone()) {
+            if self.cx.tail_var.as_deref() == Some(pi.ident.to_string().as_str()) && l.init.as_ref().is_some_and(|i| matches!(&*i.expr, syn::Expr::Call(_))) {
+                ty_text = format!(": {}", self.ty(&rt));
+            }
+        }
         let init = l.init.as_ref().map(|i| {
             let v = match &*i.expr {
                 syn::Expr::Closure(c) => self.closure(c, true),
@@ -460,10 +467,15 @@ impl Printer<'_> {
                 format!("async {}{}", if a.capture.is_some() { "move " } else { "" }, b)
             }
             syn::Expr::Await(a) => format!("{}.await", self.postfix(&a.base)),
-            syn::Expr::Binary(b) => format!("{} {} {}", self.operand(&b.left), tok(&b.op), self.expr(&b.right)),
+            syn::Expr::Binary(b) => {
+                let right = if matches!(&*b.right, syn::Expr::Macro(_)) { self.operand(&b.right) } else { self.expr(&b.right) };
+                format!("{} {} {}", self.operand(&b.left), tok(&b.op), right)
+            }
             syn::Expr::Block(b) => {
                 let label = b.label.as_ref().map(|l| format!("{}: ", l.name)).unwrap_or_default();
-                let run = if self.info.run_shadowed { "'block: " } else { "run " };
+                // a function, method or variable named `run` hides Oxie's `run { }` block
+                let shadowed = self.info.run_shadowed || self.cx.bound.contains("run") || self.cx.class.as_ref().is_some_and(|c| c.methods.contains("run")) || self.cx.type_fns.contains("run");
+                let run = if shadowed { "'block: " } else { "run " };
                 if ctx.throws_tail && label.is_empty() {
                     return format!("{}{}", run, self.block(&b.block, ctx));
                 }
@@ -557,9 +569,6 @@ impl Printer<'_> {
             }
             syn::Expr::Reference(r) => format!("&{}{}", if r.mutability.is_some() { "mut " } else { "" }, self.expr(&r.expr)),
             syn::Expr::Repeat(r) => format!("[{}; {}]", self.expr(&r.expr), self.expr(&r.len)),
-            // Oxie drops `return` from a branch whose value is used (`val x = when { else -> return v }`
-            // becomes `v`); Rust's own `return` keeps its meaning there
-            syn::Expr::Return(r) if !ctx.stmt && !ctx.fn_tail && !(self.cx.throws && r.expr.as_deref().is_some_and(|v| call_of(v, "Err").is_some())) => format!("rust {{ {} }}", self.rust_expr_inline(e)),
             syn::Expr::Return(r) => self.return_expr(r),
             syn::Expr::Struct(s) => self.struct_lit(s),
             syn::Expr::Try(t) => {
@@ -587,7 +596,12 @@ impl Printer<'_> {
                     syn::UnOp::Neg(_) => "-",
                     _ => "",
                 };
-                format!("{}{}", op, self.expr(&u.expr))
+                let v = self.expr(&u.expr);
+                // `!matches!(x, P)` is `!(x is P)`: `!x is P` would negate `x`
+                if matches!(&*u.expr, syn::Expr::Macro(m) if m.mac.path.is_ident("matches")) && v.contains(" is ") {
+                    return format!("{}({})", op, v);
+                }
+                format!("{}{}", op, v)
             }
             syn::Expr::Unsafe(u) => {
                 if let Some(e) = self.single_expr(&u.block) {
@@ -612,7 +626,9 @@ impl Printer<'_> {
     /// The left operand of a binary operator or `as`: `if`/`when` and friends need parentheses.
     fn operand(&mut self, e: &syn::Expr) -> String {
         let s = self.expr(e);
-        if is_blocky(e) || matches!(e, syn::Expr::Closure(_)) {
+        // `matches!(..)` becomes `x is P`, which binds looser than `as` and arithmetic
+        let is_test = matches!(e, syn::Expr::Macro(m) if m.mac.path.is_ident("matches")) && s.contains(" is ");
+        if is_blocky(e) || matches!(e, syn::Expr::Closure(_)) || is_test {
             format!("({})", s)
         } else {
             s
@@ -736,6 +752,23 @@ impl Printer<'_> {
                 return format!("{}?", self.ex(&syn::Expr::MethodCall(m2), &Ctx::value()));
             }
         }
+        // a `loop` without `break` never ends: it returns from inside, and has no value to unwrap
+        if let syn::Expr::Loop(l) = e {
+            if !tok(&l.body).contains("break") {
+                return self.ex(e, &Ctx::value());
+            }
+        }
+        // `x.ok_or_else(|| e)?` is `x ?: throw e`, which also leaves `e.into()` its target
+        if let syn::Expr::MethodCall(m) = e {
+            let err = match (m.method.to_string().as_str(), m.args.first()) {
+                ("ok_or", Some(err)) if m.args.len() == 1 => Some(err.clone()),
+                ("ok_or_else", Some(syn::Expr::Closure(c))) if m.args.len() == 1 && c.inputs.is_empty() => Some((*c.body).clone()),
+                _ => None,
+            };
+            if let Some(err) = err {
+                return format!("{} ?: throw {}", self.postfix(&m.receiver), self.thrown(&err));
+            }
+        }
         let s = self.ex(e, &Ctx::value());
         if is_postfix_safe(e) && !matches!(e, syn::Expr::Try(_)) {
             format!("{}?", s)
@@ -766,6 +799,35 @@ impl Printer<'_> {
         }
     }
 
+    /// An `if`/`else` whose branches are all `Ok(..)` or `Err(..)`, as one that returns or throws
+    /// in each branch.
+    fn returned_branches(&mut self, e: &syn::Expr) -> Option<String> {
+        match e {
+            syn::Expr::Paren(p) => self.returned_branches(&p.expr),
+            syn::Expr::If(i) => {
+                let (_, els) = i.else_branch.as_ref()?;
+                let then = self.returned_branches(self.single_expr(&i.then_branch)?)?;
+                let els = match &**els {
+                    syn::Expr::Block(b) if b.label.is_none() => self.returned_branches(self.single_expr(&b.block)?)?,
+                    other => self.returned_branches(other)?,
+                };
+                Some(format!("if ({}) {} else {}", self.cond(&i.cond), then, els))
+            }
+            _ => {
+                if let Some(args) = call_of(e, "Err").filter(|a| a.len() == 1) {
+                    return Some(format!("throw {}", self.thrown(&args[0])));
+                }
+                let args = call_of(e, "Ok").filter(|a| a.len() == 1)?;
+                let v = &args[0];
+                if matches!(v, syn::Expr::Tuple(t) if t.elems.is_empty()) {
+                    return Some("return".into());
+                }
+                let ret = self.cx.ret.clone();
+                Some(format!("return {}", self.ex(v, &Ctx::expect(ret.as_ref()))))
+            }
+        }
+    }
+
     fn return_expr(&mut self, r: &syn::ExprReturn) -> String {
         let Some(v) = &r.expr else { return "return".into() };
         if self.cx.throws {
@@ -783,6 +845,11 @@ impl Printer<'_> {
                     return format!("throw {}", self.thrown(&args[0]));
                 }
             }
+            // `return if c { Err(e.into()) } else { Ok(x) }`: each branch returns or throws, which
+            // also gives `e.into()` its target (`?` on the whole wouldn't)
+            if let Some(s) = self.returned_branches(v) {
+                return s;
+            }
             return format!("return {}", self.propagated(v));
         }
         let ret = self.cx.ret.clone();
@@ -794,6 +861,17 @@ impl Printer<'_> {
     fn call(&mut self, c: &syn::ExprCall) -> String {
         // `(self.f)(x)`: Oxie turns a parenthesized field call into a method call
         if let syn::Expr::Paren(p) = &*c.func {
+            // a field of this class: Oxie calls a callable field by its name, `f(x)`
+            if let syn::Expr::Field(f) = &*p.expr {
+                if let (true, syn::Member::Named(m)) = (is_path(&f.base, "self"), &f.member) {
+                    let name = m.to_string();
+                    let method = self.cx.class.as_ref().is_some_and(|c| c.methods.contains(&name));
+                    if self.implicit_field(&name) && !method && !self.cx.type_fns.contains(&name) {
+                        let args: Vec<String> = c.args.iter().map(|a| self.expr(a)).collect();
+                        return format!("{}({})", id(m), args.join(", "));
+                    }
+                }
+            }
             if matches!(&*p.expr, syn::Expr::Field(_)) {
                 self.todo(line_of(c), "kept as Rust: Oxie reads `(x.f)(args)` as a method call");
                 return format!("rust {{ {} }}", self.rust_expr_inline(&syn::Expr::Call(c.clone())));
@@ -973,6 +1051,14 @@ impl Printer<'_> {
                     root = Some(r);
                     segs = v;
                 }
+                // `Quit.name()` on a unit struct: Oxie reads `Type.f()` as a static call
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.get_ident().is_some_and(|i| {
+                    // a CamelCase name: Oxie reads an all-caps one (`COUNT.with(..)`) as a value already
+                    let n = i.to_string();
+                    n.starts_with(|c: char| c.is_ascii_uppercase()) && n.contains(|c: char| c.is_ascii_lowercase()) && n != "Self"
+                }) => {
+                    root = Some(format!("({})", self.postfix(&m.receiver)));
+                }
                 other => root = Some(self.postfix(other)),
             }
             prefix = ".".into();
@@ -1027,10 +1113,11 @@ impl Printer<'_> {
             return format!("rust {{ {} }}", self.rust_expr_inline(&syn::Expr::Closure(c.clone())));
         }
         let kotlin = kotlin && self.kotlin_lambda_ok(c);
+        let (todos, pending) = (self.todos.len(), self.pending.len());
         let saved = self.enter_closure();
         let saved_it = self.cx.it_rename.clone();
         let mut it_name = None;
-        if kotlin && c.inputs.len() == 1 {
+        if kotlin && c.inputs.len() == 1 && !self.cx.no_it {
             if let syn::Pat::Ident(pi) = &c.inputs[0] {
                 if pi.mutability.is_none()
                     && pi.by_ref.is_none()
@@ -1075,6 +1162,15 @@ impl Printer<'_> {
         }
         self.cx.it_rename = saved_it;
         self.leave_closure(saved);
+        // a body kept as Rust still names the parameter, so it keeps its name
+        if it_name.is_some() && body_text.contains("rust {") {
+            self.todos.truncate(todos);
+            self.pending.truncate(pending);
+            self.cx.no_it = true;
+            let s = self.closure(c, true);
+            self.cx.no_it = false;
+            return s;
+        }
         let mv = if c.capture.is_some() { "move " } else { "" };
         if kotlin {
             let params: Vec<String> = c.inputs.iter().map(|p| self.pat(p)).collect();
@@ -1147,8 +1243,10 @@ impl Printer<'_> {
             }
             let dot = first.chars().next().is_some_and(|c| c.is_uppercase())
                 || ["std", "core", "alloc"].contains(&first.as_str())
-                || (self.info.modules.contains(&first) && !self.cx.bound.contains(&first));
-            if dot && !(first == "Self" && segs.len() > 2) {
+                || (self.info.modules.contains(&first) && !self.cx.bound.contains(&first) && !self.cx.type_fields.contains(&first));
+            // `NSURL::fileURLWithPath`: Oxie reads an all-caps name before `.` as a constant
+            let const_like = first.len() > 1 && first.chars().all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit());
+            if dot && !const_like && !(first == "Self" && segs.len() > 2) {
                 let v: Vec<String> = segs.iter().map(|s| self.path_segment(s)).collect();
                 return v.join(".");
             }
@@ -1462,7 +1560,8 @@ impl Printer<'_> {
                     {
                         let marks = (self.todos.len(), self.pending.len());
                         let t = self.stmt(&b.block.stmts[0], false, &Ctx::stmt(), false);
-                        if t.contains('\n') {
+                        // a declaration (`val _ = ..`) is no arm body without braces
+                        if t.contains('\n') || t.starts_with("val ") || t.starts_with("var ") {
                             self.todos.truncate(marks.0);
                             self.pending.truncate(marks.1);
                             self.block(&b.block, ctx)

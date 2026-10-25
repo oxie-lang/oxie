@@ -1,0 +1,22 @@
+// A function written in a `rust { }` block hides functions of other modules with its name, so
+// calls in its module go to it.
+mod tools {
+    fun total(xs: &[i32]): i32 = xs.iter().sum()
+}
+
+mod report {
+    fun summary(): String = total("words", 3)
+
+    rust {
+        /// A label and a count, as `label: n`.
+        pub(crate) fn total(label: &str, n: usize) -> String {
+            let brace = '{';
+            format!("{label}: {n} {}", r#"fn not_this() {"#.len() + brace.len_utf8())
+        }
+    }
+}
+
+fun main() {
+    println(tools.total(&[1, 2, 3]))
+    println(report.summary())
+}

@@ -1,0 +1,34 @@
+// Variants imported with `Enum::*` stay bare, so they work where the enum's own name isn't
+// imported.
+mod tabs {
+    @derive(Debug)
+    enum Slot { Natural, Fixed(f32) }
+
+    fun fit(widths: &[f32], room: f32): Vec<Slot> = widths.iter().map { if (*it > room) Slot.Fixed(room) else Slot.Natural }.collect()
+}
+
+mod checks {
+    import super::tabs::{Slot::*, fit}
+
+    fun first_fixed(): f32 {
+        for (s in fit(&[10.0, 300.0], 200.0)) {
+            if (s is Fixed(_)) {
+                return when (s) {
+                    Fixed(w) -> w
+                    Natural -> 0.0
+                }
+            }
+        }
+        -1.0
+    }
+}
+
+fun main() {
+    println(checks.first_fixed())
+    test_slots()
+}
+
+fun test_slots() {
+    import tabs::Slot::*
+    println("${tabs.fit(&[1.0], 0.5):?} ${matches!(Natural, Natural)}")
+}

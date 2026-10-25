@@ -1,0 +1,12 @@
+// `use<..>` after an `impl Trait` result says which generics and lifetimes it captures.
+fun evens(v: &Vec<i32>): impl Iterator<Item = i32> + use<> = v.clone().into_iter().filter { it % 2 == 0 }
+
+fun letters<'a>(s: &'a str): impl Iterator<Item = char> + use<'a> = s.chars().filter { it.is_alphabetic() }
+
+fun main() {
+    var v = vec[1, 2, 3, 4]
+    val e = evens(&v)
+    v.push(6)
+    println(e.sum::<i32>())
+    println(letters("a1b2").count())
+}

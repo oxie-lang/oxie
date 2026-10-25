@@ -1,0 +1,22 @@
+// A function of another module, not imported here, doesn't hide a built-in of its name.
+mod tasks {
+    fun run(name: &str): String = "ran $name"
+    fun println(n: i32) = std::println!("tasks: {}", n)
+}
+
+mod report {
+    import super::tasks::run
+
+    fun summary(): String = run("report")
+}
+
+fun main() {
+    val n = run {
+        val a = 20
+        a + 22
+    }
+    println(n)
+    println(report.summary())
+    println(tasks.run("tests"))
+    tasks.println(3)
+}

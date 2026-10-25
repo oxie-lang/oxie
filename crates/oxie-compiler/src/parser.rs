@@ -38,6 +38,9 @@ pub struct Parser<'a> {
     /// The type after `as`: a `<` after its path starts generic arguments only if they parse,
     /// otherwise it compares (`n as usize < m`).
     cast_ty: bool,
+    /// Whether an `Fn(..)` type takes a `-> R` after it (not when that `->` ends a lambda's
+    /// parameters).
+    fn_ret: bool,
     /// An error message template, where `$0` is the case's first positional field; elsewhere
     /// it is text (`"cost $5"`).
     positional: bool,
@@ -45,7 +48,7 @@ pub struct Parser<'a> {
 
 pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false };
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
     let file = p.file();
     diags.append(&mut p.diags);
     (file, diags)
@@ -54,7 +57,7 @@ pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
 /// Parses a standalone expression (used for tests and tooling).
 pub fn parse_expr_str(src: &str) -> (Expr, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false };
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
     let e = p.expr().unwrap_or(Expr::new(ExprKind::Error, Span::default()));
     diags.append(&mut p.diags);
     (e, diags)
@@ -535,11 +538,12 @@ impl<'a> Parser<'a> {
             let g = self.raw_group()?;
             let _ = g;
             ItemKind::Raw(self.src[s..self.prev_span().end as usize].to_string())
-        } else if matches!(self.tok(), Tok::Ident(_)) && self.is_punct_at(1, "!") && !self.is_punct_at(2, "=") {
-            // item macro: macro_rules! name { ... } / thread_local! { ... }
+        } else if let Some(n) = self.item_macro_path() {
+            // item macro: macro_rules! name { ... } / thread_local! { ... } / a::b! { ... }
             let s = self.toks[self.pos].span.start as usize;
-            self.bump();
-            self.bump();
+            for _ in 0..=n {
+                self.bump();
+            }
             if self.is_ident() {
                 self.bump();
             }
@@ -1044,6 +1048,8 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let mut elems = Vec::new();
                 let mut trailing_comma = false;
+                // inside brackets, `->` is a return type again
+                let fn_ret = std::mem::replace(&mut self.fn_ret, true);
                 loop {
                     if self.eat_punct(")") {
                         break;
@@ -1057,7 +1063,8 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                if self.eat_punct("->") {
+                self.fn_ret = fn_ret;
+                if self.fn_ret && self.eat_punct("->") {
                     let ret = self.ty()?;
                     return Ok(Type::Fn { params: elems, ret: Box::new(ret) });
                 }
@@ -1125,7 +1132,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                 }
                 self.raw_group()?;
-                if self.eat_punct("->") {
+                if self.fn_ret && self.eat_punct("->") {
                     self.ty()?;
                 }
                 Ok(Type::Raw(self.src[start..self.prev_span().end as usize].to_string()))
@@ -1178,6 +1185,7 @@ impl<'a> Parser<'a> {
         } else if self.is_punct("(") && matches!(seg.name.as_str(), "Fn" | "FnMut" | "FnOnce") {
             self.bump();
             let mut params = Vec::new();
+            let fn_ret = std::mem::replace(&mut self.fn_ret, true);
             loop {
                 if self.eat_punct(")") {
                     break;
@@ -1188,13 +1196,21 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            let ret = if self.eat_punct("->") { Some(Box::new(self.ty()?)) } else { None };
+            self.fn_ret = fn_ret;
+            let ret = if self.fn_ret && self.eat_punct("->") { Some(Box::new(self.ty()?)) } else { None };
             seg.fn_sugar = Some((params, ret));
         }
         Ok(seg)
     }
 
     fn generic_args(&mut self) -> PResult<Vec<GenericArg>> {
+        let fn_ret = std::mem::replace(&mut self.fn_ret, true);
+        let r = self.generic_args_inner();
+        self.fn_ret = fn_ret;
+        r
+    }
+
+    fn generic_args_inner(&mut self) -> PResult<Vec<GenericArg>> {
         self.expect_punct("<")?;
         let mut args = Vec::new();
         loop {
@@ -1241,6 +1257,15 @@ impl<'a> Parser<'a> {
         if self.eat_punct(":") {
             loop {
                 self.skip_nl_only();
+                // `interface Ext : IntoElement + 'static`, a lifetime bound as in Rust
+                if let Tok::Lifetime(l) = self.tok().clone() {
+                    self.bump();
+                    out.push(Type::Lifetime(l));
+                    if !(self.eat_punct(",") || self.eat_punct("+")) {
+                        break;
+                    }
+                    continue;
+                }
                 let t = self.ty_path()?;
                 // Kotlin `Base()` super constructor call: ignore the parens
                 if self.is_punct("(") {
@@ -1314,7 +1339,9 @@ impl<'a> Parser<'a> {
                     self.expect_punct(":")?;
                     let ty = self.ty()?;
                     let default = if self.eat_punct("=") { Some(self.expr()?) } else { None };
-                    decl.fields.push(Field { docs, attrs, vis, name, ty, default, in_ctor: true, span: fstart.to(self.prev_span()) });
+                    // a field that exists only in some builds (`@cfg(test)`) can't be an argument
+                    let in_ctor = !attrs.iter().any(|a| a.name() == "cfg");
+                    decl.fields.push(Field { docs, attrs, vis, name, ty, default, in_ctor, span: fstart.to(self.prev_span()) });
                     if !self.eat_punct(",") {
                         self.expect_punct(")")?;
                         break;
@@ -1379,7 +1406,8 @@ impl<'a> Parser<'a> {
             self.expect_punct(":")?;
             let ty = self.ty()?;
             let default = if self.eat_punct("=") { Some(self.expr()?) } else { None };
-            decl.fields.push(Field { docs, attrs, vis, name, ty, default, in_ctor: true, span: fstart.to(self.prev_span()) });
+            let in_ctor = !attrs.iter().any(|a| a.name() == "cfg");
+            decl.fields.push(Field { docs, attrs, vis, name, ty, default, in_ctor, span: fstart.to(self.prev_span()) });
         }
         Ok(())
     }
@@ -1839,6 +1867,23 @@ impl<'a> Parser<'a> {
         Ok(stmts)
     }
 
+    /// The number of tokens of the path before `!` when an item macro call starts here
+    /// (`thread_local!`, `wasmtime::component::bindgen!`).
+    fn item_macro_path(&self) -> Option<usize> {
+        let mut i = 0;
+        loop {
+            if !matches!(self.tok_at(i), Tok::Ident(_)) {
+                return None;
+            }
+            i += 1;
+            if self.is_punct_at(i, "::") {
+                i += 1;
+                continue;
+            }
+            return (self.is_punct_at(i, "!") && !self.is_punct_at(i + 1, "=")).then_some(i);
+        }
+    }
+
     fn is_item_start(&self) -> bool {
         if self.is_fun_start() {
             // `fun` local function - but not a lambda like `fun(x)`?
@@ -1855,6 +1900,7 @@ impl<'a> Parser<'a> {
                 "static" => self.is_ident_at(1) || self.is_kw_at(1, "mut"),
                 "type" => self.is_ident_at(1) && (self.is_punct_at(2, "=") || self.is_punct_at(2, "<")),
                 "object" => self.is_ident_at(1) && self.is_punct_at(2, "{"),
+                "unsafe" => self.is_kw_at(1, "impl") || self.is_kw_at(1, "trait") || self.is_kw_at(1, "interface"),
                 _ => false,
             },
             Tok::Punct("@") => true,
@@ -2851,7 +2897,7 @@ impl<'a> Parser<'a> {
                 StrPart::Interp { src: s, offset, spec } => {
                     let (toks, mut diags) = lexer::lex_at(&s, offset);
                     self.diags.append(&mut diags);
-                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false };
+                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
                     let e = sub.expr();
                     if e.is_ok() && !matches!(sub.tok(), Tok::Newline | Tok::Eof) {
                         let sp = sub.span();
@@ -3182,7 +3228,8 @@ impl<'a> Parser<'a> {
             let sp = b.span;
             Expr::new(ExprKind::Block(b), sp)
         } else {
-            self.expr()?
+            // as in Rust, `|n| total += n` assigns in the body
+            self.expr_stmt_like()?
         };
         let sp = start.to(body.span);
         Ok(Expr::new(ExprKind::Lambda { params, ret, body: Box::new(body), is_move, implicit_it: false, is_async: false }, sp))
@@ -3211,24 +3258,31 @@ impl<'a> Parser<'a> {
         let save = self.pos;
         let nd = self.diags.len();
         let mut params = Vec::new();
-        let r: PResult<()> = (|| {
-            if !captures.is_empty() && self.eat_punct("->") {
-                return Ok(());
-            }
-            loop {
-                let pat = self.pattern_no_or()?;
-                let ty = if self.eat_punct(":") { Some(self.ty()?) } else { None };
-                params.push(LambdaParam { pat, ty });
-                if self.eat_punct(",") {
-                    continue;
-                }
-                if self.eat_punct("->") {
+        // `{ f: FnMut(i32) -> f(1) }`: when the `->` after a parameter's `Fn(..)` type can't be its
+        // return type, it is the lambda's arrow
+        for fn_ret in [true, false] {
+            self.fn_ret = fn_ret;
+            let r: PResult<()> = (|| {
+                if !captures.is_empty() && self.eat_punct("->") {
                     return Ok(());
                 }
-                return Err(());
+                loop {
+                    let pat = self.pattern_no_or()?;
+                    let ty = if self.eat_punct(":") { Some(self.ty()?) } else { None };
+                    params.push(LambdaParam { pat, ty });
+                    if self.eat_punct(",") {
+                        continue;
+                    }
+                    if self.eat_punct("->") {
+                        return Ok(());
+                    }
+                    return Err(());
+                }
+            })();
+            self.fn_ret = true;
+            if r.is_ok() {
+                break;
             }
-        })();
-        if r.is_err() {
             self.pos = save;
             self.diags.truncate(nd);
             params.clear();
@@ -3277,20 +3331,23 @@ impl<'a> Parser<'a> {
         self.expect_punct("]")?;
         // a parameter list or `->` must follow; otherwise this was an array literal
         let save = self.pos;
-        let ok = self.is_punct("->") || {
-            let r: PResult<()> = (|| loop {
-                self.pattern_no_or()?;
-                if self.eat_punct(":") {
-                    self.ty()?;
-                }
-                if self.eat_punct(",") {
-                    continue;
-                }
-                return if self.is_punct("->") { Ok(()) } else { Err(()) };
-            })();
-            self.pos = save;
-            r.is_ok()
-        };
+        let ok = self.is_punct("->")
+            || [true, false].into_iter().any(|fn_ret| {
+                self.fn_ret = fn_ret;
+                let r: PResult<()> = (|| loop {
+                    self.pattern_no_or()?;
+                    if self.eat_punct(":") {
+                        self.ty()?;
+                    }
+                    if self.eat_punct(",") {
+                        continue;
+                    }
+                    return if self.is_punct("->") { Ok(()) } else { Err(()) };
+                })();
+                self.fn_ret = true;
+                self.pos = save;
+                r.is_ok()
+            });
         if ok {
             Ok(out)
         } else {

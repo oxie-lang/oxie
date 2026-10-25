@@ -1,0 +1,18 @@
+// A class or enum named like a type of std still lets the std one be used through its path.
+class Builder(stack: Vec<i32>) {
+    fun size(): usize = stack.len()
+}
+
+enum Ordering { Before, After }
+
+fun order(a: i32, b: i32): std.cmp.Ordering = a.cmp(&b)
+
+fun main() {
+    val builder: std.thread.Builder = std.thread.Builder.new().name("worker".into())
+    val h = builder.spawn { println("from the thread") }.unwrap()
+    h.join().unwrap()
+    println(Builder(vec[1, 2]).size())
+    println(order(1, 2) == std.cmp.Ordering.Less)
+    val o = Ordering.After
+    println(match (o) { Ordering.Before -> "before", Ordering.After -> "after" })
+}

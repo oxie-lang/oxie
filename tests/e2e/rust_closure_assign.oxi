@@ -1,0 +1,11 @@
+// A Rust-style closure's body may be an assignment, as in Rust.
+fun main() {
+    var count = 0
+    var total = 0
+    run {
+        val set = &mut (|n: usize| count = n + 1)
+        set(4)
+    }
+    [1, 2, 3].iter().for_each(|n| total += n)
+    println("$count $total")
+}

@@ -1,0 +1,21 @@
+// A call of a name that is a field of another type calls the function of that name, the
+// crate's or an imported one; a field holding a function is still called.
+import std::cmp::max
+
+fun lines(text: &str): usize = text.lines().count()
+
+fun scale(n: usize): usize = n * 10
+
+class Doc(text: String, lines: usize, scale: Box<dyn Fn(usize) -> usize>, max: usize) {
+    fun recount(): usize = lines(&text) + lines
+    fun bounded(): usize = max(lines, max)
+    fun scaled(): usize = scale(lines)
+}
+
+fun main() {
+    val d = Doc("a\nb\nc".into(), 1, Box.new { it + 1 }, 5)
+    println(d.recount())
+    println(d.bounded())
+    println(d.scaled())
+    println(scale(2))
+}

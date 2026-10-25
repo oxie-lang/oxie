@@ -17,8 +17,31 @@ const INFERENCE_DEPENDENT: &[&str] = &[
     "get", "first", "last", "find", "max", "min", "pop", "next", "cloned", "copied", "as_ref", "as_deref", "take", "filter",
 ];
 
+/// Rust string literal text for a format string: braces doubled, except those of `\u{..}`.
 fn escape_braces(s: &str) -> String {
-    s.replace('{', "{{").replace('}', "}}")
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                let Some(n) = chars.next() else { break };
+                out.push(n);
+                if n == 'u' && chars.peek() == Some(&'{') {
+                    for d in chars.by_ref() {
+                        out.push(d);
+                        if d == '}' {
+                            break;
+                        }
+                    }
+                }
+            }
+            '{' => out.push_str("{{"),
+            '}' => out.push_str("}}"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// The type of an `if`/`when` value nothing declares: a `T?` when one of its branches is `null`
@@ -182,6 +205,18 @@ impl<'a> Lowerer<'a> {
             },
             None => None,
         };
+        // a function declared in the block can be called anywhere in it, and so can what it imports
+        let outer_funs = self.local_funs.len();
+        let outer_imports = self.local_imports.len();
+        for s in stmts {
+            if let Stmt::Item(b) = s {
+                match &b.0.kind {
+                    ItemKind::Fun(f) => self.local_funs.push((f.name.clone(), crate::sema::params_info(f))),
+                    ItemKind::Import(d) => imported_names(&d.tree, &[], &mut self.local_imports),
+                    _ => {}
+                }
+            }
+        }
         for (i, s) in stmts.iter().enumerate() {
             self.e.nl();
             if Some(i) == tail_idx {
@@ -193,6 +228,8 @@ impl<'a> Lowerer<'a> {
                 self.stmt(s);
             }
         }
+        self.local_funs.truncate(outer_funs);
+        self.local_imports.truncate(outer_imports);
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -272,6 +309,12 @@ impl<'a> Lowerer<'a> {
                 }
                 Some(t) => self.coerce(e, t, TyPos::Local),
                 None if self.is_shared_place(e) => self.shared_copy(e),
+                // a lambda in a variable: Rust infers its parameters' types from its body
+                None if matches!(e.kind, ExprKind::Lambda { .. }) => {
+                    self.typed_by_body = true;
+                    self.expr(e, P_LOWEST);
+                    self.typed_by_body = false;
+                }
                 None => self.expr(e, P_LOWEST),
             }
         }
@@ -921,7 +964,8 @@ impl<'a> Lowerer<'a> {
             ExprKind::Paren(x) => self.auto_borrow(x, mutable),
             _ if e.ident().is_some() => {
                 let n = e.ident().unwrap();
-                if self.is_untyped_lambda_param(n) {
+                // a lambda parameter without a type gets it from this use: `&it` would make it `str`
+                if self.is_untyped_lambda_param(n) || self.untyped_param(n) {
                     return false;
                 }
                 match self.local(n) {
@@ -940,6 +984,12 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Is `n` a lambda parameter without a type (and not shadowed by a later binding)?
+    fn untyped_param(&self, n: &str) -> bool {
+        let depth = self.scopes.iter().rposition(|s| s.contains_key(n));
+        self.untyped_params.iter().any(|(d, p)| Some(*d) == depth && p == n)
+    }
+
     /// An argument for a `&str` or `&[T]` parameter is lent unless it already is a reference:
     /// lending a reference (`&s.trim()`) is harmless, since `&&str` coerces to `&str`.
     fn lend_to_slice(&self, e: &Expr, inner: &Type) -> bool {
@@ -949,6 +999,8 @@ impl<'a> Lowerer<'a> {
         match &e.kind {
             ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Unary(UnOp::Ref | UnOp::RefMut, _) | ExprKind::Null | ExprKind::Lambda { .. } | ExprKind::SelfValue => false,
             ExprKind::Paren(x) => self.lend_to_slice(x, inner),
+            // a lambda parameter without a type gets it from this use: `&it` would make it `str`
+            _ if e.ident().is_some_and(|n| self.untyped_param(n)) => false,
             _ => match e.ident().and_then(|n| self.local(n)) {
                 Some(Some(t)) => !matches!(t, Type::Ref { .. } | Type::Ptr { .. }) && t.last_name() != Some("str"),
                 _ => true,
@@ -1141,7 +1193,7 @@ impl<'a> Lowerer<'a> {
                 if self.is_local(n) || self.implicit_field(n).is_some() || self.k.is_class_name(n) || self.k.is_fun_name(n) {
                     return false;
                 }
-                return self.k.variant_enum_in(n, Some(&self.module)).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
+                return self.variant_enum(n).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
             }
             ExprKind::Path { segs, generics: None, .. } => segs.clone(),
             ExprKind::Field { .. } => match self.as_path(e) {
@@ -1206,6 +1258,16 @@ impl<'a> Lowerer<'a> {
             Try(_) if self.in_try_block() => P_PRIMARY,
             Try(_) | Unwrap(_) | Await(_) | Field { .. } | MethodCall { .. } | Call { .. } | Index(..) | In { .. } => P_POSTFIX,
             Paren(x) => self.prec_of(x),
+            // Rust text: an operator or a space in it may bind looser than what is around it
+            // (`(rust { &raw mut info }).cast()`)
+            Raw(s) => {
+                let t = s.trim();
+                if t.starts_with(['&', '*', '-', '!', '|']) || t.contains(char::is_whitespace) && !t.ends_with([')', ']', '}']) {
+                    P_LOWEST
+                } else {
+                    P_PRIMARY
+                }
+            }
             _ => P_PRIMARY,
         }
     }
@@ -1745,15 +1807,18 @@ impl<'a> Lowerer<'a> {
             }
             StructLit { path, generics, fields, base } => self.struct_lit(path, generics.as_ref(), fields, base.as_deref()),
             Macro { path, text } => {
-                self.e.w(&format!("{}!", path));
-                self.e.raw_lines(text);
+                let text = self.include_paths(&format!("{}!{}", path, text));
+                self.e.raw_lines(&text);
             }
             TryCatch { body, catch } => {
                 let t = Target::none();
                 self.try_catch(body, catch.as_deref(), Some(&t));
             }
             Paren(x) => self.expr(x, P_LOWEST),
-            Raw(s) => self.e.raw_lines(s),
+            Raw(s) => {
+                let s = self.include_paths(s.trim());
+                self.e.raw_lines(&s);
+            }
             Error => self.e.w("()"),
         }
     }
@@ -2168,7 +2233,7 @@ impl<'a> Lowerer<'a> {
                 return;
             }
             if !self.is_local(n) && !self.k.is_class_name(n) && !self.k.is_fun_name(n) {
-                if let Some(en) = self.k.variant_enum_in(n, Some(&self.module)) {
+                if let Some(en) = self.variant_enum(n) {
                     s.push_str(&format!("{}::{}", en.name, n));
                     self.e.w(&s);
                     return;
@@ -2223,7 +2288,10 @@ impl<'a> Lowerer<'a> {
                     return Some((segs.clone(), PathKind::Type));
                 }
                 if is_type_like(n) {
-                    if self.k.variant_enum_in(n, Some(&self.module)).is_some() && !self.k.is_user_type(n) {
+                    // a unit variant is a value with members; `Extension.instantiate(..)` with a
+                    // tuple variant `Extension(..)` goes through a type of that name
+                    let unit = self.variant_enum(n).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
+                    if unit && !self.k.is_user_type(n) {
                         return None;
                     }
                     return Some((segs.clone(), PathKind::Type));
@@ -2298,8 +2366,33 @@ impl<'a> Lowerer<'a> {
 
     // ------------------------------------------------------------------ calls
 
+    /// Whether the field `name` of the class being lowered may hold something callable: a
+    /// function type, `Box<dyn Fn(..)>`, a type parameter, or a type Oxie can't see into.
+    fn field_callable(&self, name: &str) -> bool {
+        fn callable(t: &Type, generics: &[GenericParam]) -> bool {
+            match t {
+                Type::Ref { inner, .. } | Type::Ptr { inner, .. } => callable(inner, generics),
+                Type::Path { segs, .. } => {
+                    let last = segs.last().unwrap();
+                    match last.name.as_str() {
+                        _ if last.fn_sugar.is_some() => true,
+                        "Fn" | "FnMut" | "FnOnce" => true,
+                        "Box" | "Rc" | "Arc" => match last.generics.as_deref() {
+                            Some([GenericArg::Type(inner)]) => callable(inner, generics),
+                            _ => true,
+                        },
+                        n => segs.len() == 1 && generics.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if name == n)),
+                    }
+                }
+                Type::Option(_) | Type::Tuple(_) | Type::Array(..) | Type::Slice(_) | Type::Never => false,
+                _ => true,
+            }
+        }
+        self.class.as_ref().and_then(|c| c.fields.get(name).map(|t| callable(t, &c.generics))).unwrap_or(true)
+    }
+
     pub(crate) fn is_builtin_call(&self, name: &str) -> bool {
-        !self.is_local(name) && !self.k.is_fun_name(name) && self.class.as_ref().is_none_or(|c| !c.methods.contains_key(name))
+        !self.is_local(name) && !self.k.fun_in_scope(name, &self.module) && self.class.as_ref().is_none_or(|c| !c.methods.contains_key(name))
     }
 
     /// The element type of a list, array or slice expression.
@@ -2402,14 +2495,26 @@ impl<'a> Lowerer<'a> {
                     self.arg_list(args, None, TyPos::Param, span);
                     return;
                 }
-                // calling a function-typed property
-                if let Some(f) = self.implicit_field(&name) {
+                if let Some((_, params)) = self.local_funs.iter().rev().find(|(n, _)| *n == name).cloned() {
+                    self.e.w(&esc(&name));
+                    if let Some(g) = generics {
+                        let gt = self.generic_args_text(g);
+                        self.e.w(&format!("::{}", gt));
+                    }
+                    self.arg_list(args, Some(&params), TyPos::Param, span);
+                    return;
+                }
+                // calling a function-typed property (a field of another type leaves the name to a
+                // function: `list(..)` with a `list: ListState` field)
+                if let Some(f) = self.implicit_field(&name).filter(|_| self.field_callable(&name)) {
                     self.e.w(&format!("({})", f));
                     self.arg_list(args, None, TyPos::Param, span);
                     return;
                 }
                 if let Some(c) = self.class.as_ref().cloned() {
-                    if let Some(m) = c.methods.get(&name) {
+                    // `drop(x)` is std's: Rust never lets code call `Drop::drop`
+                    let std_drop = |m: &&crate::sema::MethodInfo| name == "drop" && m.params.is_empty() && args.len() == 1;
+                    if let Some(m) = c.methods.get(&name).filter(|m| !std_drop(m)) {
                         let static_ctx = c.is_static;
                         if m.recv == Recv::Static {
                             self.e.w(&format!("Self::{}", esc(&name)));
@@ -2466,7 +2571,7 @@ impl<'a> Lowerer<'a> {
                     return;
                 }
                 if !self.k.is_user_type(&name) {
-                    if let Some(en) = self.k.variant_enum_in(&name, Some(&self.module)).cloned() {
+                    if let Some(en) = self.variant_enum(&name).cloned() {
                         let shape = en.variant(&name).cloned().unwrap();
                         self.variant_ctor(&format!("{}::{}", en.name, name), &shape, args, span);
                         return;
@@ -2475,6 +2580,16 @@ impl<'a> Lowerer<'a> {
                 if is_type_like(&name) && args.is_empty() && !matches!(name.as_str(), "Some" | "None" | "Ok" | "Err") {
                     let g = generics.as_ref().map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                     self.e.w(&format!("{}{}::new()", esc(&name), g));
+                    return;
+                }
+                // a function from elsewhere (`gpui::list`) beside a field that can't be called
+                if self.implicit_field(&name).is_some() {
+                    self.e.w(&esc(&name));
+                    if let Some(g) = generics {
+                        let gt = self.generic_args_text(g);
+                        self.e.w(&format!("::{}", gt));
+                    }
+                    self.arg_list(args, None, TyPos::Param, span);
                     return;
                 }
             } else {
@@ -2807,6 +2922,15 @@ impl<'a> Lowerer<'a> {
             self.comma_list(&v);
             self.e.w("]");
             return;
+        }
+        if let ([a], "include_str" | "include_bytes" | "include") = (args, name) {
+            if let ExprKind::Str(parts) = &a.value.kind {
+                if let [crate::lexer::StrPart::Lit(path)] = parts.as_slice() {
+                    let text = self.include_paths(&format!("{}!(\"{}\")", name, path));
+                    self.e.w(&text);
+                    return;
+                }
+            }
         }
         self.e.w(&format!("{}!(", name));
         let Some(pos) = fmt_pos else {
@@ -3634,6 +3758,16 @@ impl<'a> Lowerer<'a> {
         if let Some(el) = else_ {
             self.e.w(" else ");
             match &el.kind {
+                // a let chain lowers to `match`, which needs braces after `else`
+                ExprKind::If { cond, then, else_ } if matches!(**cond, Cond::Chain(_)) || matches!(self.narrow_cond(cond, then).0, Some(Cond::Chain(_))) => {
+                    self.e.w("{");
+                    self.e.indent();
+                    self.e.nl();
+                    self.if_expr(cond, then, else_.as_deref(), mode);
+                    self.e.dedent();
+                    self.e.nl();
+                    self.e.w("}");
+                }
                 ExprKind::If { cond, then, else_ } => self.if_expr(cond, then, else_.as_deref(), mode),
                 ExprKind::Block(b) => match mode {
                     Some(t) => self.block_value(b, t),
@@ -4052,6 +4186,7 @@ impl<'a> Lowerer<'a> {
             return;
         };
         let implicit_it = *braces && params.is_empty() && visit::uses_it(body);
+        let typed_by_body = std::mem::take(&mut self.typed_by_body);
         if *is_async {
             self.e.w("async ");
         }
@@ -4070,6 +4205,9 @@ impl<'a> Lowerer<'a> {
             if ty.is_none() && ref_params {
                 self.lambda_params.push((depth, "it".into()));
             }
+            if ty.is_none() && typed_by_body {
+                self.untyped_params.push((depth, "it".into()));
+            }
             self.bind_name("it", ty);
         }
         for (i, p) in params.iter().enumerate() {
@@ -4082,6 +4220,9 @@ impl<'a> Lowerer<'a> {
                 }
                 None => {
                     ps.push(pt);
+                    if let (true, Pat::Ident { name, sub: None, .. }) = (typed_by_body, &p.pat) {
+                        self.untyped_params.push((depth, name.clone()));
+                    }
                     if let (true, Pat::Ident { name, sub: None, .. }) = (ref_params, &p.pat) {
                         self.lambda_params.push((depth, name.clone()));
                     }
@@ -4127,6 +4268,7 @@ impl<'a> Lowerer<'a> {
         self.loops = saved_loops;
         self.fns.pop();
         self.lambda_params.retain(|(d, _)| *d != depth);
+        self.untyped_params.retain(|(d, _)| *d != depth);
         self.pop_scope();
     }
 
@@ -4245,5 +4387,26 @@ fn spine<'e>(e: &'e Expr, ops: &mut Vec<&'e Expr>, nodes: &mut Vec<&'e Expr>) {
             nodes.push(e);
         }
         _ => ops.push(e),
+    }
+}
+
+/// The names an import brings in, with the paths they stand for (`Config` for
+/// `nucleo_matcher::{Config, Matcher}`).
+fn imported_names(tree: &UseTree, prefix: &[String], out: &mut Vec<(String, Vec<String>)>) {
+    match tree {
+        UseTree::Path { segments, alias } => {
+            let path: Vec<String> = prefix.iter().chain(segments).cloned().collect();
+            if let Some(last) = path.last().filter(|l| *l != "self") {
+                out.push((alias.clone().unwrap_or_else(|| last.clone()), path.clone()));
+            }
+        }
+        UseTree::Group { segments, items } => {
+            let prefix: Vec<String> = prefix.iter().chain(segments).cloned().collect();
+            for i in items {
+                imported_names(i, &prefix, out);
+            }
+        }
+        // a glob is kept as `*` with the path it imports from
+        UseTree::Glob { segments } => out.push(("*".into(), prefix.iter().chain(segments).cloned().collect())),
     }
 }

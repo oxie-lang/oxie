@@ -125,6 +125,12 @@ pub struct FunInfo {
     pub params: Vec<ParamInfo>,
     pub throws: bool,
     pub ret: Option<Type>,
+    /// Written in Rust (in a `rust { }` block): Oxie doesn't know its signature, only that it
+    /// hides functions of other modules with its name.
+    pub raw: bool,
+    /// The result type names a type parameter (`fun with<T>(..): T`), so a call's type depends
+    /// on its arguments.
+    pub generic_ret: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -147,10 +153,15 @@ pub struct Crate {
     pub globs: HashMap<Vec<String>, Vec<Vec<String>>>,
     /// Top-level module names (children of the crate root).
     pub modules: HashSet<String>,
+    /// The path of every module that has an .oxi file.
+    pub module_paths: HashSet<Vec<String>>,
     /// External crate names from Cargo.toml.
     pub extern_crates: HashSet<String>,
     /// (module path, trait name) for every extension-function trait.
     pub ext_traits: Vec<(Vec<String>, String)>,
+    /// Type names modules declare in Rust, which Oxie can't see into: in `rust { }` blocks
+    /// (`struct Newline;`) and item macros (`actions!(editor, [Newline])`).
+    pub rust_types: HashSet<(Vec<String>, String)>,
     /// Variant name -> the (module, name) of each enum that has it.
     pub variant_owner: HashMap<String, Vec<(Vec<String>, String)>>,
     /// Whether a `lib.oxi` exists (main.oxi then imports modules through the crate name).
@@ -217,12 +228,18 @@ impl Crate {
     }
     /// The class `name` means when written in `module` (see `type_key_in`).
     pub fn class_in(&self, name: &str, module: &[String]) -> Option<&ClassInfo> {
+        if self.imported_from_outside(name, module) {
+            return None;
+        }
         if !self.same_named.contains(name) {
             return self.class(name);
         }
         self.classes.get(&self.type_key_in(name, module)?)
     }
     pub fn enum_in(&self, name: &str, module: &[String]) -> Option<&EnumInfo> {
+        if self.imported_from_outside(name, module) {
+            return None;
+        }
         if !self.same_named.contains(name) {
             return self.enum_(name);
         }
@@ -232,6 +249,9 @@ impl Crate {
     /// name, or for a name declared in several modules, the one the path leads to.
     pub fn class_at(&self, path: &[String], module: &[String]) -> Option<&ClassInfo> {
         let name = path.last()?;
+        if self.leaves_crate(path, module) || path.len() == 1 && self.imported_from_outside(name, module) {
+            return None;
+        }
         if !self.same_named.contains(name) {
             return self.class(name);
         }
@@ -239,10 +259,25 @@ impl Crate {
     }
     pub fn enum_at(&self, path: &[String], module: &[String]) -> Option<&EnumInfo> {
         let name = path.last()?;
+        if self.leaves_crate(path, module) || path.len() == 1 && self.imported_from_outside(name, module) {
+            return None;
+        }
         if !self.same_named.contains(name) {
             return self.enum_(name);
         }
         self.enums.get(&self.type_key_at(path, module)?)
+    }
+    /// Whether a path written in `module` starts at another crate (`std.thread.Builder`), so it
+    /// names none of this crate's types, whatever their names.
+    pub fn leaves_crate(&self, path: &[String], module: &[String]) -> bool {
+        let Some(first) = path.first().filter(|_| path.len() > 1) else { return false };
+        let other_crate = matches!(first.as_str(), "std" | "core" | "alloc") || self.extern_crates.contains(first);
+        other_crate && !self.modules.contains(first) && !self.imports.contains_key(&(module.to_vec(), first.clone()))
+    }
+    /// Whether `module` imports `name` from another crate (`import alacritty_terminal::Selection`),
+    /// so that the name means that one, not a type or function of this crate.
+    fn imported_from_outside(&self, name: &str, module: &[String]) -> bool {
+        self.imports.get(&(module.to_vec(), name.to_string())).is_some_and(|p| self.leaves_crate(p, module))
     }
     /// The key of the class or enum `name` declared in `module`.
     pub fn decl_key(&self, module: &[String], name: &str) -> String {
@@ -264,10 +299,10 @@ impl Crate {
     }
     /// The function `name` means when written in `module` (as for types, see `type_key_in`).
     pub fn fun_in(&self, name: &str, module: &[String]) -> Option<&FunInfo> {
-        if !self.same_named_funs.contains(name) && self.ambiguous.contains(name) {
+        if !self.same_named_funs.contains(name) && self.ambiguous.contains(name) || self.imported_from_outside(name, module) {
             return None;
         }
-        self.funs.get(&self.key_in(Space::Funs, name, module)?)
+        self.funs.get(&self.key_in(Space::Funs, name, module)?).filter(|f| !f.raw)
     }
     /// The function a path written in `module` names (`util.total`), if the module the path
     /// leads to declares it.
@@ -275,11 +310,26 @@ impl Crate {
         if !self.same_named_funs.contains(path.last()?) && self.ambiguous.contains(path.last()?) {
             return None;
         }
-        self.funs.get(&self.key_at(Space::Funs, path, module)?)
+        self.funs.get(&self.key_at(Space::Funs, path, module)?).filter(|f| !f.raw)
     }
     /// Whether some module declares a function `name`.
     pub fn is_fun_name(&self, name: &str) -> bool {
         self.funs.contains_key(name) || self.same_named_funs.contains(name)
+    }
+    /// Whether `name` written in `module` is a top-level module: one with that name, unless
+    /// `module` has a child module of the name (`lsp` in `editor`, with `editor/lsp.oxi`).
+    pub fn root_module(&self, name: &str, module: &[String]) -> bool {
+        self.modules.contains(name) && !(!module.is_empty() && self.module_paths.contains(&[module, &[name.to_string()]].concat()))
+    }
+    /// Whether a function `name` of the crate can be called by that name in `module`: declared
+    /// there, or imported by name or with `*`.
+    pub fn fun_in_scope(&self, name: &str, module: &[String]) -> bool {
+        if let Some(path) = self.imports.get(&(module.to_vec(), name.to_string())) {
+            return self.key_at(Space::Funs, path, module).is_some();
+        }
+        let Some(key) = self.key_in(Space::Funs, name, module) else { return false };
+        let Some(home) = self.module_of(Space::Funs, &key) else { return false };
+        home.as_slice() == module || self.globs.get(module).into_iter().flatten().any(|g| self.module_path(g, module, true).as_ref() == Some(home))
     }
     /// The module declaring the type (or function) under `key`.
     fn module_of(&self, space: Space, key: &str) -> Option<&Vec<String>> {
@@ -331,7 +381,7 @@ impl Crate {
             _ if first == self.crate_name => (Vec::new(), &qual[1..]),
             "self" => (module.to_vec(), &qual[1..]),
             "super" => (module.to_vec(), qual),
-            _ if self.modules.contains(first) => (Vec::new(), qual),
+            _ if self.root_module(first, module) => (Vec::new(), qual),
             _ => match self.imports.get(&(module.to_vec(), first.to_string())).filter(|_| follow_imports) {
                 Some(p) => (self.module_path(p, module, false)?, &qual[1..]),
                 None => (module.to_vec(), qual),
@@ -370,6 +420,24 @@ impl Crate {
             return None;
         }
         let owners = self.variant_owner.get(variant)?;
+        // a name the module imports from elsewhere (`import super::Redo`, a unit struct) is that one
+        let imported_other = |at: &[String]| {
+            self.imports.get(&(at.to_vec(), variant.to_string())).is_some_and(|path| {
+                let owner = path.len().checked_sub(2).map(|i| &path[i]);
+                !owners.iter().any(|(_, n)| Some(n) == owner)
+            })
+        };
+        if module.is_some_and(imported_other) {
+            return None;
+        }
+        // and so is a type the module has from Rust code, its own or through `import editor.*`
+        // (as are the names the glob's module imports, for `mod tests { import super::* }`)
+        if let Some(m) = module {
+            let has = |at: &[String]| self.rust_types.contains(&(at.to_vec(), variant.to_string())) || at != m && imported_other(at);
+            if has(m) || self.globs.get(m).into_iter().flatten().filter_map(|g| self.module_path(g, m, true)).any(|g| has(&g)) {
+                return None;
+            }
+        }
         let enum_of = |(m, n): &(Vec<String>, String)| if self.same_named.contains(n) { self.enums.get(&scoped_key(m, n)) } else { self.enum_(n) };
         if owners.len() == 1 {
             return enum_of(&owners[0]);
@@ -408,6 +476,7 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
         if let Some(first) = u.module.first() {
             k.modules.insert(first.clone());
         }
+        k.module_paths.insert(u.module.clone());
     }
     // pass 1: traits (needed for impl receivers)
     for u in units {
@@ -718,6 +787,115 @@ fn type_key_for(k: &mut Crate, name: &str, module: &[String], is_class: bool) ->
     (!taken).then_some(key)
 }
 
+/// The functions a `rust { }` block declares at its top level (`fn total(..)`, `pub(crate) fn ..`).
+fn raw_fn_names(text: &str) -> Vec<String> {
+    raw_items(text).into_iter().filter(|(kw, _)| *kw == "fn").map(|(_, n)| n).collect()
+}
+
+/// The CamelCase names in an item macro, like the unit structs `actions!(editor, [Newline])`
+/// declares.
+fn camel_words(text: &str) -> Vec<String> {
+    let words = text.split(|c: char| !(c.is_alphanumeric() || c == '_'));
+    words.filter(|w| w.starts_with(|c: char| c.is_ascii_uppercase()) && w.contains(|c: char| c.is_ascii_lowercase())).map(str::to_string).collect()
+}
+
+/// The macro calls at the top level of a `rust { }` block (`actions!(editor, [Newline])`).
+fn raw_macro_calls(text: &str) -> Vec<&str> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let (mut i, mut depth) = (0, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b'!' if depth == 0 && i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') => {
+                let open = i + 1 + text[i + 1..].len() - text[i + 1..].trim_start().len();
+                let close = match b.get(open) {
+                    Some(b'(') => b')',
+                    Some(b'[') => b']',
+                    Some(b'{') => b'}',
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let (mut j, mut d) = (open, 0usize);
+                while j < b.len() {
+                    if b[j] == b[open] {
+                        d += 1;
+                    } else if b[j] == close {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                out.push(&text[open..j.min(b.len())]);
+                i = j;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The items a `rust { }` block declares at its top level, with their keywords: `("fn", "total")`,
+/// `("struct", "Newline")`.
+fn raw_items(text: &str) -> Vec<(&'static str, String)> {
+    let b = text.as_bytes();
+    let ident = |i: usize| b[i].is_ascii_alphanumeric() || b[i] == b'_';
+    let mut out = Vec::new();
+    let (mut i, mut depth) = (0, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => i = text[i..].find('\n').map_or(b.len(), |n| i + n),
+            b'/' if b.get(i + 1) == Some(&b'*') => i = text[i + 2..].find("*/").map_or(b.len(), |n| i + n + 4),
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'r' if (i == 0 || !ident(i - 1)) && b[i + 1..].iter().find(|&&c| c != b'#') == Some(&b'"') => {
+                let hashes = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
+                let close = format!("\"{}", "#".repeat(hashes));
+                let open = i + 1 + hashes + 1;
+                i = text.get(open..).and_then(|t| t.find(&close)).map_or(b.len(), |n| open + n + close.len());
+            }
+            // a char literal (not a lifetime): `'{'`, `'\''`
+            b'\'' if b.get(i + 2) == Some(&b'\'') && b.get(i + 1) != Some(&b'\\') => i += 3,
+            b'\'' if b.get(i + 1) == Some(&b'\\') => i = text[i + 2..].find('\'').map_or(b.len(), |n| i + n + 3),
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                while i < b.len() && ident(i) {
+                    i += 1;
+                }
+                let kw = ["fn", "struct", "enum", "union", "type", "trait"].into_iter().find(|kw| *kw == &text[start..i]);
+                if let Some(kw) = kw.filter(|_| depth == 0) {
+                    let rest = text[i..].trim_start();
+                    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                    if !name.is_empty() {
+                        out.push((kw, name));
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
 /// The key for a new function `name` declared in `module`, as `type_key_for` does for types.
 fn fun_key_for(k: &mut Crate, name: &str, module: &[String]) -> Option<String> {
     if !k.same_named_funs.contains(name) {
@@ -823,9 +1001,33 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
         }
         match &it.kind {
             ItemKind::Fun(f) if f.receiver.is_none() => {
-                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone() };
+                let generic_ret = f.ret.as_ref().is_some_and(|r| {
+                    let text = crate::symbols::type_text(r);
+                    let names: Vec<&str> = text.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+                    f.generics.params.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if names.contains(&name.as_str())))
+                });
+                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), raw: false, generic_ret };
                 if let Some(key) = fun_key_for(k, &f.name, module) {
                     k.funs.insert(key, info);
+                }
+            }
+            ItemKind::Raw(text) => {
+                for name in raw_fn_names(text) {
+                    let info = FunInfo { module: module.to_vec(), params: Vec::new(), throws: false, ret: None, raw: true, generic_ret: false };
+                    if let Some(key) = fun_key_for(k, &name, module) {
+                        k.funs.insert(key, info);
+                    }
+                }
+                for (_, name) in raw_items(text).into_iter().filter(|(kw, _)| *kw != "fn") {
+                    k.rust_types.insert((module.to_vec(), name));
+                }
+                for name in raw_macro_calls(text).into_iter().flat_map(camel_words) {
+                    k.rust_types.insert((module.to_vec(), name));
+                }
+            }
+            ItemKind::Macro(text) => {
+                for name in camel_words(text) {
+                    k.rust_types.insert((module.to_vec(), name));
                 }
             }
             ItemKind::Fun(f) => {

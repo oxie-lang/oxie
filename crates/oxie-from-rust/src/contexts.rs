@@ -30,6 +30,9 @@ pub struct Crate {
     pub classes: HashMap<String, Class>,
     /// The names of the crate's free functions, in any file.
     pub free_fns: HashSet<String>,
+    /// The field names of every struct with named fields, by struct name (of all structs of a
+    /// name, together).
+    pub struct_fields: HashMap<String, HashSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +174,7 @@ pub fn scan(files: &[&syn::File]) -> Crate {
     for (i, f) in files.iter().enumerate() {
         s.impls(i, &f.items);
     }
-    let mut krate = Crate { free_fns: std::mem::take(&mut s.free_fns), ..Crate::default() };
+    let mut krate = Crate { free_fns: std::mem::take(&mut s.free_fns), struct_fields: std::mem::take(&mut s.struct_fields), ..Crate::default() };
     for (name, (file, decl)) in s.structs {
         // the stubs `stub` writes have no type parameters
         if s.ambiguous.contains(&name) || !decl.generics.params.is_empty() {
@@ -272,6 +275,7 @@ struct Scan {
     /// (type, method) referred to without a call.
     values: HashSet<(syn::Ident, String)>,
     free_fns: HashSet<String>,
+    struct_fields: HashMap<String, HashSet<String>>,
 }
 
 impl Scan {
@@ -279,6 +283,10 @@ impl Scan {
         for it in items {
             let name = match it {
                 syn::Item::Struct(s) => {
+                    if let syn::Fields::Named(n) = &s.fields {
+                        let fields = self.struct_fields.entry(s.ident.to_string()).or_default();
+                        fields.extend(n.named.iter().filter_map(|f| f.ident.as_ref().map(|i| i.to_string())));
+                    }
                     let class = matches!(&s.fields, syn::Fields::Named(n) if !n.named.is_empty() && n.named.iter().all(|f| crate::printer::only_docs(&f.attrs)));
                     if class && !self.structs.contains_key(&s.ident.to_string()) {
                         self.structs.insert(s.ident.to_string(), (file, s.clone()));

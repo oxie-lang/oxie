@@ -1,0 +1,7 @@
+redo 2
+undo
+Again
+Save Save
+Config { level: 3 }
+redo icon
+undo icon
