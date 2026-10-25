@@ -15,6 +15,11 @@ class Shop(var items: Vec<Item> = vec[]) {
     fun has(n: String): Boolean = items.any { it.name == n }
 }
 
+// a parameter moved into a struct (`Self { label, .. }`) stays owned
+class Tagged(label: String, n: i32) {
+    static fun make(label: String): Self = Self { label, n: 1 }
+}
+
 class Temp(var c: f64 = 0.0)
 fun Temp.warm(by: f64) { c += by }
 fun Temp.show(): String = "$c"
@@ -35,6 +40,9 @@ fun main() {
     s.add(a)
     println(s.has(n))
     println(Hi().greet(n))
+
+    val tag = Tagged.make("tag".to_string())
+    println("${tag.label} ${tag.n}")
 
     var t = Temp()
     t.warm(2.5)

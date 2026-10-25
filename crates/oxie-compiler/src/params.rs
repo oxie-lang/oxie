@@ -596,6 +596,8 @@ impl<'a> Analysis<'a> {
             let read_at = |x: &Expr, whole: bool| if whole && is_p(x) { Some(x.span.start) } else { chain_root(x, name) };
             match &e.kind {
                 ExprKind::Path { .. } if is_p(e) => uses.push(e.span.start),
+                // `Self { name, .. }` moves the parameter into the struct
+                ExprKind::StructLit { fields, .. } if fields.iter().any(|(f, v)| v.is_none() && f == name) => uses.push(e.span.start),
                 ExprKind::MethodCall { recv, name: m, .. } if is_p(recv) && (reads.contains(&m.as_str()) || self.reads_value(c, m)) => {
                     ok.insert(recv.span.start);
                 }
@@ -837,6 +839,7 @@ pub fn stored_reason(files: &[&File], fun: &str, index: usize) -> Option<(usize,
         let is_p = |x: &Expr| x.ident() == Some(name);
         match &e.kind {
             ExprKind::Path { .. } if is_p(e) => uses.push(e.span.start),
+            ExprKind::StructLit { fields, .. } if fields.iter().any(|(f, v)| v.is_none() && f == name) => uses.push(e.span.start),
             ExprKind::Call { callee, args } => {
                 if let Some(f) = callee.ident() {
                     for (pos, arg) in args.iter().enumerate() {
@@ -899,7 +902,7 @@ fn kept_use(c: &Cand, at: u32) -> (Span, String) {
             ExprKind::Unary(UnOp::Ref | UnOp::RefMut, x) if is_at(x) => Some(format!("it uses `&{}`, a reference to the value itself", name)),
             ExprKind::In { item, .. } if is_at(item) => Some(format!("it looks for `{}` with `in`, which compares the value itself", name)),
             ExprKind::Assign(_, _, rhs) if is_at(rhs) => Some(format!("it stores `{}`", name)),
-            ExprKind::StructLit { fields, .. } if fields.iter().any(|(_, v)| v.as_ref().is_some_and(is_at)) => Some(format!("it stores `{}` in a struct", name)),
+            ExprKind::StructLit { fields, .. } if fields.iter().any(|(f, v)| v.as_ref().map_or(e.span.start == at && f == name, is_at)) => Some(format!("it stores `{}` in a struct", name)),
             _ => None,
         };
         true
