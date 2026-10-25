@@ -1772,6 +1772,16 @@ impl<'a> Lowerer<'a> {
                     self.expr(x, P_POSTFIX);
                     self.e.w(".into())");
                 } else {
+                    // a function that returns `()` or another value can't return an error
+                    if let Some(f) = self.fns.last() {
+                        let result = f.ret.as_ref().and_then(|t| t.last_name()).is_some_and(|n| n == "Result");
+                        if !f.throws && !f.is_lambda && !result {
+                            self.diags.push(
+                                Diag::error(e.span, "`throw` in a function that doesn't declare `throws`")
+                                    .with_help("declare that the function can fail: `fun name(...) throws { ... }`, or `fun name(...): T throws` with a result type"),
+                            );
+                        }
+                    }
                     self.e.w("return Err(");
                     self.expr(x, P_POSTFIX);
                     self.e.w(".into())");

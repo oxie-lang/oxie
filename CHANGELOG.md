@@ -90,6 +90,11 @@
   suggests an async block, instead of rustc's advice to call the closure.
 * Storing a predicate's parameter where it outlives the lambda (`filter { seen.insert(it) }`) is
   explained: `it` is a reference to the element, so store `*it` or `it.clone()`.
+* `throw` in a function that doesn't declare `throws` is an Oxie error that says to declare it,
+  instead of rustc's "expected `()`, found `Result`".
+* `?` inside a lambda is explained (it leaves the lambda, not the function), instead of advice to
+  add `throws` to a function that already has it. A throwing call's result used in arithmetic
+  (`value(x) + 1`) is explained too, with `?` as the fix.
 
 ## 0.2.0 - 2026-10-24
 

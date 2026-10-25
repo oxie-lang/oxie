@@ -87,6 +87,12 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
         "E0277" => trait_missing(d, sources, &lines, &names),
         "E0308" => mismatched(d, src, &lines),
         "E0615" => getter_call(d, &lines, &first),
+        // `value(x) + 1` where `value` throws: the operand is its `Result`
+        "E0369" if names.get(1).is_some_and(|t| t.starts_with("Result<")) => {
+            rewrite(d, "this value can be an error (a `Result`), so it can't be used in arithmetic or comparisons".into());
+            d.notes.retain(|n| !n.contains("does not implement"));
+            d.notes.push(help("unwrap it first: inside a function that `throws`, `?` passes the error on (`total()? + 1`); elsewhere give a default with `?:` or handle both cases with `when (val r = ...) { Ok(v) -> ...; Err(e) -> ... }`."));
+        }
         // `filter { seen.insert(it) }`: the lambda's parameter is a reference into the iteration
         "E0521" if d.label.as_deref().is_some_and(|l| l.ends_with("escapes the closure body here")) => {
             let name = d.label.as_deref().and_then(|l| between(l, "`", "`")).unwrap_or_else(|| "it".to_string());
@@ -1502,6 +1508,13 @@ fn trait_missing(d: &mut MappedDiag, sources: &Sources, lines: &[&str], names: &
             if let Some(c) = q_col {
                 d.fixes.push(Fix { title: "give `null` when it fails".into(), edits: vec![edit(d.line, c, c + 1, ".ok()?")] });
             }
+            return;
+        }
+        // `?` inside a lambda leaves the lambda, not the function around it
+        if msg.contains("in a closure") || msg.contains("in an async block") {
+            rewrite(d, "`?` inside a lambda passes the error out of the lambda, which doesn't return a `Result`".into());
+            d.notes.retain(|n| !n.contains("FromResidual"));
+            d.notes.push(help("`?` (like `return`) leaves the lambda, not the function around it. Use a `for` loop, whose `?` passes the error on from the function, or collect the results: `xs.map { it.parse::<i32>() }.into_iter().collect::<Result<Vec<_>, _>>()?`."));
             return;
         }
         rewrite(d, "`?` passes errors on, but this function doesn't declare `throws`".into());

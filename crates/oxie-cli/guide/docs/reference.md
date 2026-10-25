@@ -70,7 +70,8 @@ fun short(x: i32) = x * 2
 * **Block value**: the last expression of a block is its value. In a function returning `()`
   the last expression is a statement.
 * **Default arguments** and **named arguments** (`f(x = 1)`) work for functions, methods and
-  constructors declared in Oxie; defaults are filled in at the call site. A function called
+  constructors declared in Oxie; defaults are filled in at the call site, and one may use the
+  parameters before it (`h: i32 = w`). A function called
   through its module (`util.total(v)`) is treated like a direct call: arguments are lent,
   defaults and names apply, and a `throws` function's error propagates.
 * **Generics and bounds** are Rust's: `<T: Display + Clone>`, `where T: Into<String>`,
@@ -261,6 +262,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
 ```
 
 * Generates `struct Name<T> { a, b, c, d }` and `impl` with `fn new(a, b, c) -> Self`.
+  A body property's default can use the constructor parameters and the properties before it
+  (`val code = name.to_uppercase()`).
 * **Construction**: `Name(a, b)` → `Name::new(a, b)`; named arguments and defaults work.
   Zero-argument calls of external types (`HashMap()`, `String()`) become `Type::new()`.
 * `val`/`var` before constructor parameters are accepted (Kotlin habit) but don't matter:
