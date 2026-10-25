@@ -740,6 +740,12 @@ impl Printer<'_> {
                 return format!("{}?", self.ex(&syn::Expr::MethodCall(m2), &Ctx::value()));
             }
         }
+        // a `loop` without `break` never ends: it returns from inside, and has no value to unwrap
+        if let syn::Expr::Loop(l) = e {
+            if !tok(&l.body).contains("break") {
+                return self.ex(e, &Ctx::value());
+            }
+        }
         // `x.ok_or_else(|| e)?` is `x ?: throw e`, which also leaves `e.into()` its target
         if let syn::Expr::MethodCall(m) = e {
             let err = match (m.method.to_string().as_str(), m.args.first()) {
