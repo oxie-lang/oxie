@@ -1871,14 +1871,20 @@ impl<'a> Lowerer<'a> {
         let cmp = p == 5;
         let lp = if cmp { p + 1 } else { p };
         let by_value = matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem);
+        // text compares as `&str`, whatever the references around the parameter
+        let text = |x: &Expr| cmp && matches!(x.kind, ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Template(_));
         if by_value && is_scalar_literal(r) && self.is_ref_lambda_param(l) {
             self.read_value(l);
+        } else if text(r) && self.is_ref_lambda_param(l) {
+            self.read_text(l);
         } else {
             self.operand(l, lp, matches!(op, BinOp::Lt | BinOp::Shl));
         }
         self.e.w(&format!(" {} ", op.as_str()));
         if by_value && is_scalar_literal(l) && self.is_ref_lambda_param(r) {
             self.read_value(r);
+        } else if text(l) && self.is_ref_lambda_param(r) {
+            self.read_text(r);
         } else {
             self.operand(r, p + 1, before_lt);
         }
@@ -4334,6 +4340,14 @@ impl<'a> Lowerer<'a> {
         self.e.mark(e.span);
         self.e.w("crate::__oxie::val(");
         self.expr(e, P_LOWEST);
+        self.e.w(")");
+    }
+
+    /// Reads text through any number of references as a `&str`: `crate::__oxie::val(&it)`.
+    fn read_text(&mut self, e: &Expr) {
+        self.e.mark(e.span);
+        self.e.w("crate::__oxie::val(&");
+        self.expr(e, P_UNARY);
         self.e.w(")");
     }
 

@@ -236,8 +236,8 @@ impl<E> ElvisOr<&'static str> for ::std::result::Result<String, E> {
     }
 }
 
-/// Reads a number, `bool` or `char` through any number of references (`&&i32` -> `i32`), so
-/// lambda parameters compare with literals: `filter { it > 2 }`.
+/// Reads a number, `bool` or `char` through any number of references (`&&i32` -> `i32`), and
+/// text as a `&str`, so lambda parameters compare with literals: `filter { it > 2 }`.
 pub trait Val {
     type Out;
     fn val(&self) -> Self::Out;
@@ -272,6 +272,23 @@ macro_rules! val_copy {
 }
 
 val_copy!(i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char);
+
+/// Text reads as a `&str`, so `filter { it == "bob" }` compares on a list of `&str` too.
+impl<'a> Val for &'a str {
+    type Out = &'a str;
+    #[inline(always)]
+    fn val(&self) -> &'a str {
+        self
+    }
+}
+
+impl<'a> Val for &'a String {
+    type Out = &'a str;
+    #[inline(always)]
+    fn val(&self) -> &'a str {
+        self.as_str()
+    }
+}
 
 #[inline(always)]
 pub fn val<V: Val>(v: V) -> V::Out {
