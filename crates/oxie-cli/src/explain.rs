@@ -1454,6 +1454,14 @@ fn trait_missing(d: &mut MappedDiag, sources: &Sources, lines: &[&str], names: &
         thread_safety(d, sources, names.first().map(String::as_str).unwrap_or(""));
         return;
     }
+    // `tokio.spawn { ... }`: a lambda where a future is expected
+    if msg.starts_with("`{closure@") && msg.ends_with("` is not a future") {
+        rewrite(d, "a lambda is not a future".into());
+        d.label = Some("this lambda is passed where a future is expected".into());
+        d.notes.retain(|n| !n.contains("use parentheses to call this closure") && !n.contains("is not implemented for closure") && !n.contains("full name for the type") && !n.contains("--verbose"));
+        d.notes.push(help("pass an async block instead of a lambda: `tokio.spawn(async move { ... })`. To give it its own copy of a shared handle, clone the handle into a `val` before the block."));
+        return;
+    }
     if msg.contains("the `?` operator can only be used") {
         d.notes.retain(|n| !n.contains("FromResidual") && !n.contains("consider adding return type"));
         let text = lines.get(d.line as usize).copied().unwrap_or("");

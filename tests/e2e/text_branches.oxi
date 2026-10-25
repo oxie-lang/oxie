@@ -1,0 +1,24 @@
+// An `if`/`when` value whose branches mix literals and templates is a `String`.
+
+fun main() {
+    val n = 5
+    val a = if (n > 3) "big" else "small $n"
+    val b = when { n < 0 -> "negative"; else -> "positive $n" }
+    val c = when (n) {
+        0 -> "none"
+        1 -> "one"
+        else -> {
+            println("counting")
+            "$n items"
+        }
+    }
+    println("$a, $b, $c")
+    for (i in 0..3) {
+        val d = if (i == 0) "zero" else if (i == 1) "one $i" else null
+        println("${d:?}")
+    }
+    // all literals stay `&str`
+    val e = if (n > 3) "x" else "y"
+    val f: &str = e
+    println(f)
+}

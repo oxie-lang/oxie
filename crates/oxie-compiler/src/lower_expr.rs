@@ -45,26 +45,43 @@ fn escape_braces(s: &str) -> String {
 }
 
 /// The type of an `if`/`when` value nothing declares: a `T?` when one of its branches is `null`
-/// (`if (c) x else null`), so the other branches become `Some(x)`.
+/// (`if (c) x else null`), so the other branches become `Some(x)`, and a `String` when some
+/// branches are templates and others literals (`if (c) "none" else "$n items"`).
 fn branch_target(e: &Expr) -> Target {
-    fn null_branch(e: &Expr) -> bool {
-        let tail = |b: &Block| match b.stmts.last() {
-            Some(Stmt::Expr { expr, semi: false }) => null_branch(expr),
-            _ => false,
+    #[derive(Default)]
+    struct Tails {
+        null: bool,
+        literal: bool,
+        template: bool,
+    }
+    fn walk(e: &Expr, t: &mut Tails) {
+        let tail = |b: &Block, t: &mut Tails| {
+            if let Some(Stmt::Expr { expr, semi: false }) = b.stmts.last() {
+                walk(expr, t)
+            }
         };
         match &e.kind {
-            ExprKind::Null => true,
-            ExprKind::Paren(x) => null_branch(x),
-            ExprKind::Block(b) => tail(b),
-            ExprKind::If { then, else_: Some(el), .. } => tail(then) || null_branch(el),
-            ExprKind::When { arms, .. } => arms.iter().any(|a| null_branch(&a.body)),
-            _ => false,
+            ExprKind::Null => t.null = true,
+            ExprKind::Str(_) | ExprKind::RawStr(_) => t.literal = true,
+            ExprKind::Template(_) => t.template = true,
+            ExprKind::Paren(x) => walk(x, t),
+            ExprKind::Block(b) => tail(b, t),
+            ExprKind::If { then, else_: Some(el), .. } => {
+                tail(then, t);
+                walk(el, t);
+            }
+            ExprKind::When { arms, .. } => arms.iter().for_each(|a| walk(&a.body, t)),
+            _ => {}
         }
     }
-    if null_branch(e) {
-        Target::ty(&Type::Option(Box::new(Type::Infer)))
-    } else {
-        Target::none()
+    let mut t = Tails::default();
+    walk(e, &mut t);
+    let text = t.literal && t.template;
+    match (t.null, text) {
+        (true, true) => Target::ty(&Type::Option(Box::new(Type::simple("String")))),
+        (true, false) => Target::ty(&Type::Option(Box::new(Type::Infer))),
+        (false, true) => Target::ty(&Type::simple("String")),
+        (false, false) => Target::none(),
     }
 }
 
