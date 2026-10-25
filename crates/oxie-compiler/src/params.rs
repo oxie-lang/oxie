@@ -642,12 +642,11 @@ impl<'a> Analysis<'a> {
                 });
             });
         }
-        // methods that Rust written in `rust { }` blocks or macro arguments calls
+        // functions and methods that Rust written in `rust { }` blocks or macro arguments calls,
+        // with the declared types
         let mut raw = HashSet::new();
-        if matches!(stage, Stage::Methods(_)) {
-            for f in &files {
-                raw_calls(&f.items, &mut raw);
-            }
+        for f in &files {
+            raw_calls(&f.items, &mut raw);
         }
 
         let types = Types::new(&files);
@@ -663,7 +662,7 @@ impl<'a> Analysis<'a> {
                     !fixed && (lend_pub || !public) && !m.unresolved.contains(&f.name) && !raw.contains(&f.name)
                 }
                 (Stage::Methods(_), None) => false,
-                _ => (lend_pub || fun.item.vis != Vis::Public) && decls.contains_key(f.name.as_str()) && !through_path.contains(&f.name) && f.name != "main",
+                _ => (lend_pub || fun.item.vis != Vis::Public) && decls.contains_key(f.name.as_str()) && !through_path.contains(&f.name) && !raw.contains(&f.name) && f.name != "main",
             } && !as_value.contains(&f.name)
                 && f.receiver.is_none()
                 && !f.mods.is_async
