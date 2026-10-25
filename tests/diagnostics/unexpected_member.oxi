@@ -1,0 +1,8 @@
+// a token out of place at the start of a line is reported where it is, not at the end of the
+// line before
+class Account {
+    lateinit var owner: String
+    // error: 4:5: found `lateinit`
+}
+
+fun main() {}

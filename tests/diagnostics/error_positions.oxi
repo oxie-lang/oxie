@@ -1,0 +1,49 @@
+// rustc's errors land on the part of the line they are about, also where the generated Rust
+// differs from the source before it (`let` for `val`, `::` for `.`) or spreads it over lines
+import std.collections.HashMap
+// error: 3:8: unused import
+
+interface Shape {
+    fun area(): f64
+}
+
+class Square(side: f64) : Shape
+// error: 10:7: not all trait items implemented
+
+class Named(name: String)
+
+fun parse(): i32 throws {
+    try {
+        val n: i32 = "7".parse()?
+        n
+    } catch (e: Problem) {
+        0
+    }
+}
+// error: 19:17: `Problem` isn't defined
+
+fun main() {
+    val xs = vec[1, 2, 3]
+    println(xs.size)
+    // error: 27:16: no field `size`
+    val p = Named("a")
+    println(p.nmae)
+    // error: 30:15: no field `nmae`
+    val doubled: Vec<String> = xs
+        .iter()
+        .map { it * 2 }
+        .filter { it > 2 }
+        .collect()
+    // error: 36:10: cannot be built from an iterator
+    val seen: HashSet<i32> = vec[1].into_iter().collect()
+    // error: 38:15: `HashSet` isn't defined
+    rust {
+        fn helper() -> i32 {
+            let a = 1;
+            let x: i32 = "a";
+            x + a
+        }
+    }
+    // error: 43:26: mismatched types
+    println(helper())
+}

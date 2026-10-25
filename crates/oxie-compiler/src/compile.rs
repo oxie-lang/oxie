@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::File;
-use crate::diag::{Diag, LineIndex, Severity};
+use crate::diag::{Diag, LineIndex, Severity, Span};
 use crate::emit::{Decision, Mark};
 use crate::lower::Lowerer;
 use crate::parser;
@@ -124,8 +124,13 @@ struct Parsed {
 pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
     let mut parsed: Vec<Parsed> = Vec::new();
     for input in inputs {
-        let (file, diags) = parser::parse_file(&input.text);
+        let (file, mut diags) = parser::parse_file(&input.text);
         let (module, is_root) = module_of(&input.rel_path);
+        // a file or directory name becomes a module name
+        if let Some(bad) = module.iter().find(|m| !m.starts_with(|c: char| c.is_alphabetic() || c == '_') || !m.chars().all(|c| c.is_alphanumeric() || c == '_')) {
+            let fixed: String = bad.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+            diags.insert(0, Diag::error(Span::default(), format!("`{}` can't be the name of a module: the names of .oxi files and their directories are module names, so they must be identifiers", bad)).with_help(format!("rename it to `{}`", fixed)));
+        }
         parsed.push(Parsed { input, module, is_root, file, diags });
     }
     // context parameters first: every later pass sees them as parameters

@@ -1,0 +1,4 @@
+// a module's file name must be an identifier: `my-util.oxi` can't be `mod my-util`
+fun main() {
+    println(answer())
+}

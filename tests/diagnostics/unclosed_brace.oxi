@@ -1,0 +1,7 @@
+// a missing `}` is reported once, with the `{` it leaves open
+fun main() {
+    val ready = true
+    if (ready) {
+        println("ready")
+}
+// error: 8: the `{` on line 4 (`if (ready) {`) is never closed

@@ -625,6 +625,16 @@ impl<'a> Lowerer<'a> {
 
     // ------------------------------------------------------------------ attributes & docs
 
+    /// Writes `{before}{name}{after}` with a mark at the name, so that rustc's messages about a
+    /// declaration (`function `f` is never used`) point at its name, not at the doc comment
+    /// where the item's mark is.
+    pub(crate) fn w_named(&mut self, before: &str, name_span: Span, name: &str, after: &str) {
+        self.e.w(before);
+        self.e.mark(name_span);
+        self.e.w(name);
+        self.e.w(after);
+    }
+
     pub(crate) fn docs(&mut self, docs: &[String]) {
         for d in docs {
             self.e.w(&format!("///{}", d));
@@ -1551,7 +1561,7 @@ impl<'a> Lowerer<'a> {
         let params = self.params_parts(f, None);
         let ret = self.ret_type(f, TyPos::Ret);
         let wc = self.where_clause(&f.generics);
-        self.e.w(&format!("{}{}fn {}{}", vis, header, name, g));
+        self.w_named(&format!("{}{}fn ", vis, header), f.name_span, &name, &g);
         self.write_params(f, &params, None);
         if let Some(r) = &ret {
             self.e.w(&format!(" -> {}", r));
@@ -1757,7 +1767,7 @@ impl<'a> Lowerer<'a> {
                 self.error(f.name_span, format!("`{}` implements an interface method, so it can't pass `this` on: the interface's signature has no place for the object's handle. Let the caller pass the object in as a parameter instead", f.name));
             }
         }
-        self.e.w(&format!("{}{}fn {}{}", vis, header, name, g));
+        self.w_named(&format!("{}{}fn ", vis, header), f.name_span, &name, &g);
         self.write_params(f, &params, recv_why);
         if let Some(r) = &ret {
             self.e.w(&format!(" -> {}", r));
@@ -1881,10 +1891,10 @@ impl<'a> Lowerer<'a> {
             _ => {
                 let kw = if t.kind == TypeKind::Union { "union" } else { "struct" };
                 if fields.is_empty() {
-                    self.e.w(&format!("{}{} {}{}{};", vis, kw, data_name, g, wc));
+                    self.w_named(&format!("{}{} ", vis, kw), t.name_span, &data_name, &format!("{}{};", g, wc));
                     self.e.nl();
                 } else {
-                    self.e.w(&format!("{}{} {}{}{} {{", vis, kw, data_name, g, wc));
+                    self.w_named(&format!("{}{} ", vis, kw), t.name_span, &data_name, &format!("{}{} {{", g, wc));
                     self.e.indent();
                     for (f, ty) in &fields {
                         self.e.nl();
@@ -1959,7 +1969,7 @@ impl<'a> Lowerer<'a> {
         }
         // trait impls
         for (tr, members) in impl_traits.iter().zip(members_by_trait.iter()) {
-            self.trait_impl_block(tr, members, &g, &self_ty, &wc);
+            self.trait_impl_block(tr, members, t.name_span, &g, &self_ty, &wc);
         }
         // error class
         if t.is_error {
@@ -2234,7 +2244,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn trait_impl_block(&mut self, tr: &Type, members: &[&Item], g: &str, self_ty: &str, wc: &str) {
+    fn trait_impl_block(&mut self, tr: &Type, members: &[&Item], class_name: Span, g: &str, self_ty: &str, wc: &str) {
         self.e.nl();
         if tr.last_name() == Some("__Display") {
             if let Some(m) = members.first() {
@@ -2245,6 +2255,8 @@ impl<'a> Lowerer<'a> {
             return;
         }
         let tname = self.ty(tr, TyPos::Plain);
+        // errors about the impl as a whole (a missing method) point at the class
+        self.e.mark(class_name);
         self.e.w(&format!("impl{} {} for {}{} {{", g, tname, self_ty, wc));
         self.e.indent();
         let trait_info = tr.last_name().and_then(|n| self.k.traits.get(n)).cloned();
@@ -2443,7 +2455,7 @@ impl<'a> Lowerer<'a> {
         }
         self.docs(&it.docs);
         self.attrs(&it.attrs, &derives);
-        self.e.w(&format!("{}enum {}{}{} {{", vis, t.name, g, wc));
+        self.w_named(&format!("{}enum ", vis), t.name_span, &t.name, &format!("{}{} {{", g, wc));
         self.e.indent();
         for v in &t.variants {
             self.e.nl();
@@ -2505,7 +2517,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         for (tr, members) in impl_traits.iter().zip(members_by_trait.iter()) {
-            self.trait_impl_block(tr, members, &g, &self_ty, &wc);
+            self.trait_impl_block(tr, members, t.name_span, &g, &self_ty, &wc);
         }
         if t.is_error {
             self.error_enum_impls(t, &g, &self_ty, &wc);
