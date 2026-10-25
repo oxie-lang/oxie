@@ -275,6 +275,67 @@ fun main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Completion after `c.` on a class value without a declared type lists the class's members and
+/// its interfaces' methods only, and hovering the value shows its type; a message that isn't
+/// JSON is skipped, and an unsaved document's diagnostics go to its own URI.
+#[test]
+fn class_values_unsaved_documents_and_bad_messages() {
+    const SRC: &str = r#"interface Named {
+    fun name(): String
+}
+
+class Counter(var n: i32 = 0) : Named {
+    fun inc() {
+        n += 1
+    }
+
+    override fun name() = "counter"
+}
+
+class Other(v: i32) {
+    fun unrelated() {}
+}
+
+fun main() {
+    var c = Counter()
+    c.inc()
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("oxie-lsp-values-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file: PathBuf = dir.join("values.oxi");
+    std::fs::write(&file, SRC).unwrap();
+    let uri = file_uri(&oxie_compiler::compile::canonicalize(&file).unwrap());
+
+    let mut c = Client::start();
+    let _ = c.request("initialize", json!({"rootUri": file_uri(&dir), "capabilities": {}}));
+    c.notify("initialized", json!({}));
+    // a broken message doesn't stop the server
+    write!(c.stdin, "Content-Length: 9\r\n\r\n{{not json").unwrap();
+    c.stdin.flush().unwrap();
+    c.notify("textDocument/didOpen", json!({"textDocument": {"uri": uri, "languageId": "oxie", "version": 1, "text": SRC}}));
+    let diags = c.wait_diagnostics(&uri);
+    assert_eq!(diags.as_array().unwrap().len(), 0, "{diags}");
+
+    let comp = c.request("textDocument/completion", json!({"textDocument": {"uri": uri}, "position": pos(SRC, "c.inc()", 2)}));
+    let labels: Vec<String> = comp["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect();
+    assert!(labels.contains(&"inc".to_string()) && labels.contains(&"n".to_string()) && labels.contains(&"name".to_string()), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "unrelated" || l == "iter" || l == "push"), "{labels:?}");
+
+    let h = c.request("textDocument/hover", json!({"textDocument": {"uri": uri}, "position": pos(SRC, "c.inc()", 0)}));
+    let text = h["contents"]["value"].as_str().unwrap();
+    assert!(text.contains("c: Counter"), "{text}");
+
+    let untitled = "untitled:Untitled-1";
+    c.notify("textDocument/didOpen", json!({"textDocument": {"uri": untitled, "languageId": "oxie", "version": 1, "text": "fun main() {\n    val x = (1 +\n}\n"}}));
+    let diags = c.wait_diagnostics(untitled);
+    assert!(!diags.as_array().unwrap().is_empty(), "{diags}");
+
+    let _ = c.request("shutdown", Value::Null);
+    c.notify("exit", Value::Null);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file opened through a symlinked directory (on macOS, any file under /tmp) keeps the editor's
 /// URI in diagnostics and locations.
 #[cfg(unix)]

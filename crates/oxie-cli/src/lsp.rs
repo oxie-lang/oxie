@@ -1100,10 +1100,15 @@ fn completion(server: &Server, params: &Value) -> Result<Value, String> {
             symbols::locals_at(&f.ast, off as u32).into_iter().rev().find(|l| l.name == r).and_then(|l| l.ty).and_then(|t| type_owner(&t))
         };
         let statik = r.chars().next().is_some_and(|c| c.is_uppercase());
+        // a class's value also has the methods of its interfaces
+        let interfaces: Vec<String> = match &owner {
+            Some(o) if !statik => a.files.iter().flat_map(|fd| type_decls(&fd.ast.items)).filter(|t| t.name == *o).flat_map(|t| t.supertypes.iter().filter_map(|s| s.last_name().map(str::to_string))).collect(),
+            _ => Vec::new(),
+        };
         for fd in &a.files {
             for s in symbols::flatten(&fd.symbols) {
                 let Some(c) = &s.container else { continue };
-                if owner.as_deref().is_none_or(|o| o == c) {
+                if owner.as_deref().is_none_or(|o| o == c) || interfaces.contains(c) {
                     let is_static = s.detail.starts_with("static ") || s.kind == SymKind::Variant || (s.kind == SymKind::Method && method_is_static(&a.krate, c, &s.name));
                     if owner.is_some() && statik != is_static && s.kind != SymKind::Const {
                         continue;
@@ -1113,7 +1118,9 @@ fn completion(server: &Server, params: &Value) -> Result<Value, String> {
                 }
             }
         }
-        if owner.is_none() || !a.krate.classes.contains_key(owner.as_deref().unwrap_or("")) {
+        // the methods of std types only for values of other types than the project's own
+        let own = owner.as_deref().is_some_and(|o| a.krate.classes.contains_key(o) || a.krate.enums.contains_key(o));
+        if !own {
             for m in COMMON_METHODS {
                 add(&mut items, m, 2, "method", "", None, "5");
             }
@@ -1159,6 +1166,19 @@ fn completion(server: &Server, params: &Value) -> Result<Value, String> {
         add(&mut items, t, 7, "std", "", None, "6");
     }
     Ok(json!({"isIncomplete": false, "items": items}))
+}
+
+/// The classes and enums declared in `items`, also inside modules.
+fn type_decls(items: &[oxie_compiler::ast::Item]) -> Vec<&oxie_compiler::ast::TypeDecl> {
+    use oxie_compiler::ast::ItemKind;
+    items
+        .iter()
+        .flat_map(|it| match &it.kind {
+            ItemKind::Type(t) => vec![t],
+            ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => type_decls(items),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 fn method_is_static(k: &Crate, owner: &str, name: &str) -> bool {

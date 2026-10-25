@@ -528,6 +528,33 @@ fn push_pat(p: &Pat, ty: Option<Type>, offset: u32, out: &mut Vec<Local>) {
     }
 }
 
+/// The type of a `val` without one, when its value shows it: a literal (an integer with a
+/// suffix, since rustc infers the others from their uses), a template, or a call of a class
+/// (`Counter(0)`), of its static function (`Counter.new()`) or of an enum's case
+/// (`Shape.Circle(1.0)`).
+pub fn init_type(e: &Expr) -> Option<Type> {
+    let path = |segs: &[String]| Type::Path { global: false, segs: segs.iter().map(PathSeg::plain).collect(), span: Span::default() };
+    let upper = |s: &String| s.starts_with(|c: char| c.is_uppercase());
+    match &e.kind {
+        ExprKind::Int(s) => ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"].into_iter().find(|t| s.ends_with(t)).map(Type::simple),
+        ExprKind::Float(s) => Some(Type::simple(if s.ends_with("f32") { "f32" } else { "f64" })),
+        ExprKind::Bool(_) => Some(Type::simple("bool")),
+        ExprKind::Char(_) => Some(Type::simple("char")),
+        ExprKind::Template(_) => Some(Type::simple("String")),
+        ExprKind::Paren(x) => init_type(x),
+        ExprKind::Call { callee, .. } => match &callee.kind {
+            ExprKind::Path { segs, .. } if segs.len() >= 2 && upper(&segs[segs.len() - 2]) => Some(path(&segs[..segs.len() - 1])),
+            ExprKind::Path { segs, .. } if segs.last().is_some_and(upper) => Some(path(segs)),
+            _ => None,
+        },
+        ExprKind::MethodCall { recv, name, .. } if name == "new" => match &recv.kind {
+            ExprKind::Path { segs, .. } if segs.last().is_some_and(upper) => Some(path(segs)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn collect_block(b: &Block, offset: u32, out: &mut Vec<Local>) {
     if b.span.start > offset {
         return;
@@ -538,7 +565,7 @@ fn collect_block(b: &Block, offset: u32, out: &mut Vec<Local>) {
                 if let Some(e) = init {
                     collect_expr(e, offset, out);
                 }
-                push_pat(pat, ty.clone(), offset, out);
+                push_pat(pat, ty.clone().or_else(|| init.as_ref().and_then(init_type)), offset, out);
             }
             Stmt::Expr { expr, .. } => collect_expr(expr, offset, out),
             Stmt::Attributed { stmt, .. } => collect_block(&Block { stmts: vec![(**stmt).clone()], span: b.span }, offset, out),
