@@ -28,8 +28,9 @@ COMMANDS:
                            Build and run the project, or a single .oxi script
     build [--release]      Build the project
     check                  Type-check the project without producing binaries
-    test [file.oxi] [filter]
-                           Run the `test \"...\" { }` blocks of the project, or of a script
+    test [file.oxi] [name] [--release] [-- test options]
+                           Run the `test \"...\" { }` blocks of the project, or of a script;
+                           `name` picks the tests whose description contains it
     fmt [--check] [paths]  Format .oxi files
     emit <file.oxi> [--annotate]
                            Print the Rust code generated for a file; `--annotate` marks
@@ -43,7 +44,8 @@ COMMANDS:
     clean                  Remove build artifacts
     version                Print version
 
-Any extra arguments after `--` are passed to the program (run) or cargo (build/check/test).
+Arguments after `--` are passed to the program (run), to cargo (build/check), or to the test
+runner (test, such as `--nocapture`). `-r` is short for `--release`.
 `oxie <command> --help` describes one command.";
 
 /// `oxie <command> --help`: the command's entry in `HELP`.
@@ -103,7 +105,7 @@ fn main() -> ExitCode {
             lsp::run();
             Ok(ExitCode::SUCCESS)
         }
-        "clean" => cmd_clean(),
+        "clean" => cmd_clean(rest),
         "version" | "--version" | "-V" => {
             println!("oxie {}", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)
@@ -137,21 +139,114 @@ fn find_project() -> Result<Project, String> {
     Project::find(&cwd()).ok_or_else(|| "no Cargo.toml found (run `oxie new <name>` to create a project, or `oxie run file.oxi` for a script)".to_string())
 }
 
-fn split_dashdash(args: &[String]) -> (Vec<String>, Vec<String>) {
-    match args.iter().position(|a| a == "--") {
-        Some(i) => (args[..i].to_vec(), args[i + 1..].to_vec()),
-        None => (args.to_vec(), Vec::new()),
+/// The arguments of `oxie <command>`: the flags given (by their first spelling), the other
+/// arguments, and those after `--`.
+struct Args {
+    flags: Vec<&'static str>,
+    positional: Vec<String>,
+    rest: Vec<String>,
+}
+
+impl Args {
+    fn has(&self, flag: &str) -> bool {
+        self.flags.contains(&flag)
     }
 }
 
+/// Splits the arguments of `oxie <cmd>`. `known` lists its flags, each with its other spellings
+/// (`&["--release", "-r"]`); any other argument starting with `-` before `--` is an error that
+/// names it, so a misspelled flag (`--relase`) never runs something else.
+fn parse_args(cmd: &str, args: &[String], known: &[&[&'static str]]) -> Result<Args, String> {
+    let (before, rest) = match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], args[i + 1..].to_vec()),
+        None => (args, Vec::new()),
+    };
+    let mut parsed = Args { flags: Vec::new(), positional: Vec::new(), rest };
+    for a in before {
+        if !a.starts_with('-') || a == "-" {
+            parsed.positional.push(a.clone());
+            continue;
+        }
+        match known.iter().find(|spellings| spellings.contains(&a.as_str())) {
+            Some(spellings) => parsed.flags.push(spellings[0]),
+            None => {
+                let close = known.iter().flat_map(|s| s.iter()).filter(|k| k.starts_with("--")).find(|k| edit_distance(k, a) <= 2 || (a.len() > 3 && k.starts_with(a.as_str())));
+                let hint = match (close, known) {
+                    (Some(k), _) => format!("; did you mean `{}`?", k),
+                    (None, []) => format!("; `oxie {}` takes no options", cmd),
+                    (None, [only]) => format!("; its only option is `{}`", only[0]),
+                    (None, _) => format!("; its options are {}", known.iter().map(|s| format!("`{}`", s[0])).collect::<Vec<_>>().join(", ")),
+                };
+                return Err(format!("unknown option `{}` for `oxie {}`{}", a, cmd, hint));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+/// The number of single-character edits between two words.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// An error for arguments a command doesn't take.
+fn unexpected(cmd: &str, extra: &[String]) -> Result<(), String> {
+    match extra.first() {
+        None => Ok(()),
+        Some(a) => Err(format!("unexpected argument `{}` for `oxie {}` (see `oxie {} --help`)", a, cmd, cmd)),
+    }
+}
+
+/// Checks that a new package can be called `name`, as cargo requires.
+fn check_package_name(name: &str) -> Result<(), String> {
+    const KEYWORDS: &[&str] = &[
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do", "final", "gen", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+    ];
+    const LIBRARIES: &[&str] = &["std", "core", "alloc", "proc_macro", "proc-macro", "test"];
+    let why = if name.is_empty() {
+        "it is empty".to_string()
+    } else if let Some(c) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-')) {
+        format!("it contains `{}` (use letters, digits, `_` and `-`)", c)
+    } else if name.starts_with(|c: char| c.is_ascii_digit()) {
+        "it starts with a digit".to_string()
+    } else if name.starts_with('-') {
+        "it starts with `-`".to_string()
+    } else if KEYWORDS.contains(&name) {
+        "it is a Rust keyword".to_string()
+    } else if LIBRARIES.contains(&name) {
+        "it is the name of a Rust library".to_string()
+    } else {
+        return Ok(());
+    };
+    Err(format!("`{}` can't be the name of a package: {}", name, why))
+}
+
 fn cmd_new(args: &[String]) -> R {
-    let lib = args.iter().any(|a| a == "--lib");
-    let name = args.iter().find(|a| !a.starts_with("--")).ok_or("usage: oxie new <name> [--lib]")?;
+    let a = parse_args("new", args, &[&["--lib"]])?;
+    let lib = a.has("--lib");
+    let (name, extra) = a.positional.split_first().ok_or("usage: oxie new <name> [--lib]")?;
+    unexpected("new", extra)?;
+    // `.`, `..` and `/` name no new directory
+    let file_name = Path::new(name).file_name().ok_or_else(|| {
+        format!("`oxie new {}` needs the name of a new directory; to make an existing directory a project, run `oxie init` in it", name)
+    })?;
     let dir = cwd().join(name);
     if dir.join("Cargo.toml").exists() {
         return Err(format!("{} already contains a Cargo.toml", dir.display()));
     }
-    let pkg = Path::new(name).file_name().unwrap().to_string_lossy().replace(' ', "_");
+    let pkg = file_name.to_string_lossy().replace(' ', "_");
+    check_package_name(&pkg)?;
     project::create(&dir, &pkg, lib).map_err(|e| e.to_string())?;
     println!("Created {} `{}`", if lib { "library" } else { "program" }, pkg);
     println!("\n    cd {}\n    oxie {}\n", name, if lib { "test" } else { "run" });
@@ -159,7 +254,9 @@ fn cmd_new(args: &[String]) -> R {
 }
 
 fn cmd_init(args: &[String]) -> R {
-    let lib = args.iter().any(|a| a == "--lib");
+    let a = parse_args("init", args, &[&["--lib"]])?;
+    unexpected("init", &a.positional)?;
+    let lib = a.has("--lib");
     let dir = cwd();
     let pkg = dir.file_name().map(|n| n.to_string_lossy().replace(' ', "_")).unwrap_or_else(|| "app".into());
     if dir.join("Cargo.toml").exists() {
@@ -178,6 +275,7 @@ fn cmd_init(args: &[String]) -> R {
         println!("Added Oxie to the existing crate. Write modules as src/<name>.oxi and add this to src/main.rs or src/lib.rs:\n\n    include!(concat!(env!(\"OUT_DIR\"), \"/oxie/mod.rs\"));\n");
         return Ok(ExitCode::SUCCESS);
     }
+    check_package_name(&pkg).map_err(|e| format!("{} (the package is named after the directory)", e))?;
     project::create(&dir, &pkg, lib).map_err(|e| e.to_string())?;
     println!("Initialized Oxie project `{}`", pkg);
     Ok(ExitCode::SUCCESS)
@@ -207,48 +305,84 @@ fn precheck(p: &Project) -> Result<bool, String> {
     Ok(report(&out, &p.root))
 }
 
+/// The project to build for `oxie run`/`oxie test` with an optional `.oxi` file: the file's
+/// project when it is in a project's `src/`, else the hidden project of the script (also
+/// returned).
+fn project_of(file: Option<&str>) -> Result<(Project, Option<PathBuf>), String> {
+    let Some(f) = file else { return Ok((find_project()?, None)) };
+    let path = PathBuf::from(f);
+    if !path.is_file() {
+        return Err(format!("{} not found", f));
+    }
+    let abs = oxie_compiler::compile::canonicalize(&path).map_err(|e| format!("{}: {}", f, e))?;
+    match abs.parent().and_then(Project::find) {
+        Some(p) if abs.starts_with(p.src_dir()) && p.manifest.contains("oxie-build") => Ok((p, None)),
+        _ => Ok((project::script_project(&abs).map_err(|e| format!("{}: {}", f, e))?, Some(abs))),
+    }
+}
+
+/// Checks a script with the Oxie compiler before cargo builds it, like `precheck`. A script runs
+/// its `fun main`, and `oxie test` may test one that only has `test` blocks.
+fn precheck_script(proj: &Project, abs: &Path, testing: bool) -> Result<bool, String> {
+    let src = std::fs::read_to_string(abs).map_err(|e| format!("{}: {}", abs.display(), e))?;
+    let inputs = project::script_inputs(abs).map_err(|e| e.to_string())?;
+    let out = oxie_compiler::compile(inputs, &project::script_options(&proj.name, &project::script_deps(&src)));
+    if !report(&out, &cwd()) {
+        return Ok(false);
+    }
+    let (file, _) = oxie_compiler::parser::parse_file(&src);
+    let has = |f: &dyn Fn(&oxie_compiler::ast::ItemKind) -> bool| file.items.iter().any(|i| f(&i.kind));
+    let has_main = has(&|k| matches!(k, oxie_compiler::ast::ItemKind::Fun(f) if f.name == "main" && f.receiver.is_none()));
+    let has_tests = has(&|k| matches!(k, oxie_compiler::ast::ItemKind::Test(_)));
+    if has_main || (testing && has_tests) {
+        return Ok(true);
+    }
+    let help = if has_tests {
+        format!("add `fun main() {{ ... }}`, which runs when the script runs; `oxie test {}` runs its tests", abs.file_name().unwrap_or_default().to_string_lossy())
+    } else if testing {
+        "add `test \"...\" { ... }` blocks for `oxie test`, or `fun main() { ... }` to run the script".to_string()
+    } else {
+        "add `fun main() { ... }`, which runs when the script runs".to_string()
+    };
+    let what = if testing { "neither `fun main` nor `test` blocks" } else { "no `fun main`" };
+    let d = oxie_compiler::Diag::error(oxie_compiler::diag::Span::new(0, 0), format!("the script has {}", what)).with_help(help);
+    let shown = abs.strip_prefix(cwd()).unwrap_or(abs).display().to_string();
+    eprintln!("{}", diag::render(&d, &shown, &src, cargo::color()));
+    Ok(false)
+}
+
 fn cmd_build(args: &[String], sub: &str) -> R {
-    let (opts, extra) = split_dashdash(args);
+    let a = parse_args(sub, args, &[&["--release", "-r"]])?;
+    unexpected(sub, &a.positional)?;
     let p = find_project()?;
     if !precheck(&p)? {
         return Ok(ExitCode::FAILURE);
     }
     let mut cargs = vec![sub.to_string()];
-    if opts.iter().any(|a| a == "--release" || a == "-r") {
+    if a.has("--release") {
         cargs.push("--release".into());
     }
-    cargs.extend(extra);
+    cargs.extend(a.rest);
     let r = cargo::cargo_json(&p.root, &cargs, false).map_err(|e| e.to_string())?;
     Ok(if r.success { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 fn cmd_run(args: &[String]) -> R {
-    let (opts, prog_args) = split_dashdash(args);
-    let release = opts.iter().any(|a| a == "--release" || a == "-r");
-    let file = opts.iter().find(|a| a.ends_with(".oxi")).cloned();
-    let (proj, script) = match &file {
-        Some(f) => {
-            let path = PathBuf::from(f);
-            if !path.exists() {
-                return Err(format!("{} not found", f));
-            }
-            let abs = oxie_compiler::compile::canonicalize(&path).map_err(|e| e.to_string())?;
-            // a file inside a project's src/ runs that project
-            match Project::find(abs.parent().unwrap()) {
-                Some(p) if abs.starts_with(p.src_dir()) && p.manifest.contains("oxie-build") => (p, None),
-                _ => (project::script_project(&abs).map_err(|e| e.to_string())?, Some(abs)),
-            }
-        }
-        None => (find_project()?, None),
+    let a = parse_args("run", args, &[&["--release", "-r"]])?;
+    let release = a.has("--release");
+    let prog_args = a.rest;
+    let (file, extra) = match a.positional.split_first() {
+        Some((f, extra)) if f.ends_with(".oxi") => (Some(f.clone()), extra),
+        _ => (None, &a.positional[..]),
     };
+    if let Some(arg) = extra.first() {
+        let run = file.as_ref().map_or("oxie run".to_string(), |f| format!("oxie run {}", f));
+        return Err(format!("unexpected argument `{}`: arguments for the program go after `--`: `{} -- {}`", arg, run, extra.join(" ")));
+    }
+    let (proj, script) = project_of(file.as_deref())?;
     // Oxie diagnostics first
     let ok = match &script {
-        Some(abs) => {
-            let src = std::fs::read_to_string(abs).map_err(|e| e.to_string())?;
-            let inputs = project::script_inputs(abs).map_err(|e| e.to_string())?;
-            let out = oxie_compiler::compile(inputs, &project::script_options(&proj.name, &project::script_deps(&src)));
-            report(&out, &cwd())
-        }
+        Some(abs) => precheck_script(&proj, abs, false)?,
         None => precheck(&proj)?,
     };
     if !ok {
@@ -286,41 +420,39 @@ fn cmd_run(args: &[String]) -> R {
 }
 
 fn cmd_test(args: &[String]) -> R {
-    let (opts, extra) = split_dashdash(args);
-    let file = opts.iter().find(|a| a.ends_with(".oxi")).cloned();
+    let a = parse_args("test", args, &[&["--release", "-r"]])?;
+    let file = a.positional.iter().find(|a| a.ends_with(".oxi")).cloned();
     // `test "adds numbers"` becomes the Rust test `test_adds_numbers`; accept the readable name too
-    let filter: Vec<String> = opts.iter().filter(|a| !a.starts_with('-') && !a.ends_with(".oxi")).map(|f| test_filter(f)).collect();
-    let (p, script) = match &file {
-        Some(f) => {
-            let abs = oxie_compiler::compile::canonicalize(f).map_err(|e| e.to_string())?;
-            match Project::find(abs.parent().unwrap()) {
-                Some(p) if abs.starts_with(p.src_dir()) => (p, false),
-                _ => (project::script_project(&abs).map_err(|e| e.to_string())?, true),
-            }
-        }
-        None => (find_project()?, false),
+    let filter: Vec<String> = a.positional.iter().filter(|a| !a.ends_with(".oxi")).map(|f| test_filter(f)).collect();
+    let (p, script) = project_of(file.as_deref())?;
+    let ok = match &script {
+        Some(abs) => precheck_script(&p, abs, true)?,
+        None => precheck(&p)?,
     };
-    if script {
-        std::env::set_var("CARGO_TARGET_DIR", project::cache_dir().join("target"));
-    } else if !precheck(&p)? {
+    if !ok {
         return Ok(ExitCode::FAILURE);
     }
+    if script.is_some() {
+        std::env::set_var("CARGO_TARGET_DIR", project::cache_dir().join("target"));
+    }
     let mut cargs = vec!["test".to_string(), "--no-run".to_string()];
-    if opts.iter().any(|a| a == "--release") {
+    if a.has("--release") {
         cargs.push("--release".into());
     }
     let r = cargo::cargo_json(&p.root, &cargs, true).map_err(|e| e.to_string())?;
     if !r.success {
         return Ok(ExitCode::FAILURE);
     }
+    // the warnings of the build are shown; cargo shows them again when it runs the tests, as
+    // JSON lines on stdout with this format, which are dropped
     let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    cmd.arg("test").arg("--quiet").current_dir(&p.root);
-    if opts.iter().any(|a| a == "--release") {
+    cmd.args(["test", "--quiet", "--message-format=json"]).current_dir(&p.root);
+    if a.has("--release") {
         cmd.arg("--release");
     }
     // the output goes through the location rewriter (failed tests print panics on stdout), so
     // ask for the colors a terminal would get
-    let mut harness: Vec<String> = filter.into_iter().chain(extra).collect();
+    let mut harness: Vec<String> = filter.into_iter().chain(a.rest).collect();
     if cargo::color() {
         cmd.arg("--color=always");
     }
@@ -334,8 +466,9 @@ fn cmd_test(args: &[String]) -> R {
     let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let forwarders = [
-        std::thread::spawn(move || locations::forward(out, std::io::stdout())),
-        std::thread::spawn(move || locations::forward(err, std::io::stderr())),
+        std::thread::spawn(move || locations::forward(locations::EditLines::new(out, locations::is_cargo_message, |_| None), std::io::stdout())),
+        // cargo's "to rerun pass `--bin <name>`" names a cargo target, which `oxie test` doesn't take
+        std::thread::spawn(move || locations::forward(locations::EditLines::new(err, |_| true, locations::without_rerun_hint), std::io::stderr())),
     ];
     let status = child.wait().map_err(|e| e.to_string())?;
     for f in forwarders {
@@ -344,15 +477,18 @@ fn cmd_test(args: &[String]) -> R {
     Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
+/// The libtest filter for a test named in `oxie test`: the description of a `test "..."` block,
+/// or a part of it, as the compiler names its function (lowercase, `_` between words). A module
+/// path (`math::adds`) keeps its `::`.
 fn test_filter(name: &str) -> String {
-    if name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':') {
-        return name.to_string();
-    }
-    let mut s: String = name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
-    while s.contains("__") {
-        s = s.replace("__", "_");
-    }
-    s.trim_matches('_').to_string()
+    let slug = |part: &str| {
+        let mut s: String = part.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
+        while s.contains("__") {
+            s = s.replace("__", "_");
+        }
+        s.trim_matches('_').to_string()
+    };
+    name.split("::").map(slug).collect::<Vec<_>>().join("::")
 }
 
 fn collect_oxie(path: &Path, out: &mut Vec<PathBuf>) {
@@ -373,8 +509,13 @@ fn collect_oxie(path: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn cmd_fmt(args: &[String]) -> R {
-    let check = args.iter().any(|a| a == "--check");
-    let paths: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
+    let a = parse_args("fmt", args, &[&["--check"]])?;
+    unexpected("fmt", &a.rest)?;
+    let check = a.has("--check");
+    let paths: Vec<PathBuf> = a.positional.iter().map(PathBuf::from).collect();
+    if let Some(missing) = paths.iter().find(|p| !p.exists()) {
+        return Err(format!("{} not found", missing.display()));
+    }
     let mut files = Vec::new();
     if paths.is_empty() {
         let root = Project::find(&cwd()).map(|p| p.src_dir()).unwrap_or_else(cwd);
@@ -408,7 +549,11 @@ fn cmd_fmt(args: &[String]) -> R {
 }
 
 fn cmd_emit(args: &[String]) -> R {
-    let file = args.iter().find(|a| !a.starts_with("--")).ok_or("usage: oxie emit <file.oxi> [--annotate]")?;
+    let a = parse_args("emit", args, &[&["--annotate"]])?;
+    let (file, extra) = a.positional.split_first().ok_or("usage: oxie emit <file.oxi> [--annotate]")?;
+    unexpected("emit", extra)?;
+    unexpected("emit", &a.rest)?;
+    let annotate = a.has("--annotate");
     let abs = oxie_compiler::compile::canonicalize(file).map_err(|e| format!("{}: {}", file, e))?;
     let project = Project::find(abs.parent().unwrap()).filter(|p| abs.starts_with(p.src_dir()));
     let (out, root) = match &project {
@@ -425,7 +570,7 @@ fn cmd_emit(args: &[String]) -> R {
     report(&out, &root);
     let idx = out.diags.iter().position(|(p, _, _)| *p == abs).unwrap_or(0);
     if let Some(f) = out.files.get(idx) {
-        if args.iter().any(|a| a == "--annotate") {
+        if annotate {
             print!("{}", annotated(f));
         } else {
             print!("{}", f.text);
@@ -465,7 +610,9 @@ fn annotated(f: &oxie_compiler::compile::GenFile) -> String {
     out
 }
 
-fn cmd_clean() -> R {
+fn cmd_clean(args: &[String]) -> R {
+    let a = parse_args("clean", args, &[])?;
+    unexpected("clean", &a.positional)?;
     let p = find_project()?;
     let status = Command::new("cargo").arg("clean").current_dir(&p.root).status().map_err(|e| e.to_string())?;
     Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })

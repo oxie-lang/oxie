@@ -133,7 +133,16 @@ impl Mapper {
         let cs = span.get("column_start")?.as_u64()? as u32 - 1;
         let le = span.get("line_end")?.as_u64()? as u32 - 1;
         let ce = span.get("column_end")?.as_u64()? as u32 - 1;
-        if let Some(map) = self.map_for(&path) {
+        if self.map_for(&path).is_some() {
+            // exactly where the generated text matches the source after the nearest mark (a
+            // field after `p.`, a method name in a chain), else at the mark
+            let found = self.map_aligned(&path, ls, cs, true).or_else(|| self.map_raw(&path, ls, cs)).or_else(|| self.map_word(&path, ls, cs));
+            if let Some((source, sl, sc)) = found {
+                let end = (le == ls).then(|| self.map_aligned(&path, le, ce, true)).flatten().filter(|(_, el, ec)| *el == sl && *ec > sc);
+                let (el, ec) = end.map_or((sl, sc + ce.saturating_sub(cs).max(1)), |(_, el, ec)| (el, ec));
+                return Some((source, sl, sc, el, ec, true));
+            }
+            let map = self.map_for(&path)?;
             let source = map.source.clone();
             let (sl, sc) = map.lookup(ls, cs)?;
             let (el, ec) = if le == ls {
@@ -158,6 +167,13 @@ impl Mapper {
     /// generated text between the nearest source-map mark and the position differs from the
     /// source text (so the position has no exact counterpart).
     fn map_exact(&mut self, gen: &Path, line: u32, col: u32) -> Option<(PathBuf, u32, u32)> {
+        self.map_aligned(gen, line, col, false)
+    }
+
+    /// `map_exact`, and with `loose` also across the spellings that differ between the
+    /// generated Rust and the source in the same order (`let`/`val`, `use`/`import`, `::`/`.`),
+    /// for placing a diagnostic (not for applying an edit).
+    fn map_aligned(&mut self, gen: &Path, line: u32, col: u32, loose: bool) -> Option<(PathBuf, u32, u32)> {
         let map = self.map_for(gen)?;
         let source = map.source.clone();
         let &(gl, gc, sl, sc) = map.entries.iter().take_while(|e| (e.0, e.1) <= (line, col)).last()?;
@@ -167,11 +183,77 @@ impl Mapper {
         let gen_line: String = self.text_of(gen).lines().nth(line as usize)?.to_string();
         let piece: String = gen_line.chars().skip(gc as usize).take((col - gc) as usize).collect();
         let src_line: String = self.text_of(&source).lines().nth(sl as usize)?.to_string();
-        let src_piece: String = src_line.chars().skip(sc as usize).take(piece.chars().count()).collect();
-        if piece != src_piece {
+        let src_rest: String = src_line.chars().skip(sc as usize).collect();
+        let n = if loose { align(&piece, &src_rest)? } else { src_rest.starts_with(&piece).then(|| piece.chars().count())? };
+        Some((source, sl, sc + n as u32))
+    }
+
+    /// Maps a generated position whose text starts with a word (`collect` in `.collect()`, a type
+    /// name) that the nearest mark doesn't reach exactly, as on another line of a multi-line
+    /// chain or in a `catch (e: Exception)` the generated code repeats elsewhere: to the same
+    /// occurrence of the word in the source after the mark, before the source of the next mark.
+    fn map_word(&mut self, gen: &Path, line: u32, col: u32) -> Option<(PathBuf, u32, u32)> {
+        let map = self.map_for(gen)?;
+        let source = map.source.clone();
+        let at = map.entries.iter().take_while(|e| (e.0, e.1) <= (line, col)).count().checked_sub(1)?;
+        let (gl, gc, sl, sc) = map.entries[at];
+        let bound = map.entries.iter().map(|e| (e.2, e.3)).filter(|&p| p > (sl, sc)).min().unwrap_or((u32::MAX, 0));
+        let gen_text = self.text_of(gen).to_string();
+        let gen_lines: Vec<&str> = gen_text.lines().collect();
+        let word: String = gen_lines.get(line as usize)?.chars().skip(col as usize).take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if word.is_empty() || word.starts_with("__oxie") || word.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             return None;
         }
-        Some((source, sl, sc + piece.chars().count() as u32))
+        // occurrences of the word in the generated text from the mark to the position
+        let mut before = 0;
+        for l in gl..=line {
+            let text: String = gen_lines.get(l as usize)?.chars().enumerate().filter(|(i, _)| (l > gl || *i as u32 >= gc) && (l < line || (*i as u32) < col)).map(|(_, c)| c).collect();
+            before += word_positions(&text, &word).len();
+        }
+        let src_text = self.text_of(&source).to_string();
+        let mut found = Vec::new();
+        for (l, text) in src_text.lines().enumerate().skip(sl as usize) {
+            for c in word_positions(text, &word) {
+                let p = (l as u32, c as u32);
+                if p >= (sl, sc) && p < bound {
+                    found.push(p);
+                }
+            }
+            if (l as u32) >= bound.0 {
+                break;
+            }
+        }
+        let &(fl, fc) = found.get(before)?;
+        Some((source, fl, fc))
+    }
+
+    /// Maps a zero-based generated position inside the Rust of a `rust { }` block, which is
+    /// copied line by line (re-indented), to the same text in the block. The block has one mark,
+    /// at `rust`, so the nearest mark alone would put every error on its first line.
+    fn map_raw(&mut self, gen: &Path, line: u32, col: u32) -> Option<(PathBuf, u32, u32)> {
+        let map = self.map_for(gen)?;
+        let source = map.source.clone();
+        let &(gl, _, sl, sc) = map.entries.iter().take_while(|e| (e.0, e.1) <= (line, col)).last()?;
+        let gen_line = self.text_of(gen).lines().nth(line as usize)?.to_string();
+        let src = self.text_of(&source).to_string();
+        let src_lines: Vec<&str> = src.lines().collect();
+        let head = src_lines.get(sl as usize)?;
+        let head_start = head.char_indices().nth(sc as usize).map(|(b, _)| b)?;
+        let after_rust = head[head_start..].strip_prefix("rust")?.trim_start().strip_prefix('{')?;
+        // the block's text starts after `{`, or on the first line that isn't blank
+        let (first, from) = if after_rust.trim().is_empty() {
+            let first = (sl as usize + 1..src_lines.len()).find(|&i| !src_lines[i].trim().is_empty())?;
+            (first, 0)
+        } else {
+            (sl as usize, head.len() - after_rust.len())
+        };
+        let src_line = *src_lines.get(first + (line - gl) as usize)?;
+        let text = gen_line.trim();
+        let indent = gen_line.chars().count() - gen_line.trim_start().chars().count();
+        let from = if line == gl { from } else { 0 };
+        let at = from + src_line.get(from..)?.find(text).filter(|_| !text.is_empty())?;
+        let col = src_line[..at].chars().count() as u32 + col.saturating_sub(indent as u32);
+        Some((source, (first + (line - gl) as usize) as u32, col))
     }
 
     /// Maps a 1-based `line:col` in a generated file to the 1-based source position, exactly
@@ -179,7 +261,7 @@ impl Mapper {
     /// None for files without a source map.
     pub fn map_location(&mut self, gen: &Path, line: u32, col: u32) -> Option<(PathBuf, u32, u32)> {
         let (l, c) = (line.checked_sub(1)?, col.checked_sub(1)?);
-        if let Some((f, sl, sc)) = self.map_exact(gen, l, c) {
+        if let Some((f, sl, sc)) = self.map_exact(gen, l, c).or_else(|| self.map_raw(gen, l, c)) {
             return Some((f, sl + 1, sc + 1));
         }
         let map = self.map_for(gen)?;
@@ -386,6 +468,42 @@ impl Mapper {
     }
 }
 
+/// The character columns where `word` occurs as a whole word in `text`.
+fn word_positions(text: &str, word: &str) -> Vec<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let w: Vec<char> = word.chars().collect();
+    let is_word = |c: &char| c.is_alphanumeric() || *c == '_';
+    (0..chars.len().saturating_sub(w.len() - 1))
+        .filter(|&i| chars[i..i + w.len()] == w[..] && !(i > 0 && is_word(&chars[i - 1])) && !chars.get(i + w.len()).is_some_and(is_word))
+        .collect()
+}
+
+/// How many characters of `src` the generated text `gen` stands for, when they are the same
+/// apart from spellings Oxie translates in place: `let mut`/`var`, `let`/`val`, `use`/`import`
+/// and the `::` of paths written with `.`.
+fn align(gen: &str, src: &str) -> Option<usize> {
+    const SAME: &[(&str, &str)] = &[("let mut ", "var "), ("let ", "val "), ("let ", "var "), ("use ", "import "), ("::", ".")];
+    let (g, s): (Vec<char>, Vec<char>) = (gen.chars().collect(), src.chars().collect());
+    let (mut i, mut j) = (0, 0);
+    'outer: while i < g.len() {
+        if j < s.len() && g[i] == s[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        for (a, b) in SAME {
+            let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+            if g[i..].starts_with(&a) && s.get(j..).is_some_and(|r| r.starts_with(&b)) {
+                i += a.len();
+                j += b.len();
+                continue 'outer;
+            }
+        }
+        return None;
+    }
+    Some(j)
+}
+
 /// Does the source hold Rust that Oxie copies as it is: a `rust { }` block or a macro call
 /// (`name!(..)`)?
 fn has_verbatim_rust(src: &str) -> bool {
@@ -549,17 +667,15 @@ pub fn cargo_json(root: &Path, args: &[String], quiet: bool) -> std::io::Result<
         };
         match v.get("reason").and_then(|r| r.as_str()) {
             Some("compiler-message") => {
-                // only diagnostics for the user's package (not path dependencies like oxie-build)
-                let manifest = v.get("manifest_path").and_then(|m| m.as_str()).map(PathBuf::from);
-                if manifest.as_deref().is_some_and(|m| m.parent() != Some(root)) {
-                    continue;
-                }
                 let Some(msg) = v.get("message") else { continue };
                 let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("");
                 if level == "failure-note" {
                     continue;
                 }
-                let mapped = mapper.map_message(root, msg);
+                // the warnings of the user's package only (not of path dependencies like
+                // oxie-build), but errors of any package, since they stop the build
+                let Some(pkg_root) = package_root(&v, root, level) else { continue };
+                let mapped = mapper.map_message(&pkg_root, msg);
                 if mapped.as_ref().is_some_and(|d| d.from_oxie && !covered.cover(d)) {
                     continue;
                 }
@@ -617,6 +733,17 @@ pub fn cargo_json(root: &Path, args: &[String], quiet: bool) -> std::io::Result<
     Ok(result)
 }
 
+/// The directory of the package a cargo message is about, when it is shown: every message of the
+/// package at `root`, and the errors of other packages (a path dependency that doesn't compile),
+/// whose warnings aren't the user's to fix.
+fn package_root(v: &Value, root: &Path, level: &str) -> Option<PathBuf> {
+    let manifest = v.get("manifest_path").and_then(|m| m.as_str()).map(PathBuf::from);
+    match manifest.as_deref().and_then(Path::parent) {
+        Some(dir) if dir != root => (level == "error").then(|| dir.to_path_buf()),
+        _ => Some(root.to_path_buf()),
+    }
+}
+
 /// Is this cargo message rustc's `unused_mut` warning?
 fn is_unused_mut(v: &Value) -> bool {
     v.pointer("/message/code/code").and_then(|c| c.as_str()) == Some("unused_mut")
@@ -639,12 +766,10 @@ pub fn check_collect(root: &Path, target_dir: Option<&Path>) -> std::io::Result<
         if v.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
             continue;
         }
-        let manifest = v.get("manifest_path").and_then(|m| m.as_str()).map(PathBuf::from);
-        if manifest.as_deref().is_some_and(|m| m.parent() != Some(root)) {
-            continue;
-        }
         if let Some(msg) = v.get("message") {
-            if let Some(d) = mapper.map_message(root, msg) {
+            let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("");
+            let Some(pkg_root) = package_root(&v, root, level) else { continue };
+            if let Some(d) = mapper.map_message(&pkg_root, msg) {
                 let key = same_error(&d);
                 if covered.cover(&d) && seen.insert(key) {
                     diags.push(d);

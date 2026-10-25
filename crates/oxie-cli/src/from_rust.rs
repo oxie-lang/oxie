@@ -15,8 +15,9 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
                 output = Some(args.get(i + 1).ok_or(usage)?.clone());
                 i += 1;
             }
+            a if a.starts_with('-') && a != "-" => return Err(format!("unknown option `{}` for `oxie from-rust`; its option is `-o` (`--output`)", a)),
             a if input.is_none() => input = Some(a.to_string()),
-            _ => return Err(usage.into()),
+            a => return Err(format!("unexpected argument `{}`\n{}", a, usage)),
         }
         i += 1;
     }

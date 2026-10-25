@@ -147,7 +147,7 @@ with `oxie check`, run the program with `oxie run` and the tests with `oxie test
 ";
 
 const HELLO_LIB: &str = r#"/// Adds two numbers.
-fun add(a: i32, b: i32): i32 = a + b
+pub fun add(a: i32, b: i32): i32 = a + b
 
 test "add works" {
     assert_eq(add(2, 3), 5)

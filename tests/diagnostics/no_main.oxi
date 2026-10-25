@@ -1,0 +1,7 @@
+// a script runs its `fun main`
+// error: 1: the script has no `fun main`
+fun helper(): i32 = 1
+
+test "helper works" {
+    assert_eq(helper(), 1)
+}
