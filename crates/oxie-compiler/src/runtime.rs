@@ -328,10 +328,10 @@ pub trait ListOps<'a, T: 'a> {
     fn min_by_key<K: PartialOrd, F: FnMut(&'a T) -> K>(&'a self, f: F) -> Option<&'a T>;
     fn sorted(&self) -> Vec<T>
     where
-        T: Ord + Clone;
+        T: PartialOrd + Clone;
     fn sorted_descending(&self) -> Vec<T>
     where
-        T: Ord + Clone;
+        T: PartialOrd + Clone;
     fn sorted_by<K: PartialOrd, F: FnMut(&'a T) -> K>(&'a self, f: F) -> Vec<T>
     where
         T: Clone;
@@ -366,8 +366,13 @@ pub trait ListOps<'a, T: 'a> {
     fn is_not_empty(&self) -> bool;
 }
 
+/// Orders values that are only `PartialOrd` (`f64`) as Kotlin does: a value that isn't
+/// comparable even with itself (NaN) after all others. The same order as `Ord` for `Ord` types.
 fn by_partial<K: PartialOrd>(a: &K, b: &K) -> ::std::cmp::Ordering {
-    a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal)
+    match a.partial_cmp(b) {
+        Some(o) => o,
+        None => a.partial_cmp(a).is_none().cmp(&b.partial_cmp(b).is_none()),
+    }
 }
 
 impl<'a, T: 'a> ListOps<'a, T> for [T] {
@@ -467,19 +472,19 @@ impl<'a, T: 'a> ListOps<'a, T> for [T] {
     #[inline]
     fn sorted(&self) -> Vec<T>
     where
-        T: Ord + Clone,
+        T: PartialOrd + Clone,
     {
         let mut v = self.to_vec();
-        v.sort();
+        v.sort_by(by_partial);
         v
     }
     #[inline]
     fn sorted_descending(&self) -> Vec<T>
     where
-        T: Ord + Clone,
+        T: PartialOrd + Clone,
     {
         let mut v = self.to_vec();
-        v.sort_by(|a, b| b.cmp(a));
+        v.sort_by(|a, b| by_partial(b, a));
         v
     }
     #[inline]
