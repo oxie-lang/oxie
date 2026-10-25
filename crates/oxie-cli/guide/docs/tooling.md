@@ -67,7 +67,7 @@ it to the checkout it runs in.
 | `oxie build [--release]` | Build |
 | `oxie check` | Type-check without producing binaries (fast) |
 | `oxie test [file.oxi] [name] [--release]` | Run `test` blocks of the project, or of a script; `name` may be the test's description (`oxie test "adds numbers"`) or part of it |
-| `oxie fmt [--check] [paths]` | Format `.oxi` files (the project's `src/` by default) |
+| `oxie fmt [--check] [paths]` | Format `.oxi` files (the project's `src/` by default; outside a project, name the files or directories) |
 | `oxie emit file.oxi [--annotate]` | Print the Rust generated for a file; `--annotate` puts a `// file.oxi:line` comment above each statement and says why at each choice Oxie made (see [What Oxie decided](#what-oxie-decided)) |
 | `oxie from-rust file.rs [-o out.oxi]` | Translate Rust to Oxie (`-` reads stdin); see [Translating Rust](#translating-rust) |
 | `oxie from-rust dir -o out_dir` | Translate the `.rs` files under `dir` as one crate, into `.oxi` files at the same places under `out_dir` |
@@ -416,8 +416,9 @@ may be from an older version. Oxie gives them the rules of the version you use:
 `oxie fmt` re-indents (4 spaces, one level per open bracket and for continuation lines such as
 `.method()` chains), normalizes spaces around commas, colons and operators like `=`, `==`,
 `->`, removes trailing whitespace and repeated blank lines. It never changes strings or
-comments and leaves files with syntax errors untouched. `oxie fmt --check` exits with status 1
-if a file would change (useful in CI).
+comments, keeps the spaces before a trailing `//` comment so aligned comments stay aligned, and
+reports files with syntax errors and leaves them untouched (exit status 1). `oxie fmt --check`
+exits with status 1 if a file would change (useful in CI).
 
 ## Language server
 

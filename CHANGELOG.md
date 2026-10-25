@@ -17,6 +17,14 @@
   needed `*x`.
 * `if (val (k, v) = split(s))` and `while (val (a, b) = pairs.pop())` unwrap an optional pair,
   as `if (val v = opt)` unwraps an optional value.
+* `oxie fmt` no longer indents the line after a glob import (`import a::*`), lines up `else`
+  with its `if` in an expression-bodied function, and keeps `T: ?Sized`, `x @ 1..=9`,
+  `macro_rules! name`, `$x:expr`, `&{ .. }` and the spaces before trailing comments as written.
+  It formats files whose doc comments end in spaces, which it used to leave unchanged.
+* `oxie fmt` reports paths that don't exist, files that don't parse (with their errors) and
+  unknown options, and exits with status 1. Before, it said "0 file(s) already formatted" or
+  counted the file as formatted. Outside a project it needs paths, instead of formatting every
+  `.oxi` file below the current directory.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.
