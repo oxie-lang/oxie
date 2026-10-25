@@ -246,12 +246,14 @@ impl<'a> Lowerer<'a> {
                 if let Stmt::Expr { expr, .. } = s {
                     if let ExprKind::If { cond, else_: None, .. } = &expr.kind {
                         if let Cond::Expr(c) = &**cond {
-                            self.unused_after_check = self.null_check(c, BinOp::Eq).filter(|x| !visit::stmts_use(&stmts[i + 1..], x)).map(str::to_string);
+                            let mut checks = Vec::new();
+                            or_operands(c, &mut checks);
+                            self.unused_after_check = checks.iter().filter_map(|p| self.null_check(p, BinOp::Eq)).filter(|x| !visit::stmts_use(&stmts[i + 1..], x)).map(str::to_string).collect();
                         }
                     }
                 }
                 self.stmt(s);
-                self.unused_after_check = None;
+                self.unused_after_check.clear();
             }
         }
         self.local_funs.truncate(outer_funs);
@@ -1502,6 +1504,19 @@ impl<'a> Lowerer<'a> {
                 self.expr(x, P_POSTFIX);
                 self.e.w(if *op == BinOp::Eq { ".is_none()" } else { ".is_some()" });
             }
+            Binary(op @ (BinOp::Or | BinOp::And), l, r) if self.null_guard(*op, l, r).is_some() => {
+                let (x, ty, by_value) = self.null_guard(*op, l, r).unwrap();
+                self.e.w(&esc(&x));
+                if !by_value {
+                    self.e.w(".as_ref()");
+                }
+                self.e.w(&format!("{}|{}| ", if *op == BinOp::Or { ".map_or(true, " } else { ".is_some_and(" }, esc(&x)));
+                self.push_scope();
+                self.bind_name(&x, Some(ty));
+                self.expr(r, P_LOWEST);
+                self.pop_scope();
+                self.e.w(")");
+            }
             Binary(op, l, r) => {
                 if *op == BinOp::Add && self.is_string_concat(e) {
                     self.string_concat(e);
@@ -2321,6 +2336,33 @@ impl<'a> Lowerer<'a> {
         (Some(cond), typed)
     }
 
+    /// `x == null || r` (`op` `Or`) or `x != null && r` (`And`) on a local `T?` that `r` uses:
+    /// `x` is the value in `r` (`x.as_ref().map_or(true, |x| r)`). Returns `x`, its type in `r`,
+    /// and whether it is used by value (a `Copy` value).
+    fn null_guard(&self, op: BinOp, l: &Expr, r: &Expr) -> Option<(String, Type, bool)> {
+        let x = self.null_check(l, if op == BinOp::Or { BinOp::Eq } else { BinOp::Ne })?;
+        let mut names = Vec::new();
+        visit::idents_in(r, &mut names);
+        if !names.iter().any(|n| n == x) {
+            return None;
+        }
+        // `r` becomes a lambda's body: nothing in it may leave the function or a loop
+        let mut leaves = false;
+        visit::walk_expr(r, &mut |e| {
+            leaves |= matches!(e.kind, ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) | ExprKind::Try(_) | ExprKind::Throw(_) | ExprKind::Assign(..) | ExprKind::Lambda { .. });
+            !leaves
+        });
+        if leaves || self.is_throwing_call(r) || uses_as_optional(r, x) {
+            return None;
+        }
+        let body = Block { stmts: vec![Stmt::Expr { expr: r.clone(), semi: false }], span: r.span };
+        let inner = self.narrowable(x, &body)?;
+        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+        let by_value = crate::sema::is_copy_simple(&inner, &copy);
+        let ty = if by_value { inner } else { Type::Ref { lifetime: None, mutable: false, inner: Box::new(inner) } };
+        Some((x.to_string(), ty, by_value))
+    }
+
     /// `x == null` / `null == x` (or `!=`), for a variable `x`: its name.
     fn null_check<'e>(&self, e: &'e Expr, op: BinOp) -> Option<&'e str> {
         let ExprKind::Binary(o, l, r) = &strip_paren(e).kind else { return None };
@@ -2361,19 +2403,33 @@ impl<'a> Lowerer<'a> {
     fn narrowing_exit(&mut self, e: &Expr) -> bool {
         let ExprKind::If { cond, then, else_: None } = &e.kind else { return false };
         let Cond::Expr(c) = &**cond else { return false };
-        let Some(x) = self.null_check(c, BinOp::Eq) else { return false };
-        if self.unused_after_check.as_deref() == Some(x) {
+        // `x == null`, or `a == null || b == null`
+        let mut checks = Vec::new();
+        or_operands(c, &mut checks);
+        let Some(names) = checks.iter().map(|p| self.null_check(p, BinOp::Eq).map(str::to_string)).collect::<Option<Vec<String>>>() else { return false };
+        if names.iter().enumerate().any(|(i, n)| names[..i].contains(n)) || names.iter().all(|n| self.unused_after_check.contains(n)) {
             return false;
         }
         let exits = matches!(then.stmts.last(), Some(Stmt::Expr { expr, .. }) if expr.diverges());
         let empty = Block { stmts: Vec::new(), span: then.span };
-        let Some(inner) = self.narrowable(x, &empty).filter(|_| exits) else { return false };
-        let x = x.to_string();
-        self.e.w(&format!("let Some({}) = {} else ", esc(&x), esc(&x)));
+        let Some(inner) = names.iter().map(|x| self.narrowable(x, &empty)).collect::<Option<Vec<Type>>>().filter(|_| exits) else { return false };
+        // a name the rest of the block doesn't use is checked, not bound
+        let pats: Vec<String> = names.iter().map(|x| format!("Some({})", if self.unused_after_check.contains(x) { "_".to_string() } else { esc(x) })).collect();
+        let vals: Vec<String> = names.iter().map(|x| esc(x)).collect();
+        if names.len() == 1 {
+            self.e.w(&format!("let {} = {} else ", pats[0], vals[0]));
+        } else {
+            self.e.w(&format!("let ({}) = ({}) else ", pats.join(", "), vals.join(", ")));
+        }
         self.block_stmt(then);
         self.e.w(";");
-        self.e.decide(c.span, format!("let Some({}) = {} else", x, x), format!("`{}` is not null after this line", x), None);
-        self.bind_name(&x, Some(inner));
+        let shown = names.iter().map(|x| format!("`{}`", x)).collect::<Vec<_>>().join(" and ");
+        self.e.decide(c.span, format!("let {} = {} else", pats.join(", "), vals.join(", ")), format!("{} {} not null after this line", shown, if names.len() == 1 { "is" } else { "are" }), None);
+        for (x, t) in names.iter().zip(inner) {
+            if !self.unused_after_check.contains(x) {
+                self.bind_name(x, Some(t));
+            }
+        }
         true
     }
 
@@ -4095,6 +4151,23 @@ impl<'a> Lowerer<'a> {
 
     /// `mode`: None = statement, Some(target) = value.
     fn if_expr(&mut self, cond: &Cond, then: &Block, else_: Option<&Expr>, mode: Option<&Target>) {
+        // `if (x == null) a else b` unwraps `x` in `b`: `if let Some(x) = x { b } else { a }`
+        if let (Cond::Expr(c), Some(el)) = (cond, else_) {
+            if let Some(x) = self.null_check(c, BinOp::Eq) {
+                let other = match &el.kind {
+                    ExprKind::Block(b) => b.clone(),
+                    _ => Block { stmts: vec![Stmt::Expr { expr: el.clone(), semi: false }], span: el.span },
+                };
+                let optional_use = other.stmts.iter().any(|st| matches!(st, Stmt::Expr { expr, .. } if uses_as_optional(expr, x)));
+                if visit::stmts_use(&other.stmts, x) && !optional_use && self.narrowable(x, &other).is_some() {
+                    let ExprKind::Binary(_, l, r) = &strip_paren(c).kind else { unreachable!() };
+                    let swapped = Cond::Expr(Expr::new(ExprKind::Binary(BinOp::Ne, l.clone(), r.clone()), c.span));
+                    let first = Expr::new(ExprKind::Block(then.clone()), then.span);
+                    self.if_expr(&swapped, &other, Some(&first), mode);
+                    return;
+                }
+            }
+        }
         // `x != null` unwraps `x` in the branch
         let (narrowed, typed) = self.narrow_cond(cond, then);
         let cond = narrowed.as_ref().unwrap_or(cond);
@@ -4744,6 +4817,40 @@ fn contains_struct_lit(e: &Expr) -> bool {
 }
 
 /// The operands of an `&&` chain, left to right.
+/// Does `e` use the variable `x` as a `T?` (`x.unwrap()`, `x!!`, `x?.len()`, `x ?: 0`, `x == null`),
+/// so a null check before it must not unwrap `x`?
+fn uses_as_optional(e: &Expr, x: &str) -> bool {
+    let mut found = false;
+    visit::walk_expr(e, &mut |e| {
+        let is_x = |r: &Expr| strip_paren(r).ident() == Some(x);
+        found |= match &e.kind {
+            ExprKind::MethodCall { recv, name, safe, .. } => {
+                is_x(recv)
+                    && (*safe
+                        || matches!(
+                            name.as_str(),
+                            "as_ref" | "as_mut" | "as_deref" | "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "is_some" | "is_none" | "is_some_and" | "map" | "and_then" | "take" | "replace" | "ok_or" | "ok_or_else" | "or" | "or_else" | "map_or" | "filter" | "iter" | "insert" | "get_or_insert_with"
+                        ))
+            }
+            ExprKind::Field { recv, safe: true, .. } | ExprKind::Unwrap(recv) | ExprKind::Elvis(recv, _) => is_x(recv),
+            ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r) => (is_x(l) && matches!(r.kind, ExprKind::Null)) || (is_x(r) && matches!(l.kind, ExprKind::Null)),
+            _ => false,
+        };
+        !found
+    });
+    found
+}
+
+fn or_operands<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &strip_paren(e).kind {
+        ExprKind::Binary(BinOp::Or, l, r) => {
+            or_operands(l, out);
+            or_operands(r, out);
+        }
+        _ => out.push(e),
+    }
+}
+
 fn and_operands<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
     match &e.kind {
         ExprKind::Binary(BinOp::And, l, r) => {
