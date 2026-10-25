@@ -3277,10 +3277,14 @@ impl<'a> Lowerer<'a> {
                 let ret = callee.ident().and_then(|n| self.fun_info(n)).and_then(|f| f.ret.clone());
                 matches!(ret, Some(Type::Option(inner)) if matches!(*inner, Type::Ref { .. }))
             }
-            ExprKind::MethodCall { name, .. } => matches!(
-                name.as_str(),
-                "get" | "first" | "last" | "find" | "iter" | "max_by_key" | "min_by_key" | "max_by" | "min_by" | "max" | "min" | "get_mut" | "peek" | "next" | "as_ref" | "as_deref" | "last_mut" | "first_mut"
-            ),
+            // a method declared to return `&T?` (`fun leader(): &Player?`)
+            ExprKind::MethodCall { name, .. } => match self.link_type(e).and_then(|t| option_inner(&t)) {
+                Some(inner) => matches!(inner, Type::Ref { .. }),
+                None => matches!(
+                    name.as_str(),
+                    "get" | "first" | "last" | "find" | "find_last" | "iter" | "max_by_key" | "min_by_key" | "max_by" | "min_by" | "max" | "min" | "get_mut" | "peek" | "next" | "next_back" | "as_ref" | "as_deref" | "last_mut" | "first_mut" | "front" | "back" | "front_mut" | "back_mut"
+                ),
+            },
             ExprKind::Paren(x) => self.yields_borrowed_option(x),
             _ => false,
         }
@@ -3319,9 +3323,20 @@ impl<'a> Lowerer<'a> {
         let n = segs.len();
         for (i, seg) in segs.iter().enumerate() {
             let last = i == n - 1;
-            let flatten = !last || self.segment_yields_option(seg);
+            // a link known to give a plain value is mapped (Kotlin's `?.` after a non-null
+            // value acts like `.`), one that gives a `T?` flattened; an unknown one after
+            // another `?.` is taken to be optional, as `?.` suggests
+            let lam = Self::let_lambda(seg);
+            let known = match &lam {
+                Some(lam) => {
+                    let ExprKind::MethodCall { recv, .. } = &seg[0].kind else { unreachable!() };
+                    self.let_yields_option(lam, recv)
+                }
+                None => self.link_is_option(seg.last().unwrap()),
+            };
+            let flatten = known.unwrap_or_else(|| !last || self.segment_yields_option(seg));
             let method = if flatten { "and_then" } else { "map" };
-            if let Some(lam) = Self::let_lambda(seg) {
+            if let Some(lam) = lam {
                 self.e.w(&format!(".{}(", method));
                 self.lambda(&lam, None, None);
                 self.e.w(")");
@@ -3339,7 +3354,7 @@ impl<'a> Lowerer<'a> {
                 self.e.w(".as_ref()");
             }
             self.e.w(")");
-            borrowed = flatten && ends_in_field;
+            borrowed = ends_in_field && (flatten || amp);
         }
     }
 
@@ -3378,6 +3393,103 @@ impl<'a> Lowerer<'a> {
         self.class_info(t.single_name()?)?.fields.iter().find(|f| &f.name == name).map(|f| f.ty.clone())
     }
 
+    /// The type of a link of a `?.` chain as its member declares it, without the `?` that
+    /// earlier `?.` links add: `name` in `n?.name` is a `String` when `Node.name` is one.
+    fn link_type(&self, l: &Expr) -> Option<Type> {
+        if !has_safe_link(l) {
+            return self.chain_value_type(l);
+        }
+        match &l.kind {
+            ExprKind::Field { recv, name, safe } => {
+                let rt = self.link_recv_type(recv, *safe)?;
+                self.class_info(rt.single_name()?)?.fields.iter().find(|f| &f.name == name).map(|f| f.ty.clone()).filter(|t| *t != Type::Infer)
+            }
+            ExprKind::MethodCall { recv, name, safe, args, .. } => {
+                let rt = self.link_recv_type(recv, *safe);
+                if let Some(owner) = rt.as_ref().and_then(|t| self.type_owner(t)) {
+                    let m = self.class_at(&owner).filter(|c| !c.has_generics).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(&owner).filter(|e| !e.has_type_params).and_then(|e| e.methods.get(name)));
+                    if let Some(m) = m {
+                        return match m.ret.clone()? {
+                            _ if m.throws => None,
+                            t if t.single_name() == Some("Self") => Some(Type::simple(owner.last()?)),
+                            t => Some(t),
+                        };
+                    }
+                }
+                let str_ref = || Type::Ref { lifetime: None, mutable: false, inner: Box::new(Type::simple("str")) };
+                match name.as_str() {
+                    "len" | "count" | "capacity" => Some(Type::simple("usize")),
+                    "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "replace" | "join" | "concat" | "trim_string" => Some(Type::simple("String")),
+                    "trim" | "trim_start" | "trim_end" | "as_str" => Some(str_ref()),
+                    "is_empty" | "contains" | "contains_key" | "starts_with" | "ends_with" | "is_some" | "is_none" | "is_ok" | "is_err" => Some(Type::simple("bool")),
+                    "let" => None,
+                    "clone" | "to_vec" if args.is_empty() => rt.map(|t| match t {
+                        Type::Ref { inner, .. } => *inner,
+                        t => t,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The type of the value a `?.` link is called on; `safe`: through `?.`, so the value
+    /// inside the `T?`. References are looked through.
+    fn link_recv_type(&self, recv: &Expr, safe: bool) -> Option<Type> {
+        let mut t = self.link_type(recv)?;
+        while let Type::Ref { inner, .. } = t {
+            t = *inner;
+        }
+        if safe {
+            t = option_inner(&t)?;
+            while let Type::Ref { inner, .. } = t {
+                t = *inner;
+            }
+        }
+        Some(t)
+    }
+
+    /// Does this `?.` link give a `T?` (`Some(true)`), a plain value (`Some(false)`), or is that
+    /// unknown?
+    fn link_is_option(&self, l: &Expr) -> Option<bool> {
+        if let Some(t) = self.link_type(l) {
+            return Some(option_inner(&t).is_some());
+        }
+        None
+    }
+
+    /// Does the block of `x?.let { .. }` give a `T?`? `Some(true)` when one of its values is
+    /// `null`, `Some(..)` or optional, `Some(false)` when they are all known plain values.
+    /// `recv` is the chain before the `let`.
+    fn let_yields_option(&mut self, lam: &Expr, recv: &Expr) -> Option<bool> {
+        let ExprKind::Lambda { params, body, .. } = &lam.kind else { return None };
+        let mut tails = Vec::new();
+        value_tails(body, &mut tails);
+        if tails.iter().any(|t| matches!(t.kind, ExprKind::Null) || matches!(&t.kind, ExprKind::Call { callee, .. } if callee.ident() == Some("Some"))) {
+            return Some(true);
+        }
+        let it_ty = self.link_recv_type(recv, true).map(|t| if self.is_place(recv) || self.yields_borrowed_option(recv) { Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) } } else { t });
+        self.push_scope();
+        match params.as_slice() {
+            [] => self.bind_name("it", it_ty),
+            [p] => self.bind_pat(&p.pat, p.ty.clone().or(it_ty)),
+            ps => ps.iter().for_each(|p| self.bind_pat(&p.pat, p.ty.clone())),
+        }
+        let mut known = Some(false);
+        for t in &tails {
+            if self.is_option_expr(t) {
+                known = Some(true);
+                break;
+            }
+            if self.infer_type(t).is_none() {
+                known = None;
+            }
+        }
+        self.pop_scope();
+        known
+    }
+
     /// Is `recv.field` (in a `?.` chain) a field of a shared class, reached through a `T?` or
     /// a reference? Returns whether the class is `@sync`.
     fn optional_shared_field(&self, recv: &Expr, field: &str) -> Option<bool> {
@@ -3403,7 +3515,8 @@ impl<'a> Lowerer<'a> {
             // `?.` after a property declared non-nullable is just `.` (as in Kotlin)
             if safe && cur_is_option {
                 if let ExprKind::Field { name, .. } = &cur.kind {
-                    if self.field_known_non_option(name) {
+                    let known = self.link_type(&cur).map(|t| option_inner(&t).is_none());
+                    if known.unwrap_or_else(|| self.field_known_non_option(name)) {
                         safe = false;
                         if let ExprKind::Field { safe: s, .. } | ExprKind::MethodCall { safe: s, .. } = &mut node.kind {
                             *s = false;
@@ -4374,6 +4487,39 @@ fn type_mentions(t: &Type, names: &[String]) -> bool {
     }
     let text = crate::symbols::type_text(t);
     text.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| names.iter().any(|n| n == w))
+}
+
+/// The value type of a `T?` (`Option<T>`).
+fn option_inner(t: &Type) -> Option<Type> {
+    match t {
+        Type::Option(inner) => Some((**inner).clone()),
+        Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Option" => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(inner)]) => Some(inner.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The expressions whose value a block or branch gives (the last expression of each branch of
+/// an `if` or `when`); branches that leave (`return`, `throw`) give none.
+fn value_tails<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Paren(x) => value_tails(x, out),
+        ExprKind::Block(b) => match b.stmts.last() {
+            Some(Stmt::Expr { expr, semi: false }) => value_tails(expr, out),
+            _ => {}
+        },
+        ExprKind::If { then, else_: Some(el), .. } => {
+            if let Some(Stmt::Expr { expr, semi: false }) = then.stmts.last() {
+                value_tails(expr, out);
+            }
+            value_tails(el, out);
+        }
+        ExprKind::When { arms, .. } => arms.iter().for_each(|a| value_tails(&a.body, out)),
+        _ if e.diverges() => {}
+        _ => out.push(e),
+    }
 }
 
 fn strip_paren(e: &Expr) -> &Expr {

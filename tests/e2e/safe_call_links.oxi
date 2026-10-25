@@ -1,0 +1,29 @@
+// `?.` after a link that gives a plain value maps; after one that gives `T?` it flattens
+class Person(name: String, nick: String?) {
+    fun display(): String = name.to_uppercase()
+    fun nickname(): String? = nick.clone()
+}
+data class Node(name: String, next: Inner?)
+data class Inner(label: String, tag: String?)
+data class Item(name: String?)
+fun short(s: &str): String? = if (s.len() < 5) s.to_string() else null
+fun main() {
+    val p: Person? = Person("ada", "a".to_string())
+    println("${p?.display()?.len():?}")
+    println("${p?.nickname()?.len():?}")
+    val i: Item? = Item("item".to_string())
+    println("${i?.name?.len():?}")
+    val n: Node? = Node("x", Inner("in", null))
+    println("${n?.next?.label?.len():?}")
+    println("${n?.next?.tag?.len():?}")
+    val name: String? = "ada".to_string()
+    val k: usize? = name?.let { if (it.len() > 2) it.len() else null }
+    println("${k:?}")
+    val m = name?.let { short(it) }
+    println("${m:?}")
+    val o = name?.let { it.len() }
+    println("${o:?}")
+    val s: String? = " a ".to_string()
+    println("${s?.trim()?.len():?}")
+    println("${s?.let { it.len() }?.let { it * 2 }:?}")
+}

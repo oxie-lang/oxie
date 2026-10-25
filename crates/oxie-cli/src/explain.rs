@@ -136,11 +136,15 @@ fn oxie_places(text: &str, written: &str) -> String {
 }
 
 /// `main() throws` is generated as `__oxie_main` (called from a plain `main`); messages call
-/// it by its Oxie name.
+/// it by its Oxie name. A value Oxie names in generated code (`__oxie_v1` for the value inside
+/// `a?.name`) isn't named: `__oxie_v1.name` is `name`.
 fn generated_names(d: &mut MappedDiag) {
     let fix = |s: &mut String| {
         if s.contains("__oxie_main") {
             *s = s.replace("__oxie_main", "main");
+        }
+        if s.contains("__oxie_") {
+            *s = without_generated_values(s);
         }
     };
     fix(&mut d.message);
@@ -148,6 +152,26 @@ fn generated_names(d: &mut MappedDiag) {
     d.notes.iter_mut().for_each(fix);
     d.secondary.iter_mut().for_each(|s| fix(&mut s.text));
     d.rust_message.iter_mut().for_each(fix);
+}
+
+/// `text` without the generated values before a member (`__oxie_v1.name` is `name`).
+fn without_generated_values(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("__oxie_") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + "__oxie_".len()..];
+        let letters = after.find(|c: char| !c.is_ascii_lowercase()).unwrap_or(after.len());
+        let digits = after[letters..].find(|c: char| !c.is_ascii_digit()).map_or(after.len(), |d| letters + d);
+        if letters > 0 && digits > letters && after[digits..].starts_with('.') {
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str("__oxie_");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2684,6 +2708,7 @@ mod tests {
         assert_eq!(param_decl(&["fun add_one(v: &Vec<i32>) {", "    v.push(1)"], "v", 1), Some((0, 15, "add_one".into(), 0)));
         assert_eq!(oxie_types("expected `Option<Vec<i32>>`"), "expected `Vec<i32>?`");
         assert_eq!(snake_case("toUpperCase"), "to_upper_case");
+        assert_eq!(without_generated_values("can't take `__oxie_v12.name` out of `__oxie_main`"), "can't take `name` out of `__oxie_main`");
         let elvis = |s: &str| top_level_elvis(&s.chars().collect::<Vec<_>>());
         assert_eq!(elvis(r#"a?.b ?: "x""#), Some(5));
         assert_eq!(elvis(r#"f("?:", a ?: 1) ?: "x""#), Some(16));
