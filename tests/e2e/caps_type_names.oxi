@@ -1,0 +1,48 @@
+// Type names in all capitals are types, not constants.
+
+class DB {
+    var rows: i32 = 0
+    static fun open(): DB = DB()
+    fun insert() { rows += 1 }
+}
+
+enum HTTP { GET, POST }
+
+enum Color { RGB(u8, u8, u8), Named(String) }
+
+interface Engine { fun hp(): u32 }
+
+class V8 : Engine { override fun hp() = 400 }
+
+class Car(engine: Engine)
+
+class V2(x: i32, y: i32)
+
+const MAX: i32 = 3
+
+fun method(m: HTTP): &str = when (m) {
+    HTTP.GET -> "get"
+    HTTP.POST -> "post"
+}
+
+fun describe(c: &Color): String = when (c) {
+    Color.RGB(r, g, b) -> "rgb $r $g $b"
+    Color.Named(n) -> n.clone()
+}
+
+fun main() {
+    var d = DB.open()
+    d.insert()
+    println(d.rows)
+    println(method(HTTP.GET))
+    println(method(HTTP.POST))
+    val c = Car(V8())
+    println(c.engine.hp())
+    val engines: Vec<Engine> = vec[V8(), V8()]
+    println(engines.len())
+    val v = V2 { x: 1, y: 2 }
+    val V2 { x, y } = v
+    println("$x $y ${MAX * x}")
+    println(describe(&Color.RGB(1, 2, 3)))
+    println(describe(&Color.Named("teal".to_string())))
+}

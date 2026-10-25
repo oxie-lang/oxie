@@ -3,7 +3,6 @@
 use crate::ast::*;
 use crate::diag::{Diag, Span};
 use crate::lower::*;
-use crate::parser::is_type_like;
 use crate::sema::{ParamInfo, Recv, VariantShape};
 use crate::visit;
 
@@ -1142,12 +1141,12 @@ impl<'a> Lowerer<'a> {
             ExprKind::Call { callee, .. } => match &callee.kind {
                 ExprKind::Path { segs, .. } => {
                     let last = segs.last().map(|s| s.as_str()).unwrap_or("");
-                    is_type_like(last) && !matches!(last, "Some" | "Ok" | "Err" | "None" | "Box" | "Rc" | "Arc")
+                    (self.k.is_type_name(last) || self.k.variant_owner.contains_key(last)) && !matches!(last, "Some" | "Ok" | "Err" | "None" | "Box" | "Rc" | "Arc")
                 }
                 _ => false,
             },
             ExprKind::MethodCall { recv, name, .. } => {
-                is_type_like(name) && matches!(self.as_path(recv), Some((_, PathKind::Type)))
+                (self.k.is_type_name(name) || self.k.variant_owner.contains_key(name)) && matches!(self.as_path(recv), Some((_, PathKind::Type)))
             }
             ExprKind::Path { .. } | ExprKind::Field { .. } => self.is_unit_variant(e) || self.is_unit_class_value(e),
             _ => false,
@@ -1240,7 +1239,8 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn is_place(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Path { segs, generics: None, .. } => {
-                segs.len() == 1 && !is_type_like(&segs[0]) && !self.k.is_fun_name(&segs[0]) || is_const_like(segs.last().unwrap())
+                let last = segs.last().unwrap();
+                segs.len() == 1 && !self.k.is_type_name(&segs[0]) && !self.k.is_fun_name(&segs[0]) || is_const_like(last) && !self.k.is_type_name(last)
             }
             ExprKind::SelfValue => true,
             ExprKind::Field { recv, safe: false, .. } => self.as_path(e).is_none() && self.is_place(recv),
@@ -2314,7 +2314,7 @@ impl<'a> Lowerer<'a> {
                 if n == "Self" || crate::lower::PRIMITIVES.contains(&n.as_str()) {
                     return Some((segs.clone(), PathKind::Type));
                 }
-                if is_type_like(n) {
+                if self.k.is_type_name(n) {
                     // a unit variant is a value with members; `Extension.instantiate(..)` with a
                     // tuple variant `Extension(..)` goes through a type of that name
                     let unit = self.variant_enum(n).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
@@ -2329,7 +2329,7 @@ impl<'a> Lowerer<'a> {
                 None
             }
             // `Stack::<i32>.new()`: a type with explicit generic arguments
-            ExprKind::Path { segs, generics: Some(g), global: false } if is_type_like(segs.last().unwrap()) && !self.is_local(&segs[0]) => {
+            ExprKind::Path { segs, generics: Some(g), global: false } if self.k.is_type_name(segs.last().unwrap()) && !self.is_local(&segs[0]) => {
                 let mut p = segs.clone();
                 let last = p.pop().unwrap();
                 p.push(format!("{}::{}", last, self.generic_args_text(g)));
@@ -2337,7 +2337,7 @@ impl<'a> Lowerer<'a> {
             }
             ExprKind::Path { segs, generics: None, .. } => {
                 let last = segs.last().unwrap();
-                let kind = if is_type_like(last) {
+                let kind = if self.k.is_type_name(last) {
                     PathKind::Type
                 } else if is_const_like(last) {
                     PathKind::Value
@@ -2350,7 +2350,7 @@ impl<'a> Lowerer<'a> {
                 let (mut p, k) = self.as_path(recv)?;
                 match k {
                     PathKind::Module => {
-                        let kind = if is_type_like(name) {
+                        let kind = if self.k.is_type_name(name) {
                             PathKind::Type
                         } else if is_const_like(name) {
                             PathKind::Value
@@ -2604,7 +2604,7 @@ impl<'a> Lowerer<'a> {
                         return;
                     }
                 }
-                if is_type_like(&name) && args.is_empty() && !matches!(name.as_str(), "Some" | "None" | "Ok" | "Err") {
+                if self.k.is_type_name(&name) && args.is_empty() && !matches!(name.as_str(), "Some" | "None" | "Ok" | "Err") {
                     let g = generics.as_ref().map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                     self.e.w(&format!("{}{}::new()", esc(&name), g));
                     return;

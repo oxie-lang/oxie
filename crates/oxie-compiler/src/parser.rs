@@ -44,11 +44,31 @@ pub struct Parser<'a> {
     /// An error message template, where `$0` is the case's first positional field; elsewhere
     /// it is text (`"cost $5"`).
     positional: bool,
+    /// Type names this file declares that don't look like types (`class DB`, `enum HTTP`).
+    caps_types: std::collections::HashSet<String>,
+}
+
+/// Names declared by `class`/`enum`/`interface`/... in `toks` that are all capitals (`DB`, `V8`),
+/// which `is_type_like` would take for constants.
+fn caps_type_names(toks: &[Token]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for w in toks.windows(2) {
+        if let (Tok::Ident(kw), Tok::Ident(name)) = (&w[0].tok, &w[1].tok) {
+            if matches!(kw.as_str(), "class" | "enum" | "interface" | "trait" | "struct" | "typealias" | "union")
+                && !is_type_like(name)
+                && name.starts_with(|c: char| c.is_uppercase())
+            {
+                out.insert(name.clone());
+            }
+        }
+    }
+    out
 }
 
 pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
+    let caps_types = caps_type_names(&toks);
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types };
     let file = p.file();
     diags.append(&mut p.diags);
     (file, diags)
@@ -57,7 +77,8 @@ pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
 /// Parses a standalone expression (used for tests and tooling).
 pub fn parse_expr_str(src: &str) -> (Expr, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
+    let caps_types = caps_type_names(&toks);
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types };
     let e = p.expr().unwrap_or(Expr::new(ExprKind::Error, Span::default()));
     diags.append(&mut p.diags);
     (e, diags)
@@ -67,6 +88,11 @@ type PResult<T> = Result<T, ()>;
 
 impl<'a> Parser<'a> {
     // ------------------------------------------------------------------ token helpers
+
+    /// Whether `s` names a type: it looks like one, or this file declares it (`class DB`).
+    fn type_like(&self, s: &str) -> bool {
+        is_type_like(s) || self.caps_types.contains(s)
+    }
 
     fn tok(&self) -> &Tok {
         &self.toks[self.pos].tok
@@ -2382,7 +2408,7 @@ impl<'a> Parser<'a> {
                         }
                     }
                     // `Shape.Rect { w: 1.0, h: 2.0 }`: a struct literal of a variant or nested type
-                    let struct_path = if !safe && is_type_like(&name) && self.is_punct("{") && !self.no_struct && self.looks_like_struct_lit() && !self.braces_have_arrow() {
+                    let struct_path = if !safe && (self.type_like(&name) || self.is_capitalized_struct_lit(&name)) && self.is_punct("{") && !self.no_struct && self.looks_like_struct_lit() && !self.braces_have_arrow() {
                         dot_path(&e)
                     } else {
                         None
@@ -2897,7 +2923,7 @@ impl<'a> Parser<'a> {
                 StrPart::Interp { src: s, offset, spec } => {
                     let (toks, mut diags) = lexer::lex_at(&s, offset);
                     self.diags.append(&mut diags);
-                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
+                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types: self.caps_types.clone() };
                     let e = sub.expr();
                     if e.is_ok() && !matches!(sub.tok(), Tok::Newline | Tok::Eof) {
                         let sp = sub.span();
@@ -2964,7 +2990,7 @@ impl<'a> Parser<'a> {
             break;
         }
         // Type<Args>::item or Type<Args>(...) without turbofish
-        if generics.is_none() && self.is_punct("<") && is_type_like(segs.last().unwrap()) {
+        if generics.is_none() && self.is_punct("<") && self.type_like(segs.last().unwrap()) {
             let save = self.pos;
             let nd = self.diags.len();
             match self.generic_args() {
@@ -3027,7 +3053,7 @@ impl<'a> Parser<'a> {
             return Ok(Expr::new(ExprKind::VecLit(elems), sp.to(self.prev_span())));
         }
         // struct literal
-        if self.is_punct("{") && !self.no_struct && is_type_like(segs.last().unwrap()) && self.looks_like_struct_lit() {
+        if self.is_punct("{") && !self.no_struct && (self.type_like(segs.last().unwrap()) || self.is_capitalized_struct_lit(segs.last().unwrap())) && self.looks_like_struct_lit() {
             return self.struct_lit(segs, generics, sp);
         }
         Ok(Expr::new(ExprKind::Path { segs, generics, global }, sp))
@@ -3052,6 +3078,18 @@ impl<'a> Parser<'a> {
             }
             i += 1;
         }
+    }
+
+    /// `V2 { x: 1 }` with a capitalized name declared elsewhere: a field name and `:` follow.
+    fn is_capitalized_struct_lit(&self, name: &str) -> bool {
+        if !name.starts_with(|c: char| c.is_uppercase()) {
+            return false;
+        }
+        let mut i = 1;
+        while matches!(self.tok_at(i), Tok::Newline) {
+            i += 1;
+        }
+        matches!(self.tok_at(i), Tok::Ident(_)) && matches!(self.tok_at(i + 1), Tok::Punct(":"))
     }
 
     fn looks_like_struct_lit(&self) -> bool {
@@ -3753,7 +3791,7 @@ impl<'a> Parser<'a> {
                     }
                     return Ok(Pat::TupleStruct { path: segs, elems, span });
                 }
-                if self.is_punct("{") && (segs.len() > 1 || is_type_like(&segs[0])) {
+                if self.is_punct("{") && (segs.len() > 1 || self.type_like(&segs[0])) {
                     self.bump();
                     let mut fields = Vec::new();
                     let mut rest = false;
@@ -3789,7 +3827,7 @@ impl<'a> Parser<'a> {
                     }
                     return Ok(Pat::Struct { path: segs, fields, rest, span });
                 }
-                if segs.len() == 1 && !is_type_like(&segs[0]) && !is_const_like(&segs[0]) {
+                if segs.len() == 1 && !self.type_like(&segs[0]) && !is_const_like(&segs[0]) {
                     let name = segs.pop().unwrap();
                     let sub = if self.eat_punct("@") { Some(Box::new(self.pattern_no_or()?)) } else { None };
                     return Ok(Pat::Ident { name, by_ref: false, mutable: false, sub, span });

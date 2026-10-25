@@ -170,6 +170,8 @@ pub struct Crate {
     pub derives: HashMap<String, Vec<String>>,
     /// Types declared inside a class body (hoisted to the module): outer name -> inner names.
     pub nested: HashMap<String, Vec<String>>,
+    /// Declared type names in all capitals (`class DB`, `enum HTTP`), which don't look like types.
+    pub caps_types: HashSet<String>,
 }
 
 /// What `Crate` keys by module when several modules declare a name.
@@ -453,6 +455,10 @@ impl Crate {
     pub fn is_trait(&self, name: &str) -> bool {
         self.traits.contains_key(name)
     }
+    /// Whether `name` names a type: it looks like one (`Point`) or the crate declares it (`DB`).
+    pub fn is_type_name(&self, name: &str) -> bool {
+        is_type_like(name) || self.caps_types.contains(name)
+    }
     pub fn is_user_type(&self, name: &str) -> bool {
         self.classes.contains_key(name) || self.enums.contains_key(name) || self.traits.contains_key(name) || self.same_named.contains(name)
     }
@@ -478,6 +484,9 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
         }
         k.module_paths.insert(u.module.clone());
     }
+    for u in units {
+        collect_caps_types(&mut k, &u.file.items);
+    }
     // pass 1: traits (needed for impl receivers)
     for u in units {
         collect_traits(&mut k, &u.module, &u.file.items);
@@ -494,6 +503,27 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
     infer_receivers(&mut k, units);
     compute_derives(&mut k, units);
     k
+}
+
+fn collect_caps_types(k: &mut Crate, items: &[Item]) {
+    for it in items {
+        let name = match &it.kind {
+            ItemKind::Type(t) => {
+                collect_caps_types(k, &t.members);
+                &t.name
+            }
+            ItemKind::Trait(t) => &t.name,
+            ItemKind::TypeAlias { name, .. } => name,
+            ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => {
+                collect_caps_types(k, items);
+                continue;
+            }
+            _ => continue,
+        };
+        if !is_type_like(name) && name.starts_with(|c: char| c.is_uppercase()) {
+            k.caps_types.insert(name.clone());
+        }
+    }
 }
 
 /// Generics made only of lifetimes (or none), which don't stand in the way of derives.
