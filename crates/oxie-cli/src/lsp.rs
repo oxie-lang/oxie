@@ -75,6 +75,13 @@ fn remember_alias(path: &Path) {
 }
 
 pub fn path_to_uri(p: &Path) -> String {
+    // a document that isn't a file (`untitled:Untitled-1`) keeps its URI as its path
+    let s = p.to_string_lossy();
+    if let Some((scheme, _)) = s.split_once(':') {
+        if scheme.len() > 1 && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) && scheme != "file" {
+            return s.to_string();
+        }
+    }
     let aliases = ALIASES.lock().unwrap();
     let alias = aliases.iter().filter(|(real, _)| p.starts_with(real)).max_by_key(|(real, _)| real.components().count());
     let p = match alias.and_then(|(real, editor)| p.strip_prefix(real).ok().map(|rest| (editor, rest))) {
@@ -1093,10 +1100,15 @@ fn completion(server: &Server, params: &Value) -> Result<Value, String> {
             symbols::locals_at(&f.ast, off as u32).into_iter().rev().find(|l| l.name == r).and_then(|l| l.ty).and_then(|t| type_owner(&t))
         };
         let statik = r.chars().next().is_some_and(|c| c.is_uppercase());
+        // a class's value also has the methods of its interfaces
+        let interfaces: Vec<String> = match &owner {
+            Some(o) if !statik => a.files.iter().flat_map(|fd| type_decls(&fd.ast.items)).filter(|t| t.name == *o).flat_map(|t| t.supertypes.iter().filter_map(|s| s.last_name().map(str::to_string))).collect(),
+            _ => Vec::new(),
+        };
         for fd in &a.files {
             for s in symbols::flatten(&fd.symbols) {
                 let Some(c) = &s.container else { continue };
-                if owner.as_deref().is_none_or(|o| o == c) {
+                if owner.as_deref().is_none_or(|o| o == c) || interfaces.contains(c) {
                     let is_static = s.detail.starts_with("static ") || s.kind == SymKind::Variant || (s.kind == SymKind::Method && method_is_static(&a.krate, c, &s.name));
                     if owner.is_some() && statik != is_static && s.kind != SymKind::Const {
                         continue;
@@ -1106,7 +1118,9 @@ fn completion(server: &Server, params: &Value) -> Result<Value, String> {
                 }
             }
         }
-        if owner.is_none() || !a.krate.classes.contains_key(owner.as_deref().unwrap_or("")) {
+        // the methods of std types only for values of other types than the project's own
+        let own = owner.as_deref().is_some_and(|o| a.krate.classes.contains_key(o) || a.krate.enums.contains_key(o));
+        if !own {
             for m in COMMON_METHODS {
                 add(&mut items, m, 2, "method", "", None, "5");
             }
@@ -1152,6 +1166,19 @@ fn completion(server: &Server, params: &Value) -> Result<Value, String> {
         add(&mut items, t, 7, "std", "", None, "6");
     }
     Ok(json!({"isIncomplete": false, "items": items}))
+}
+
+/// The classes and enums declared in `items`, also inside modules.
+fn type_decls(items: &[oxie_compiler::ast::Item]) -> Vec<&oxie_compiler::ast::TypeDecl> {
+    use oxie_compiler::ast::ItemKind;
+    items
+        .iter()
+        .flat_map(|it| match &it.kind {
+            ItemKind::Type(t) => vec![t],
+            ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => type_decls(items),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 fn method_is_static(k: &Crate, owner: &str, name: &str) -> bool {
@@ -1295,7 +1322,9 @@ fn inlay_hints(server: &Server, params: &Value) -> Result<Value, String> {
 // ---------------------------------------------------------------------------------------------
 // main loop
 
-fn read_message(r: &mut impl BufRead) -> Option<Value> {
+/// The next message: None at the end of the input, an error for a message that isn't JSON (or
+/// has no length), which the server skips.
+fn read_message(r: &mut impl BufRead) -> Option<Result<Value, String>> {
     let mut len = None;
     loop {
         let mut line = String::new();
@@ -1310,9 +1339,10 @@ fn read_message(r: &mut impl BufRead) -> Option<Value> {
             len = v.trim().parse::<usize>().ok();
         }
     }
-    let mut buf = vec![0u8; len?];
+    let Some(len) = len else { return Some(Err("a message without a valid Content-Length header".into())) };
+    let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).ok()?;
-    serde_json::from_slice(&buf).ok()
+    Some(serde_json::from_slice(&buf).map_err(|e| format!("a message that isn't JSON ({})", e)))
 }
 
 pub fn run() {
@@ -1328,6 +1358,14 @@ pub fn run() {
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     while let Some(msg) = read_message(&mut reader) {
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("oxie lsp: skipped {}", e);
+                send(&out, json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": -32700, "message": format!("parse error: {}", e)}}));
+                continue;
+            }
+        };
         let method = msg["method"].as_str().unwrap_or("").to_string();
         let id = msg.get("id").cloned();
         let params = msg.get("params").cloned().unwrap_or(Value::Null);

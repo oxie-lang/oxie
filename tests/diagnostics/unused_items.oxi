@@ -1,0 +1,13 @@
+// a warning about an item points at its name, not at its doc comment (made errors here, so
+// that the program fails)
+#![deny(dead_code)]
+
+/// Never called.
+fun unused_helper(): i32 = 1
+// error: 6:5: function `unused_helper` is never used
+
+/// Never built.
+class Unused(n: i32)
+// error: 10:14: field `n` is never read
+
+fun main() {}

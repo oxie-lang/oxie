@@ -1240,7 +1240,8 @@ fn no_field(d: &mut MappedDiag, lines: &[&str], field: &str) {
     let line = lines.get(d.line as usize).copied().unwrap_or("");
     let chars: Vec<char> = line.chars().collect();
     let dot: Vec<char> = format!(".{}", field).chars().collect();
-    let at = (d.col as usize..chars.len().saturating_sub(dot.len() - 1)).find(|&i| chars[i..i + dot.len()] == dot[..] && !chars.get(i + dot.len()).is_some_and(|c| is_ident_char(*c)));
+    // the span may start at the value or (mapped exactly) at the field after its `.`
+    let at = ((d.col as usize).saturating_sub(1)..chars.len().saturating_sub(dot.len() - 1)).find(|&i| chars[i..i + dot.len()] == dot[..] && !chars.get(i + dot.len()).is_some_and(|c| is_ident_char(*c)));
     if let Some(i) = at {
         d.col = i as u32 + 1;
         d.end_line = d.line;
@@ -1256,6 +1257,19 @@ fn no_field(d: &mut MappedDiag, lines: &[&str], field: &str) {
 }
 
 fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str) {
+    // `write!(s, ...)` needs the trait that gives the target its `write_fmt`
+    if d.message.starts_with("cannot write into") {
+        imports(d, lines);
+        if d.fixes.is_empty() {
+            let path = if d.message.contains("`String`") { "std::fmt::Write" } else { "std::io::Write" };
+            let at = import_line(lines);
+            let blank = if at == 0 && lines.first().is_some_and(|l| !l.trim().is_empty() && !l.starts_with("import ")) { "\n" } else { "" };
+            d.fixes.push(Fix { title: format!("import `{}`", path), edits: vec![edit(at, 0, 0, &format!("import {}\n{}", path, blank))] });
+        }
+        d.notes.retain(|n| !n.contains("items from traits can only be used if"));
+        d.notes.push(help("`write!` writes through a trait: `std::fmt::Write` for text (`String`), `std::io::Write` for files and streams. Import it to use `write!` here."));
+        return;
+    }
     if !d.message.starts_with("no method named") && !d.message.starts_with("no function or associated item named") {
         return;
     }
@@ -1672,16 +1686,20 @@ fn trait_missing(d: &mut MappedDiag, sources: &Sources, lines: &[&str], names: &
     if let Some(len) = placeholder_len(lines.get(d.line as usize).copied().unwrap_or(""), d.col) {
         (d.end_line, d.end_col) = (d.line, d.col + len);
     }
-    if is_type_param(ty) {
+    let base = ty.split('<').next().unwrap_or(ty).trim_start_matches('&').to_string();
+    let user_kind = sources.declaring(&d.file, |ls| user_type_kind(ls, &base).is_some()).and_then(|f| user_type_kind(&f.lines(), &base));
+    // a short name like `T` is a type parameter, unless the project declares it (`class P`)
+    if user_kind.is_none() && is_type_param(ty) {
         bound_fix(d, lines);
         return;
     }
-    let base = ty.split('<').next().unwrap_or(ty).trim_start_matches('&').to_string();
     let is_std_collection = matches!(base.as_str(), "Vec" | "Option" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "Result") || base.starts_with('(') || base.starts_with('[');
-    let user_kind = sources.declaring(&d.file, |ls| user_type_kind(ls, &base).is_some()).and_then(|f| user_type_kind(&f.lines(), &base));
     d.notes.retain(|n| !n.contains("in format strings you may be able to use") && !n.contains("is not implemented for"));
     if display {
-        rewrite(d, format!("`{}` has no text form for `$` templates", ty));
+        let line = lines.get(d.line as usize).copied().unwrap_or("");
+        let before: String = line.chars().take(d.col as usize).collect();
+        let in_template = placeholder_len(line, d.col).is_some() || before.ends_with("${");
+        rewrite(d, if in_template { format!("`{}` has no text form for `$` templates", ty) } else { format!("`{}` has no text form to print", ty) });
         let printable_debug = is_std_collection || matches!(user_kind, Some("data class") | Some("enum"));
         if printable_debug {
             d.notes.push(help(&format!("print its debug form with a `:?` spec: `${{value:?}}`.{}", if user_kind.is_some() { format!(" To choose the text yourself, add `override fun toString() = \"...\"` to `{}`.", base) } else { String::new() })));

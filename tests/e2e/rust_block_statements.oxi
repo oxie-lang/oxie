@@ -1,0 +1,15 @@
+// `rust { }` statements that end with `;` or are items get no second `;`
+fun main() {
+    var total = 0
+    rust {
+        total += 1;
+    }
+    rust { total += 2; }
+    rust {
+        fn double(x: i32) -> i32 {
+            x * 2
+        }
+    }
+    rust { println!("{}", double(total)) }
+    println("total = $total")
+}

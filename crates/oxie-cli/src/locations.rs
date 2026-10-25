@@ -80,9 +80,111 @@ pub fn forward(mut from: impl Read, mut to: impl Write) {
     }
 }
 
+/// A reader that passes `inner` on with some of its lines changed: a line whose start `hold`
+/// accepts is held until it is complete and replaced by `edit` (`None` drops it); other lines
+/// pass as they arrive, so a partial line like a prompt isn't delayed.
+pub struct EditLines<R, H, E> {
+    inner: R,
+    hold: H,
+    edit: E,
+    /// The held start of the current line.
+    line: Vec<u8>,
+    holding: bool,
+    at_start: bool,
+    ready: Vec<u8>,
+    done: bool,
+}
+
+impl<R: Read, H: Fn(&[u8]) -> bool, E: FnMut(&str) -> Option<String>> EditLines<R, H, E> {
+    pub fn new(inner: R, hold: H, edit: E) -> Self {
+        EditLines { inner, hold, edit, line: Vec::new(), holding: false, at_start: true, ready: Vec::new(), done: false }
+    }
+
+    fn finish_line(&mut self) {
+        let line = std::mem::take(&mut self.line);
+        if let Some(l) = (self.edit)(&String::from_utf8_lossy(&line)) {
+            self.ready.extend_from_slice(l.as_bytes());
+        }
+        self.holding = false;
+    }
+}
+
+impl<R: Read, H: Fn(&[u8]) -> bool, E: FnMut(&str) -> Option<String>> Read for EditLines<R, H, E> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let mut buf = [0u8; 8192];
+        while self.ready.is_empty() && !self.done {
+            let n = self.inner.read(&mut buf)?;
+            if n == 0 {
+                self.done = true;
+                if self.holding {
+                    self.finish_line();
+                }
+            }
+            for &b in &buf[..n] {
+                if self.at_start {
+                    self.at_start = false;
+                    self.holding = true;
+                }
+                if self.holding {
+                    self.line.push(b);
+                    if b == b'\n' {
+                        self.finish_line();
+                    } else if !(self.hold)(&self.line) {
+                        self.ready.append(&mut self.line);
+                        self.holding = false;
+                    }
+                } else {
+                    self.ready.push(b);
+                }
+                // a `\r` starts a line too, as when a progress bar is cleared before a message
+                if b == b'\n' || (b == b'\r' && !self.holding) {
+                    self.at_start = true;
+                }
+            }
+        }
+        let n = out.len().min(self.ready.len());
+        out[..n].copy_from_slice(&self.ready[..n]);
+        self.ready.drain(..n);
+        Ok(n)
+    }
+}
+
+/// Is this (the start of) a line one of cargo's JSON messages (`--message-format=json`)?
+pub fn is_cargo_message(line: &[u8]) -> bool {
+    const START: &[u8] = b"{\"reason\":";
+    if line.len() < START.len() {
+        START.starts_with(line)
+    } else {
+        line.starts_with(START)
+    }
+}
+
+/// cargo's `error: test failed, to rerun pass `--bin app_1f2e`` without the hint, which names a
+/// cargo target (for a script, its hidden crate) that `oxie test` doesn't take.
+pub fn without_rerun_hint(line: &str) -> Option<String> {
+    match line.find(", to rerun pass `") {
+        Some(i) => {
+            let end = line[i..].find("`\n").or_else(|| line[i..].rfind('`')).map_or(line.len(), |e| i + e + 1);
+            Some(format!("{}{}", &line[..i], &line[end..]))
+        }
+        None => Some(line.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_messages_are_dropped_and_rerun_hints_removed() {
+        let mut out = Vec::new();
+        let text = "{\"reason\":\"compiler-message\"}\nrunning 1 test\ntest a ... ok\n{\"reason\":\"build-finished\"}\n{not json\n";
+        forward(EditLines::new(Pieces(vec![&text.as_bytes()[..5], &text.as_bytes()[5..40], &text.as_bytes()[40..]]), is_cargo_message, |_| None), &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "running 1 test\ntest a ... ok\n{not json\n");
+        let mut out = Vec::new();
+        forward(EditLines::new("error: test failed, to rerun pass `--bin x_1f`\nother\n".as_bytes(), |_| true, without_rerun_hint), &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "error: test failed\nother\n");
+    }
 
     #[test]
     fn rewrites_mapped_locations_only() {

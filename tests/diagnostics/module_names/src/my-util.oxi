@@ -1,0 +1,2 @@
+// error: 1: `my-util` can't be the name of a module
+fun answer(): i32 = 42

@@ -183,6 +183,30 @@ fn chain_links(e: &Expr) -> (&Expr, Vec<&Expr>) {
     (cur, links)
 }
 
+/// Does the Rust of a `rust { }` statement end its last statement itself: with a `;`, or as an
+/// item (`fn helper() { }`), after which a `;` would be an empty statement?
+fn raw_ends_statement(s: &str) -> bool {
+    // where the last two top-level statements start (brackets in strings aren't counted)
+    let (mut depth, mut start, mut prev) = (0i32, 0, 0);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    (prev, start) = (start, i + 1);
+                }
+            }
+            ';' if depth == 0 => (prev, start) = (start, i + 1),
+            _ => {}
+        }
+    }
+    let last = if s[start..].trim().is_empty() { s[prev..].trim() } else { s[start..].trim() };
+    const ITEMS: &[&str] = &["fn ", "pub ", "pub(", "struct ", "enum ", "union ", "impl", "trait ", "mod ", "macro_rules!", "unsafe fn ", "unsafe impl", "unsafe trait ", "async fn ", "const fn ", "extern ", "#["];
+    last.ends_with(';') || last.ends_with('}') && ITEMS.iter().any(|k| last.starts_with(k))
+}
+
 fn link_is_safe(l: &Expr) -> bool {
     matches!(l.kind, ExprKind::Field { safe: true, .. } | ExprKind::MethodCall { safe: true, .. })
 }
@@ -994,6 +1018,12 @@ impl<'a> Lowerer<'a> {
                 false
             }
             ExprKind::Paren(x) => self.stmt_expr_here(x),
+            // `rust { a(); }` and `rust { fn helper() {} }` are complete statements: another `;`
+            // would be an empty statement, which rustc warns about
+            ExprKind::Raw(s) => {
+                self.expr(e, P_LOWEST);
+                raw_ends_statement(s)
+            }
             ExprKind::Assign(None, target, value) if self.map_entry_types(target).is_some() => {
                 self.map_insert(target, value);
                 false

@@ -479,6 +479,90 @@ fn new_projects_depend_on_oxie_build() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Mistakes on the command line are errors that name them, instead of panics, ignored flags or
+/// packages cargo rejects.
+#[test]
+fn command_line_mistakes_are_reported() {
+    let tmp = std::env::temp_dir().join(format!("oxie-args-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let fails = |args: &[&str], expected: &str| {
+        let out = oxie().args(args).current_dir(&tmp).env("OXIE_CACHE", tmp.join("cache")).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && stderr.contains(expected), "`oxie {}` should fail with `{}`:\n{}", args.join(" "), expected, stderr);
+    };
+    fails(&["new", "."], "run `oxie init`");
+    fails(&["new", ".."], "needs the name of a new directory");
+    fails(&["new", "123"], "starts with a digit");
+    fails(&["new", "-x"], "unknown option `-x`");
+    fails(&["new", "aa", "bb"], "unexpected argument `bb`");
+    fails(&["new", "fn"], "Rust keyword");
+    fails(&["run", "--relase"], "did you mean `--release`?");
+    fails(&["build", "--foo"], "unknown option `--foo` for `oxie build`");
+    fails(&["fmt", "--write"], "unknown option `--write` for `oxie fmt`");
+    fails(&["test", "nope.oxi"], "nope.oxi not found");
+    std::fs::write(tmp.join("s.oxi"), "fun main() = println(\"hi\")\n").unwrap();
+    fails(&["run", "s.oxi", "foo"], "`oxie run s.oxi -- foo`");
+    // a script's syntax errors are Oxie's, also under `oxie test`
+    std::fs::write(tmp.join("broken.oxi"), "fun main() {\n    val x = (1 + 2\n}\n").unwrap();
+    fails(&["test", "broken.oxi"], "broken.oxi:2");
+    let left: Vec<String> = std::fs::read_dir(&tmp).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert!(!left.iter().any(|f| ["123", "-x", "aa", "fn"].contains(&f.as_str())), "{left:?}");
+    // a workspace's root has no package to build
+    std::fs::create_dir_all(tmp.join("ws")).unwrap();
+    std::fs::write(tmp.join("ws/Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    let out = oxie().arg("build").current_dir(tmp.join("ws")).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is a workspace without a package of its own"), "{}", String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `oxie test` shows each warning once, finds tests by any part of their description (in any
+/// case), and doesn't pass on cargo's hint to rerun the internal crate of a script.
+#[test]
+fn test_runs_show_warnings_once() {
+    let tmp = std::env::temp_dir().join(format!("oxie-test-runs-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    assert!(oxie().args(["new", "lib", "--lib"]).current_dir(&tmp).status().unwrap().success());
+    let lib = tmp.join("lib");
+    let test = |args: &[&str], dir: &Path| {
+        let out = oxie().args(args).current_dir(dir).env("CARGO_TARGET_DIR", tmp.join("target")).env("OXIE_CACHE", tmp.join("cache")).output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string(), String::from_utf8_lossy(&out.stderr).to_string())
+    };
+    // the template has no warnings
+    let (ok, stdout, stderr) = test(&["test"], &lib);
+    assert!(ok && !stderr.contains("warning") && stdout.contains("1 passed"), "{stdout}{stderr}");
+    let src = "fun unused(): i32 = 1\n\ntest \"Client connects\" {\n    assert_eq(1, 1)\n}\n\ntest \"server fails\" {\n    assert_eq(1, 2)\n}\n";
+    std::fs::write(lib.join("src/lib.oxi"), src).unwrap();
+    let (ok, stdout, stderr) = test(&["test", "Client"], &lib);
+    assert!(ok && stdout.contains("1 passed") && stdout.contains("1 filtered out"), "{stdout}{stderr}");
+    assert_eq!(stderr.matches("is never used").count(), 1, "{stderr}");
+    std::fs::write(tmp.join("failing.oxi"), "test \"fails\" {\n    assert_eq(1, 2)\n}\n").unwrap();
+    let (ok, stdout, stderr) = test(&["test", "failing.oxi"], &tmp);
+    assert!(!ok && stderr.contains("error: test failed") && !stderr.contains("to rerun"), "{stdout}{stderr}");
+    // the script's errors are counted under its own name, not its hidden crate's
+    std::fs::write(tmp.join("wrong.oxi"), "fun main() {\n    var unchanged = 1\n    val n: i32 = \"a\"\n    println(unchanged)\n}\n").unwrap();
+    let (ok, stdout, stderr) = test(&["run", "wrong.oxi"], &tmp);
+    assert!(!ok && stderr.contains("could not compile `wrong.oxi` due to 1 previous error\n") && !stderr.contains("wrong_"), "{stdout}{stderr}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A path dependency that doesn't compile shows its errors (its warnings aren't the user's).
+#[test]
+fn dependency_errors_are_shown() {
+    let tmp = std::env::temp_dir().join(format!("oxie-dep-errors-{}", std::process::id()));
+    std::fs::create_dir_all(tmp.join("badlib/src")).unwrap();
+    std::fs::write(tmp.join("badlib/Cargo.toml"), "[package]\nname = \"badlib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(tmp.join("badlib/src/lib.rs"), "pub fn f() -> i32 { \"x\" }\nfn unused() {}\n").unwrap();
+    assert!(oxie().args(["new", "app"]).current_dir(&tmp).status().unwrap().success());
+    let manifest = tmp.join("app/Cargo.toml");
+    let m = std::fs::read_to_string(&manifest).unwrap().replace("[dependencies]\n", "[dependencies]\nbadlib = { path = \"../badlib\" }\n");
+    std::fs::write(&manifest, m).unwrap();
+    let out = oxie().arg("build").current_dir(tmp.join("app")).env("CARGO_TARGET_DIR", tmp.join("target")).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && stderr.contains("mismatched types") && stderr.contains("badlib/src/lib.rs:1"), "{stderr}");
+    assert!(!stderr.contains("never used"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `oxie new` and `oxie init` write notes for AI coding agents: an `AGENTS.md` that sends them to
 /// `oxie guide`, and a `CLAUDE.md` that imports it, since Claude Code reads `CLAUDE.md`. In an
 /// existing crate, files of those names that are already there are kept.

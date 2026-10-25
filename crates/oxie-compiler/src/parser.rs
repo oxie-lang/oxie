@@ -75,8 +75,46 @@ pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
     let caps_types = caps_type_names(&toks);
     let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types };
     let file = p.file();
-    diags.append(&mut p.diags);
+    // one error per place: recovering at the end of the file may report the same one again
+    for d in p.diags.drain(..) {
+        if !diags.iter().any(|e: &Diag| e.span == d.span && e.message == d.message) {
+            diags.push(d);
+        }
+    }
+    if let Some(d) = diags.iter_mut().find(|d| d.message.starts_with("expected `}`, found end of file") && d.help.is_none()) {
+        if let Some(open) = unclosed_brace(src, &p.toks) {
+            let line = src[..open as usize].matches('\n').count() + 1;
+            let text = src.lines().nth(line - 1).unwrap_or("").trim();
+            d.help = Some(format!("the `{{` on line {} (`{}`) is never closed", line, text));
+        }
+    }
     (file, diags)
+}
+
+/// The `{` that a file missing a `}` at its end most likely leaves open: the first one closed by
+/// a `}` indented less than its own line (so that `}` closes an outer block), else the innermost
+/// one left open.
+fn unclosed_brace(src: &str, toks: &[lexer::Token]) -> Option<u32> {
+    let indent_of = |at: u32| {
+        let start = src[..at as usize].rfind('\n').map_or(0, |i| i + 1);
+        let line = &src[start..];
+        (line.len() - line.trim_start().len(), start + (line.len() - line.trim_start().len()) == at as usize)
+    };
+    let mut open: Vec<u32> = Vec::new();
+    for t in toks {
+        match &t.tok {
+            Tok::Punct("{") => open.push(t.span.start),
+            Tok::Punct("}") => {
+                let o = open.pop()?;
+                let (close_indent, first_on_line) = indent_of(t.span.start);
+                if first_on_line && close_indent < indent_of(o).0 {
+                    return Some(o);
+                }
+            }
+            _ => {}
+        }
+    }
+    open.last().copied()
 }
 
 /// Parses a standalone expression (used for tests and tooling).
@@ -214,8 +252,11 @@ impl<'a> Parser<'a> {
 
     fn err<T>(&mut self, msg: impl Into<String>) -> PResult<T> {
         let mut sp = self.span();
-        // if the offending token is on a later line, point at the end of the previous one
-        if self.pos > 0 {
+        // if the offending token is on a later line, point at the end of the previous one, where
+        // something is missing; unless that line ended a statement or opened a block, so that the
+        // token itself is out of place
+        let ended = self.toks[..self.pos].iter().rev().find(|t| t.tok != Tok::Newline).is_some_and(|t| matches!(&t.tok, Tok::Punct(p) if matches!(*p, "{" | "}" | ";")));
+        if self.pos > 0 && !ended {
             let prev = self.prev_span();
             if (prev.end as usize) <= (sp.start as usize) && self.src.get(prev.end as usize..sp.start as usize).is_some_and(|gap| gap.contains('\n')) {
                 sp = Span::empty_at(prev.end);
