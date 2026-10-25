@@ -34,6 +34,9 @@ pub struct Fixes {
 /// on its own (`m3:5`) begins, or where it ends (`/`); see [`Printer::strip_marks`].
 const MARK: char = '\u{1}';
 
+/// What an item macro is printed for the first time: as itself, an Oxie item.
+const ITEM_MACRO: &str = "item macro";
+
 /// A method's text between marks.
 fn mark_method(item: usize, index: usize, text: &str) -> String {
     format!("{MARK}m{item}:{index}\n{text}\n{MARK}/")
@@ -364,8 +367,10 @@ impl<'a> Printer<'a> {
             s.push_str(&c);
             s.push('\n');
         }
+        // Oxie calls item macros as Rust does (`actions!(editor, [Newline])`), unless it rejected
+        // this one
         if let syn::Item::Macro(m) = it {
-            if m.mac.path.is_ident("macro_rules") {
+            if m.mac.path.is_ident("macro_rules") || reason == ITEM_MACRO {
                 s.push_str(&rust_item(it));
                 return s;
             }
@@ -732,7 +737,7 @@ impl<'a> Printer<'a> {
                 ));
                 lines.join("\n")
             }
-            syn::Item::Macro(_) => self.raw_item(it, "item macro"),
+            syn::Item::Macro(_) => self.raw_item(it, ITEM_MACRO),
             _ => self.raw_item(it, "no Oxie syntax for this item"),
         }
     }

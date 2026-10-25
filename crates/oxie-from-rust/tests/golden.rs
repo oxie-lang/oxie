@@ -1052,3 +1052,33 @@ fun record(n: usize, seen: &mut Vec<usize>) {
 "#,
     );
 }
+
+#[test]
+fn item_macros_stay_items() {
+    // Oxie calls an item macro as Rust does, so it needs no `rust { }` block
+    check(
+        r#"
+thread_local! {
+    static COUNT: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+
+fn bump() -> u32 {
+    COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    })
+}
+"#,
+        r#"thread_local! {
+    static COUNT : std::cell::Cell < u32 > = std::cell::Cell::new(0);
+}
+
+fun bump(): u32 {
+    COUNT.with { c ->
+        c.set(c.get() + 1)
+        c.get()
+    }
+}
+"#,
+    );
+}
