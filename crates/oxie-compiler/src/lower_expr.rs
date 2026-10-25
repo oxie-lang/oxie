@@ -1339,6 +1339,20 @@ impl<'a> Lowerer<'a> {
             Cast(..) => P_CAST,
             Unary(..) => P_UNARY,
             Is { negated: true, .. } | In { negated: true, .. } => P_UNARY,
+            // `x in a..b` is `a <= x && x < b`, a comparison with one bound, or a block that
+            // evaluates `x` once
+            In { item, coll, .. } if matches!(strip_paren(coll).kind, Range { .. }) => {
+                let Range { start, end, .. } = &strip_paren(coll).kind else { unreachable!() };
+                if !self.is_place(item) && !is_literal(item) {
+                    P_PRIMARY
+                } else if start.is_some() && end.is_some() {
+                    BinOp::And.prec()
+                } else if start.is_some() || end.is_some() {
+                    BinOp::Eq.prec()
+                } else {
+                    P_PRIMARY
+                }
+            }
             Try(_) if self.in_try_block() => P_PRIMARY,
             Try(_) | Unwrap(_) | Await(_) | Field { .. } | MethodCall { .. } | Call { .. } | Index(..) | In { .. } => P_POSTFIX,
             Paren(x) => self.prec_of(x),
@@ -1364,6 +1378,7 @@ impl<'a> Lowerer<'a> {
             Elvis(_, r) => !is_literal(r),
             Try(_) => self.in_try_block(),
             MethodCall { name, args, .. } => (name == "copy" && !args.is_empty() && args.iter().all(|a| a.name.is_some())) || name == "let",
+            In { item, coll, negated: false } => matches!(strip_paren(coll).kind, Range { .. }) && !self.is_place(item) && !is_literal(item),
             Paren(x) => self.emits_block_like(x),
             _ => false,
         }
@@ -1950,14 +1965,18 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `x in a..b` -> `a <= x && x < b` (x is evaluated once)
+    /// `x in a..b` -> `a <= x && x < b` (x is evaluated once). In parentheses only after the `!`
+    /// of `!in`: `prec_of` tells `expr` where it needs them.
     fn in_range(&mut self, item: &Expr, start: Option<&Expr>, end: Option<&Expr>, inclusive: bool, negated: bool) {
         let simple = self.is_place(item) || is_literal(item);
         let var = if simple { None } else { Some(self.fresh("x")) };
+        let parens = negated && simple;
         if negated {
             self.e.w("!");
         }
-        self.e.w("(");
+        if parens {
+            self.e.w("(");
+        }
         if let Some(v) = &var {
             self.e.w(&format!("{{ let {} = ", v));
             self.expr(item, P_LOWEST);
@@ -1989,7 +2008,9 @@ impl<'a> Lowerer<'a> {
         if var.is_some() {
             self.e.w(" }");
         }
-        self.e.w(")");
+        if parens {
+            self.e.w(")");
+        }
     }
 
     fn comma_list(&mut self, v: &[Expr]) {
@@ -4099,6 +4120,11 @@ impl<'a> Lowerer<'a> {
                             }
                         }
                         self.e.w(&format!("ref {} if ", w));
+                        // `a || b && (guard)` would bind the guard to the last check only
+                        let grouped = checks.len() > 1 && arm.guard.is_some();
+                        if grouped {
+                            self.e.w("(");
+                        }
                         for (i, c) in checks.iter().enumerate() {
                             if i > 0 {
                                 self.e.w(" || ");
@@ -4151,6 +4177,9 @@ impl<'a> Lowerer<'a> {
                                 }
                                 _ => {}
                             }
+                        }
+                        if grouped {
+                            self.e.w(")");
                         }
                         if let Some(g) = &arm.guard {
                             self.e.w(" && (");
