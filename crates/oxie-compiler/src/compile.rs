@@ -141,6 +141,7 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         sema::collect(&units, &opts.crate_name, opts.extern_crates.clone(), has_lib)
     };
     let mut k = collect(&parsed);
+    sema::ext_receivers(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
     // builder methods that return `this` take `self`; sema again for their receivers
     if sema::by_value_receivers(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k) {
         k = collect(&parsed);
@@ -406,7 +407,8 @@ mod tests {
         // the method shares the name of the function whose parameter is lent, but keeps its own
         let src = "fun describe(t: String): usize = t.len()\nclass Shelf(var items: Vec<String> = vec[]) {\n    fun describe(t: String) { items.push(t) }\n}\n";
         let ds = decisions(src);
-        assert_eq!(ds.iter().filter(|(about, ..)| about.starts_with("t:")).count(), 1, "{ds:?}");
+        let about_t: Vec<(&str, &str)> = ds.iter().filter(|(about, ..)| about.starts_with("t:")).map(|(_, chosen, why)| (chosen.as_str(), why.as_str())).collect();
+        assert_eq!(about_t, [("&str", "it only reads `t`"), ("owned", "it passes `t` to `.push()`")], "{ds:?}");
         assert!(ds.contains(&("describe".into(), "&mut self".into(), "it calls `items.push()`".into())), "{ds:?}");
     }
 

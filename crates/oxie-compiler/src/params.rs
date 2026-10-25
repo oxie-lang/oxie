@@ -285,11 +285,23 @@ impl<'a> Types<'a> {
     }
 }
 
-/// The top-level functions of the items, with the module inside the file that declares each.
-fn top_level_funs<'a>(items: &'a [Item], module: &[String], out: &mut Vec<(Vec<String>, &'a Item, &'a FunDecl)>) {
+/// The top-level functions of the items, and the methods of their classes (not of shared
+/// classes, whose methods a handle forwards to), with the module inside the file that declares
+/// each and whether it is a method.
+fn top_level_funs<'a>(items: &'a [Item], module: &[String], out: &mut Vec<(Vec<String>, &'a Item, &'a FunDecl, bool)>) {
+    fn methods<'a>(t: &'a TypeDecl, module: &[String], out: &mut Vec<(Vec<String>, &'a Item, &'a FunDecl, bool)>) {
+        for m in &t.members {
+            match &m.kind {
+                ItemKind::Fun(f) if !t.shared => out.push((module.to_vec(), m, f, true)),
+                ItemKind::Type(inner) => methods(inner, module, out),
+                _ => {}
+            }
+        }
+    }
     for it in items {
         match &it.kind {
-            ItemKind::Fun(f) => out.push((module.to_vec(), it, f)),
+            ItemKind::Fun(f) => out.push((module.to_vec(), it, f, false)),
+            ItemKind::Type(t) => methods(t, module, out),
             ItemKind::Mod { name, items } => top_level_funs(items, &[module, std::slice::from_ref(name)].concat(), out),
             _ => {}
         }
@@ -418,12 +430,23 @@ struct Cand<'a> {
     drops: Option<(Span, String)>,
 }
 
+/// A parameter: the index of the file declaring its function, the start of the function's name,
+/// and the parameter's position.
+type Key = (usize, u32, usize);
+
 /// The (function, parameter index) pairs that can be borrowed, found as a greatest fixpoint.
 struct Analysis<'a> {
-    decls: HashMap<&'a str, &'a FunDecl>,
+    /// The top-level functions whose names no other one has, with their files.
+    decls: HashMap<&'a str, (usize, &'a FunDecl)>,
     cands: Vec<Cand<'a>>,
-    alive: HashSet<(String, usize)>,
+    alive: HashSet<Key>,
     stage: Stage<'a>,
+}
+
+impl Cand<'_> {
+    fn key(&self) -> Key {
+        (self.file, self.fun.name_span.start, self.index)
+    }
 }
 
 impl<'a> Analysis<'a> {
@@ -434,14 +457,30 @@ impl<'a> Analysis<'a> {
         for (i, (module, f)) in files.iter().enumerate() {
             let mut here = Vec::new();
             top_level_funs(&f.items, module, &mut here);
-            funs.extend(here.into_iter().map(|(m, it, d)| (i, m, it, d)));
+            funs.extend(here.into_iter().map(|(m, it, d, method)| (i, m, it, d, method)));
         }
         let files: Vec<&File> = files.iter().map(|(_, f)| *f).collect();
         let mut count: HashMap<&str, usize> = HashMap::new();
-        for (.., f) in &funs {
-            *count.entry(f.name.as_str()).or_default() += 1;
+        for (.., f, method) in &funs {
+            if !method {
+                *count.entry(f.name.as_str()).or_default() += 1;
+            }
         }
-        let decls: HashMap<&str, &FunDecl> = funs.iter().filter(|(.., f)| count[f.name.as_str()] == 1).map(|(.., f)| (f.name.as_str(), *f)).collect();
+        let decls: HashMap<&str, (usize, &FunDecl)> = funs.iter().filter(|(.., f, method)| !method && count[f.name.as_str()] == 1).map(|(i, .., f, _)| (f.name.as_str(), (*i, *f))).collect();
+        // the methods of interfaces, whose implementations keep the interface's signature
+        let mut iface_methods: HashSet<&str> = HashSet::new();
+        fn ifaces<'a>(items: &'a [Item], out: &mut HashSet<&'a str>) {
+            for it in items {
+                match &it.kind {
+                    ItemKind::Trait(t) => out.extend(t.members.iter().filter_map(|m| if let ItemKind::Fun(f) = &m.kind { Some(f.name.as_str()) } else { None })),
+                    ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => ifaces(items, out),
+                    _ => {}
+                }
+            }
+        }
+        for f in &files {
+            ifaces(&f.items, &mut iface_methods);
+        }
 
         // functions used as values (`xs.map(greet)`) or called through a path (`util.greet(x)`, whose
         // arguments this analysis doesn't follow) keep their signature
@@ -458,6 +497,10 @@ impl<'a> Analysis<'a> {
                             as_value.insert(segs.last().cloned().unwrap_or_default());
                         }
                     }
+                    // a method as a value (`Self.save`), or a field of its name
+                    if let ExprKind::Field { name, .. } = &e.kind {
+                        as_value.insert(name.clone());
+                    }
                     true
                 });
             });
@@ -466,9 +509,9 @@ impl<'a> Analysis<'a> {
         let types = Types::new(&files);
         let mut cands = Vec::new();
         let mut alive = HashSet::new();
-        for (file, module, it, f) in &funs {
+        for (file, module, it, f, method) in &funs {
             let eligible = it.vis != Vis::Public
-                && decls.contains_key(f.name.as_str())
+                && if *method { !f.mods.is_override && !f.mods.is_operator && !iface_methods.contains(f.name.as_str()) } else { decls.contains_key(f.name.as_str()) }
                 && !as_value.contains(&f.name)
                 && f.name != "main"
                 && f.receiver.is_none()
@@ -496,19 +539,14 @@ impl<'a> Analysis<'a> {
                     Kind::Class | Kind::Boxed => types.kept_for_drop(&p.ty, name, f, true),
                 };
                 if drops.is_none() {
-                    alive.insert((f.name.clone(), i));
+                    alive.insert((*file, f.name_span.start, i));
                 }
                 cands.push(Cand { file: *file, fun: f, index: i, kind, name: name.as_str(), ty: p.ty.clone(), module: module.clone(), body: body.clone(), class, drops });
             }
         }
         let mut a = Analysis { decls, cands, alive, stage };
         loop {
-            let dead: Vec<(String, usize)> = a
-                .cands
-                .iter()
-                .filter(|c| a.alive.contains(&(c.fun.name.clone(), c.index)) && a.first_owned_use(c).is_some())
-                .map(|c| (c.fun.name.clone(), c.index))
-                .collect();
+            let dead: Vec<Key> = a.cands.iter().filter(|c| a.alive.contains(&c.key()) && a.first_owned_use(c).is_some()).map(|c| c.key()).collect();
             if dead.is_empty() {
                 break;
             }
@@ -522,7 +560,7 @@ impl<'a> Analysis<'a> {
     /// Does an argument of a call to `callee` only lend the value: its parameter is a `&`
     /// reference, or one that is borrowed itself?
     fn lends(&self, callee: &str, pos: usize, arg: &Arg) -> bool {
-        let Some(d) = self.decls.get(callee) else { return false };
+        let Some(&(file, d)) = self.decls.get(callee) else { return false };
         let i = match &arg.name {
             Some(n) => match d.params.iter().position(|p| p.name() == Some(n.as_str())) {
                 Some(i) => i,
@@ -532,7 +570,7 @@ impl<'a> Analysis<'a> {
         };
         match d.params.get(i) {
             Some(p) if matches!(p.ty, Type::Ref { mutable: false, .. }) => true,
-            Some(_) => self.alive.contains(&(callee.to_string(), i)),
+            Some(_) => self.alive.contains(&(file, d.name_span.start, i)),
             None => false,
         }
     }
@@ -891,7 +929,7 @@ pub fn borrow_class_params(files: &mut [(&[String], &mut File)], k: &Crate) -> V
 /// what happened to each candidate.
 fn lend(files: &mut [(&[String], &mut File)], stage: Stage) -> Vec<ParamNote> {
     // the notes, and the type each lent parameter gets, by (function, parameter index)
-    let (notes, lent): (Vec<ParamNote>, HashMap<(String, usize), Type>) = {
+    let (notes, lent): (Vec<ParamNote>, HashMap<Key, Type>) = {
         let views: Vec<(&[String], &File)> = files.iter().map(|(m, f)| (*m, &**f)).collect();
         let a = Analysis::new(&views, stage);
         let mut lent = HashMap::new();
@@ -902,7 +940,7 @@ fn lend(files: &mut [(&[String], &mut File)], stage: Stage) -> Vec<ParamNote> {
                 let kept = a.kept_why(c);
                 let borrowed = kept.is_none();
                 if borrowed {
-                    lent.insert((c.fun.name.clone(), c.index), lent_type(&c.fun.params[c.index].ty, c.kind));
+                    lent.insert(c.key(), lent_type(&c.fun.params[c.index].ty, c.kind));
                 }
                 let (cause, why) = match kept {
                     Some((span, why)) => (Some(span), why),
@@ -913,24 +951,25 @@ fn lend(files: &mut [(&[String], &mut File)], stage: Stage) -> Vec<ParamNote> {
             .collect();
         (notes, lent)
     };
-    fn apply(items: &mut [Item], lent: &HashMap<(String, usize), Type>) {
+    fn apply(file: usize, items: &mut [Item], lent: &HashMap<Key, Type>) {
         for it in items {
             match &mut it.kind {
                 ItemKind::Fun(f) => {
                     for (i, p) in f.params.iter_mut().enumerate() {
-                        if let Some(t) = lent.get(&(f.name.clone(), i)) {
+                        if let Some(t) = lent.get(&(file, f.name_span.start, i)) {
                             p.ty = t.clone();
                         }
                     }
                 }
-                ItemKind::Mod { items, .. } => apply(items, lent),
+                ItemKind::Type(t) => apply(file, &mut t.members, lent),
+                ItemKind::Mod { items, .. } => apply(file, items, lent),
                 _ => {}
             }
         }
     }
     if !lent.is_empty() {
-        for (_, f) in files.iter_mut() {
-            apply(&mut f.items, &lent);
+        for (i, (_, f)) in files.iter_mut().enumerate() {
+            apply(i, &mut f.items, &lent);
         }
     }
     notes

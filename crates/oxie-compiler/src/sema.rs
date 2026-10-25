@@ -588,6 +588,39 @@ pub fn by_value_receivers(files: &mut [(&[String], &mut File)], k: &Crate) -> bo
     changed
 }
 
+/// Extension functions take `&mut self` when their body changes the receiver, like methods:
+/// assigns its fields, calls a method of it that does (`&mut self` methods of an Oxie class, a
+/// mutating std method like `push` on any other type), or takes `&mut` of a field. Runs after
+/// receiver inference (`k`), which tells what the class's methods take.
+pub fn ext_receivers(files: &mut [(&[String], &mut File)], k: &Crate) {
+    fn go(items: &mut [Item], module: &[String], k: &Crate) {
+        for it in items {
+            match &mut it.kind {
+                ItemKind::Fun(f) if f.receiver.is_some() && f.self_param.is_none() && !f.mods.is_mut && !f.mods.is_static => {
+                    let class = f.receiver.as_ref().and_then(|r| r.single_name()).and_then(|n| k.class_in(n, module)).filter(|c| !c.is_shared);
+                    let fields: HashSet<String> = class.map(|c| c.fields.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
+                    let methods: HashMap<String, Recv> = match class {
+                        Some(c) => c.methods.iter().map(|(n, m)| (n.clone(), m.recv)).collect(),
+                        // not the names that also read on common types (`str::replace`, `Iterator::take`)
+                        None => MUTATING_METHODS.iter().filter(|m| !matches!(**m, "replace" | "take" | "set" | "read" | "write" | "next" | "nth")).map(|m| (m.to_string(), Recv::RefMut)).collect(),
+                    };
+                    if analyze_fun(f, &fields, &methods).mutates_self {
+                        f.mods.is_mut = true;
+                    }
+                }
+                ItemKind::Mod { name, items } => {
+                    let inner: Vec<String> = module.iter().cloned().chain([name.clone()]).collect();
+                    go(items, &inner, k);
+                }
+                _ => {}
+            }
+        }
+    }
+    for (module, f) in files.iter_mut() {
+        go(&mut f.items, module, k);
+    }
+}
+
 /// Classes and enums whose fields hold references get a lifetime parameter: `class Parser(input: &str)`
 /// becomes `struct Parser<'a> { input: &'a str }`. A field naming such a type (`Vec<Token>`) needs
 /// one too, so this runs over the whole crate before symbols are collected.
