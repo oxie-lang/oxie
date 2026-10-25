@@ -300,9 +300,12 @@ impl<'a> Lowerer<'a> {
 
     fn let_stmt(&mut self, pat: &Pat, ty: Option<&Type>, init: Option<&Expr>, else_: Option<&Block>) {
         let mut p = self.pat(pat);
-        // closures that assign to captured variables are FnMut and must be `let mut` to be called
-        if let (Some(Expr { kind: ExprKind::Lambda { body, .. }, .. }), Pat::Ident { mutable: false, .. }) = (init, pat) {
-            if visit::has_assignment(body) {
+        // closures that assign to captured variables or change them are FnMut and must be
+        // `let mut` to be called
+        if let (Some(Expr { kind: ExprKind::Lambda { body, params, .. }, .. }), Pat::Ident { mutable: false, .. }) = (init, pat) {
+            let mut own = vec!["it".to_string()];
+            params.iter().for_each(|p| p.pat.bindings(&mut own));
+            if visit::has_assignment(body) || self.changes_captured(body, &own) {
                 p = format!("mut {}", p);
             }
         }
@@ -342,6 +345,41 @@ impl<'a> Lowerer<'a> {
         self.e.w(";");
         let known = ty.cloned().or_else(|| init.and_then(|e| self.infer_type(e))).or_else(|| init.and_then(|e| self.generic_ctor_type(e)));
         self.bind_pat(pat, known);
+    }
+
+    /// Does a lambda's body change a variable it captures (one in scope where the lambda is
+    /// declared, or a field of `this`; not its parameters `own`): call a mutating method on it (`log.push(s)`, or an Oxie
+    /// class's `&mut self` method), or pass it to a `&mut` parameter (`fill(log)`)?
+    fn changes_captured(&self, body: &Expr, own: &[String]) -> bool {
+        let captured = |e: &Expr| {
+            let mut cur = e;
+            while let ExprKind::Field { recv, safe: false, .. } | ExprKind::Index(recv, _) | ExprKind::Paren(recv) = &cur.kind {
+                cur = recv;
+            }
+            cur.ident().is_some_and(|n| !own.iter().any(|o| o == n) && (self.is_local(n) || self.implicit_field(n).is_some()))
+        };
+        let mut found = false;
+        visit::walk_expr(body, &mut |x| {
+            match &x.kind {
+                ExprKind::MethodCall { recv, name, safe: false, .. } => {
+                    if captured(recv) {
+                        let direct = recv.ident().is_some();
+                        let ty = if direct { self.infer_type(recv) } else { None };
+                        found |= crate::sema::MUTATING_METHODS.contains(&name.as_str()) || direct && self.changing_methods(ty.as_ref()).contains(name);
+                    }
+                }
+                ExprKind::Call { callee, args } => {
+                    if let Some(f) = callee.ident().filter(|n| !self.is_local(n)).and_then(|n| self.fun_info(n)) {
+                        for (a, p) in args.iter().zip(&f.params) {
+                            found |= a.name.is_none() && matches!(p.ty, Type::Ref { mutable: true, .. }) && a.value.ident().is_some() && captured(&a.value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            !found
+        });
+        found
     }
 
     /// The calls to move into locals before a statement `e` that calls a method on a field of
