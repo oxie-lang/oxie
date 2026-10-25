@@ -171,7 +171,8 @@ fn parse_args(cmd: &str, args: &[String], known: &[&[&'static str]]) -> Result<A
     };
     let mut parsed = Args { flags: Vec::new(), positional: Vec::new(), rest };
     for a in before {
-        if !a.starts_with('-') || a == "-" {
+        // not an option: `-` (stdin), and a test's description like "-1 is negative"
+        if !a.starts_with('-') || a == "-" || a.contains(char::is_whitespace) || a[1..].starts_with(|c: char| c.is_ascii_digit()) {
             parsed.positional.push(a.clone());
             continue;
         }
@@ -345,7 +346,12 @@ fn precheck_script(proj: &Project, abs: &Path, testing: bool) -> Result<bool, St
     }
     let (file, _) = oxie_compiler::parser::parse_file(&src);
     let has = |f: &dyn Fn(&oxie_compiler::ast::ItemKind) -> bool| file.items.iter().any(|i| f(&i.kind));
-    let has_main = has(&|k| matches!(k, oxie_compiler::ast::ItemKind::Fun(f) if f.name == "main" && f.receiver.is_none()));
+    // also a `fn main` kept as Rust in a `rust { }` block
+    let has_main = has(&|k| match k {
+        oxie_compiler::ast::ItemKind::Fun(f) => f.name == "main" && f.receiver.is_none(),
+        oxie_compiler::ast::ItemKind::Raw(r) => r.lines().any(|l| l.trim_start().trim_start_matches("pub ").starts_with("fn main(")),
+        _ => false,
+    });
     let has_tests = has(&|k| matches!(k, oxie_compiler::ast::ItemKind::Test(_)));
     if has_main || (testing && has_tests) {
         return Ok(true);

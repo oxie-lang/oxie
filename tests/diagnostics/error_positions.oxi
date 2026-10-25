@@ -8,7 +8,7 @@ interface Shape {
 }
 
 class Square(side: f64) : Shape
-// error: 10:7: not all trait items implemented
+// error: 10:27: not all trait items implemented
 
 class Named(name: String)
 

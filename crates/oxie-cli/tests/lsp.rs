@@ -555,6 +555,10 @@ fn check_fixes(p: &Path, cache: &Path) -> (usize, Vec<String>) {
     };
     // the errors and their fixes, as an editor gets them
     let work = copy_to(&fixes_dir.join(&name));
+    // with Oxie errors in any file of it, the server doesn't run cargo check
+    if oxie_errors(&work, project).is_some() {
+        return (0, Vec::new());
+    }
     let main = if project { work.join("src/main.oxi") } else { work.join(&name) };
     let main_name = main.file_name().unwrap().to_string_lossy().to_string();
     let uri = file_uri(&main);

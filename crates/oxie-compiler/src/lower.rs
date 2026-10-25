@@ -2255,8 +2255,12 @@ impl<'a> Lowerer<'a> {
             return;
         }
         let tname = self.ty(tr, TyPos::Plain);
-        // errors about the impl as a whole (a missing method) point at the class
-        self.e.mark(class_name);
+        // errors about the impl as a whole (a missing method, a class that isn't an interface)
+        // point at the interface after the class's name, or at the class
+        match tr {
+            Type::Path { span, .. } if *span != Span::default() => self.e.mark(*span),
+            _ => self.e.mark(class_name),
+        }
         self.e.w(&format!("impl{} {} for {}{} {{", g, tname, self_ty, wc));
         self.e.indent();
         let trait_info = tr.last_name().and_then(|n| self.k.traits.get(n)).cloned();
