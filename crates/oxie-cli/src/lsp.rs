@@ -530,7 +530,7 @@ const STD_TYPES: &[&str] = &[
 const COMMON_METHODS: &[&str] = &[
     "len", "is_empty", "push", "pop", "insert", "remove", "get", "contains", "iter", "iter_mut", "into_iter", "map", "filter",
     "filter_map", "flat_map", "fold", "for_each", "collect", "sum", "count", "min", "max", "find", "any", "all", "enumerate",
-    "zip", "rev", "take", "skip", "chain", "sort", "sort_by", "sort_by_key", "dedup", "clone", "to_string", "to_owned",
+    "zip", "rev", "take", "skip", "chain", "sort", "sort_by", "sort_by_key", "dedup", "clone", "to_string", "to_owned", "to_list",
     "as_str", "trim", "split", "lines", "chars", "parse", "to_uppercase", "to_lowercase", "starts_with", "ends_with",
     "replace", "join", "unwrap", "expect", "unwrap_or", "unwrap_or_default", "ok", "map_err", "and_then", "is_some",
     "is_none", "is_ok", "is_err", "keys", "values", "entry", "or_insert", "context", "first", "last", "extend", "retain",

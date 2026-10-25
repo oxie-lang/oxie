@@ -19,6 +19,10 @@
   methods; a library's keep the types they declare.
 * A parameter stored through a field written without its value (`Point { x, y }`) or named in a
   `rust { }` block is no longer borrowed. Before, the generated Rust didn't compile.
+* The language server shows lists and maps as written, `[String]` and `[String: i32]`, in hovers
+  and symbol details (`&Vec<T>` and `Box<[T]>` stay as they are), and completes `to_list()`. An
+  error about a list or map parameter that a function keeps says why instead of offering to
+  borrow it.
 * A method call whose result Oxie knows is a value (`describe(Point.origin())`) is lent to a `&T`
   parameter, as function calls already were.
 * `oxie from-rust` writes `[T]` and `[K: V]` (for std's `HashMap`), `[a, b]` and `[]` for a

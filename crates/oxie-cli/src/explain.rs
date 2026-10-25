@@ -207,9 +207,13 @@ fn moved_value(d: &mut MappedDiag, sources: &Sources, lines: &[&str], name: &str
         let (pl, pc, pe, ty) = fun_param(&lines, f, *index)?;
         Some((sources.elsewhere(&file.path, &d.file), pl, pc, pe, ty, lines[pl as usize].to_string()))
     });
-    // Oxie already lends `String` and `Vec` parameters that a top-level function only reads; one
-    // that stayed owned is kept by the function (stored or returned), so `&` wouldn't compile
-    let kept = param.as_ref().is_some_and(|(.., ty, decl)| ["fun ", "private fun ", "internal fun "].iter().any(|p| decl.starts_with(p)) && (ty == "String" || ty.starts_with("Vec<")));
+    // Oxie already lends `String`, list, map, set and `PathBuf` parameters that a top-level
+    // function only reads; one that stayed owned is kept by the function (stored or returned), so
+    // `&` wouldn't compile
+    let lendable = |ty: &str| {
+        ty == "String" || ty == "PathBuf" || (ty.starts_with('[') && !ty.contains(';')) || ["Vec<", "HashMap<", "HashSet<", "BTreeMap<", "BTreeSet<"].iter().any(|p| ty.starts_with(p))
+    };
+    let kept = param.as_ref().is_some_and(|(.., ty, decl)| ["fun ", "private fun ", "internal fun "].iter().any(|p| decl.starts_with(p)) && lendable(ty));
     if kept {
         // say where and why the function keeps it, from the same rules that decided it
         let why = callee.as_ref().and_then(|(f, index)| kept_reason(sources, &d.file, f, *index));
