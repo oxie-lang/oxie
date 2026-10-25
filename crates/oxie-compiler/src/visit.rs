@@ -511,6 +511,18 @@ pub fn idents_in(e: &Expr, out: &mut Vec<String>) {
     });
 }
 
+/// Do these statements mention the name `name`?
+pub fn stmts_use(stmts: &[Stmt], name: &str) -> bool {
+    let mut found = false;
+    for s in stmts {
+        walk_stmt(s, &mut |x| {
+            found |= x.ident() == Some(name);
+            !found
+        });
+    }
+    found
+}
+
 /// Is `name` referenced inside any lambda within the function body?
 pub fn ident_in_lambda(b: &FunBody, name: &str) -> bool {
     let mut found = false;

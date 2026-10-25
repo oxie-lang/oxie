@@ -242,7 +242,16 @@ impl<'a> Lowerer<'a> {
                     self.tail_moving_args(expr, tail.unwrap());
                 }
             } else {
+                // `if (x == null) return` unwraps `x` only for a rest of the block that uses it
+                if let Stmt::Expr { expr, .. } = s {
+                    if let ExprKind::If { cond, else_: None, .. } = &expr.kind {
+                        if let Cond::Expr(c) = &**cond {
+                            self.unused_after_check = self.null_check(c, BinOp::Eq).filter(|x| !visit::stmts_use(&stmts[i + 1..], x)).map(str::to_string);
+                        }
+                    }
+                }
                 self.stmt(s);
+                self.unused_after_check = None;
             }
         }
         self.local_funs.truncate(outer_funs);
@@ -1251,6 +1260,83 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `x!!` on a variable or field, followed by a method call that borrows the value, unwraps
+    /// a reference instead of moving the value out (as `?.` does): `x.as_ref().unwrap()`, or
+    /// `x.as_mut().unwrap()` for a method that changes it. Also through fields: `a!!.b!!.len()`.
+    /// A `Copy` value and a method that takes the value (`into_bytes`) unwrap as they are.
+    fn unwrap_for_call(&self, recv: &Expr, method: &str) -> Option<Expr> {
+        if method.starts_with("into_") || method.starts_with("unwrap") || matches!(method, "expect" | "join" | "await") {
+            return None;
+        }
+        let value_ty = |x: &Expr| {
+            let mut t = self.through_unwraps_type(x)?;
+            while let Type::Ref { inner, .. } = t {
+                t = *inner;
+            }
+            Some(t)
+        };
+        let mut x = strip_paren(recv);
+        while let ExprKind::Field { recv, safe: false, .. } = &x.kind {
+            x = strip_paren(recv);
+        }
+        let ExprKind::Unwrap(_) = &x.kind else { return None };
+        let recv_ty = value_ty(strip_paren(recv));
+        let class_recv = recv_ty.as_ref().and_then(|t| self.type_owner(t)).and_then(|o| self.class_at(&o)).and_then(|c| c.methods.get(method)).map(|m| m.recv.clone());
+        let mutating = match class_recv {
+            Some(crate::sema::Recv::Value) => return None,
+            Some(r) => r == crate::sema::Recv::RefMut,
+            None => crate::sema::MUTATING_METHODS.contains(&method) && method != "replace",
+        };
+        self.unwrap_places(recv, if mutating { "as_mut" } else { "as_ref" })
+    }
+
+    /// `e` with each `x!!` on a place in its chain of fields unwrapping a reference.
+    fn unwrap_places(&self, e: &Expr, borrow: &str) -> Option<Expr> {
+        match &e.kind {
+            ExprKind::Paren(x) => self.unwrap_places(x, borrow),
+            ExprKind::Field { recv, name, safe: false } if self.as_path(e).is_none() => {
+                let r = self.unwrap_places(recv, borrow)?;
+                Some(Expr::new(ExprKind::Field { recv: Box::new(r), name: name.clone(), safe: false }, e.span))
+            }
+            ExprKind::Unwrap(x) => {
+                let x = strip_paren(x);
+                let place = match &x.kind {
+                    ExprKind::Field { safe: false, .. } => self.as_path(x).is_none(),
+                    ExprKind::Path { .. } | ExprKind::Index(..) | ExprKind::SelfValue => self.is_place(x),
+                    _ => false,
+                };
+                let inner = self.unwrap_places(x, borrow);
+                let copy = self.through_unwraps_type(x).and_then(|t| option_inner(&t)).is_some_and(|t| {
+                    let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+                    crate::sema::is_copy_simple(&t, &copy)
+                });
+                if !place || copy {
+                    return inner.map(|i| Expr::new(ExprKind::Unwrap(Box::new(i)), e.span));
+                }
+                let x = inner.unwrap_or_else(|| x.clone());
+                let call = Expr::new(ExprKind::MethodCall { recv: Box::new(x), name: borrow.to_string(), generics: None, args: Vec::new(), safe: false }, e.span);
+                Some(Expr::new(ExprKind::Unwrap(Box::new(call)), e.span))
+            }
+            _ => None,
+        }
+    }
+
+    /// The type of `e`, also through fields read after `!!` (`a!!.b`).
+    fn through_unwraps_type(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Paren(x) => self.through_unwraps_type(x),
+            ExprKind::Unwrap(x) => option_inner(&self.through_unwraps_type(x)?),
+            ExprKind::Field { recv, name, safe: false } if matches!(strip_paren(recv).kind, ExprKind::Unwrap(_) | ExprKind::Field { .. }) => {
+                let mut t = self.through_unwraps_type(recv)?;
+                while let Type::Ref { inner, .. } = t {
+                    t = *inner;
+                }
+                self.class_info(t.single_name()?)?.fields.iter().find(|f| &f.name == name).map(|f| f.ty.clone()).filter(|t| *t != Type::Infer)
+            }
+            _ => self.chain_value_type(e),
+        }
+    }
+
     fn place_is_option(&self, e: &Expr) -> bool {
         if let Some(n) = e.ident() {
             if let Some(Some(t)) = self.local(n) {
@@ -1344,6 +1430,16 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn expr_inner(&mut self, e: &Expr) {
         use ExprKind::*;
+        // `x!!.len()` reads through the value: `x.as_ref().unwrap().len()`
+        if let MethodCall { recv, name, safe: false, .. } = &e.kind {
+            if let Some(r) = self.unwrap_for_call(recv, name) {
+                let mut e = e.clone();
+                if let MethodCall { recv, .. } = &mut e.kind {
+                    **recv = r;
+                }
+                return self.expr_inner(&e);
+            }
+        }
         // fields of shared-class handles
         match &e.kind {
             Field { safe: false, .. } | Index(..) | MethodCall { safe: false, .. } if self.shared_access(e) => return,
@@ -2134,8 +2230,14 @@ impl<'a> Lowerer<'a> {
         and_operands(e, &mut parts);
         let mut typed = Vec::new();
         let mut out = Vec::new();
-        for p in parts {
-            match self.null_check(p, BinOp::Ne).and_then(|x| self.narrowable(x, then).map(|t| (x, t))) {
+        for (i, &p) in parts.iter().enumerate() {
+            // a branch (and rest of the condition) that doesn't use `x` keeps the check (`x.is_some()`)
+            let used = |x: &&str| {
+                let mut names = Vec::new();
+                parts[i + 1..].iter().for_each(|c| visit::idents_in(c, &mut names));
+                names.iter().any(|n| n == x) || visit::stmts_use(&then.stmts, x)
+            };
+            match self.null_check(p, BinOp::Ne).filter(used).and_then(|x| self.narrowable(x, then).map(|t| (x, t))) {
                 Some((x, inner)) => {
                     let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
                     let by_value = crate::sema::is_copy_simple(&inner, &copy);
@@ -2197,6 +2299,9 @@ impl<'a> Lowerer<'a> {
         let ExprKind::If { cond, then, else_: None } = &e.kind else { return false };
         let Cond::Expr(c) = &**cond else { return false };
         let Some(x) = self.null_check(c, BinOp::Eq) else { return false };
+        if self.unused_after_check.as_deref() == Some(x) {
+            return false;
+        }
         let exits = matches!(then.stmts.last(), Some(Stmt::Expr { expr, .. }) if expr.diverges());
         let empty = Block { stmts: Vec::new(), span: then.span };
         let Some(inner) = self.narrowable(x, &empty).filter(|_| exits) else { return false };
@@ -3826,6 +3931,29 @@ impl<'a> Lowerer<'a> {
     fn elvis(&mut self, l: &Expr, r: &Expr) {
         let saved = self.force_safe;
         self.force_safe = true;
+        // `a ?: b` with an optional `b` is optional too (`a ?: b ?: 0`): `a.or(b)`, and
+        // `a.or_else(|| f())` so that `f()` runs only when `a` is null
+        let r_opt = matches!(strip_paren(r).kind, ExprKind::Null) || has_safe_link(r) || self.place_is_option(r) || self.infer_type(r).is_some_and(|t| option_inner(&t).is_some());
+        if r_opt {
+            let left_opt = self.is_option_expr(l);
+            if !left_opt {
+                self.e.w(&format!("{}::Elvis::opt(", RT));
+            }
+            self.expr(l, if left_opt { P_POSTFIX } else { P_LOWEST });
+            self.force_safe = saved;
+            if !left_opt {
+                self.e.w(")");
+            }
+            if self.is_plain_default(r) {
+                self.e.w(".or(");
+                self.expr(r, P_LOWEST);
+            } else {
+                self.e.w(".or_else(|| ");
+                self.expr(r, P_LOWEST);
+            }
+            self.e.w(")");
+            return;
+        }
         if self.is_plain_default(r) {
             self.e.w(&format!("{}::ElvisOr::or_val(", RT));
             self.expr(l, P_LOWEST);
