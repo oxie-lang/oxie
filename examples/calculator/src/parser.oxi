@@ -32,7 +32,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
 
     fun expression(): Expr throws ParseError {
         var left = term()?
-        while (val Some(Token.Op(op)) = peek().cloned()) {
+        while (val Token.Op(op) = peek().cloned()) {
             if (op != '+' && op != '-') break
             advance()
             val right = term()?
@@ -43,7 +43,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
 
     fun term(): Expr throws ParseError {
         var left = power()?
-        while (val Some(Token.Op(op)) = peek().cloned()) {
+        while (val Token.Op(op) = peek().cloned()) {
             if (op != '*' && op != '/') break
             advance()
             val right = power()?
@@ -54,7 +54,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
 
     fun power(): Expr throws ParseError {
         val base = unary()?
-        if (peek() == Some(&Token.Op('^'))) {
+        if (peek() == Token.Op('^')) {
             advance()
             val exp = power()?
             return Expr.Bin('^', Box.new(base), Box.new(exp))
@@ -63,7 +63,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
     }
 
     fun unary(): Expr throws ParseError {
-        if (peek() == Some(&Token.Op('-'))) {
+        if (peek() == Token.Op('-')) {
             advance()
             return Expr.Neg(Box.new(unary()?))
         }
@@ -75,7 +75,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
         return when (tok) {
             Token.Num(n) -> Expr.Num(n)
             Token.Ident(name) -> {
-                if (peek() == Some(&Token.LParen)) {
+                if (peek() == Token.LParen) {
                     advance()
                     val arg = expression()?
                     expect_rparen()?
@@ -95,7 +95,7 @@ class Parser(tokens: [Token], var pos: usize = 0) {
 
     fun expect_rparen() throws ParseError {
         when (advance()) {
-            Some(Token.RParen) -> {}
+            Token.RParen -> {}
             Some(t) -> throw ParseError.Unexpected("${t:?}")
             null -> throw ParseError.UnexpectedEnd
         }

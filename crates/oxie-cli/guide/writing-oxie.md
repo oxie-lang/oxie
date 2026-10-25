@@ -170,7 +170,10 @@ fun main() {
   `if (x == null) return` (or `if (a == null || b == null) return`) it is the value. `x!!.len()`
   reads through `x` without taking it, so `x` stays usable. Fields aren't unwrapped: write `if (val v = &a.field)`, `a.field?.foo()`, or `val v = a.field ?:
   return`. `if (val x = x)` takes the value out of `x`; to use `x` again afterwards, unwrap a
-  reference: `if (val v = &x)`.
+  reference: `if (val v = &x)`. A `when`, `if (val ...)` or `==` on an optional matches its
+  value, without `Some(..)`: `when (xs.first()) { 3 -> ...; null -> ...; else -> ... }`,
+  `while (val Token.Op(op) = peek())`, `if (peek() == Token.LParen)`. Add a `null ->` (or
+  `else ->`) arm, since the value can be missing.
 * **Context parameters are found by name**, not by type: a call to `context(log: &mut Log) fun
   f()` passes the variable named `log` where the call is (a local, a parameter, a lambda's
   parameter or the caller's own context), or one given by name, `f(log = &mut other)`.

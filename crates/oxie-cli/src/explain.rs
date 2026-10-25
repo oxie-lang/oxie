@@ -98,10 +98,16 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
         "E0609" => no_field(d, &lines, &first),
         "E0004" => {
             let missing = d.message.strip_prefix("non-exhaustive patterns: ").map(oxie_terms).unwrap_or_default();
+            // an optional's missing value: `null`, not `None`
+            let missing = missing.replace("`None`", "`null`");
             rewrite(d, format!("this `when` doesn't handle {}", missing.trim_end_matches(" not covered")));
-            d.label = d.label.take().map(|l| oxie_terms(&l));
-            d.notes.retain(|n| !n.contains("wildcard pattern"));
-            d.notes.push(help("add an arm for each case it doesn't handle, or an `else ->` arm for all of them."));
+            d.label = d.label.take().map(|l| oxie_terms(&l).replace("`None`", "`null`"));
+            d.notes.retain(|n| !n.contains("wildcard pattern") && !n.contains("`Option<"));
+            if missing.trim_end_matches(" not covered") == "`null`" {
+                d.notes.push(help("the value is optional: add a `null ->` arm for when there is none, or an `else ->` arm."));
+            } else {
+                d.notes.push(help("add an arm for each case it doesn't handle, or an `else ->` arm for all of them."));
+            }
         }
         // `filter { seen.insert(it) }`: the lambda's parameter is a reference into the iteration
         "E0521" if d.label.as_deref().is_some_and(|l| l.ends_with("escapes the closure body here")) => {

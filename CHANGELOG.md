@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+* `when`, `if (val ...)`, `while (val ...)` and `==` on an optional match and compare its value
+  without `Some(..)`: `when (light) { Light.Red -> ...; null -> ... }`,
+  `while (val Token.Op(op) = peek())`, `xs.first() == 3`, `name == "ada"` on a `String?`.
+  Before, rustc rejected them with mismatched types. A `when` that leaves out `null` is
+  explained in Oxie terms, and a name that catches every value of a `when` has the subject's
+  type (so `"$x"` prints an optional).
 * `"$xs"` and `println(xs)` print lists, arrays, maps, sets and tuples in their debug form
   (`[1, 2]`), and an optional as its value or `null` (format specs apply: `"${price:.2}"`).
   `"${x:?}"` still prints Rust's debug form. Before, they were errors that asked for `:?`, and

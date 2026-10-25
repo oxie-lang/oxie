@@ -2075,6 +2075,11 @@ impl<'a> Lowerer<'a> {
                 self.expr(x, P_POSTFIX);
                 self.e.w(if *op == BinOp::Eq { ".is_none()" } else { ".is_some()" });
             }
+            // `opt == value` compares the optional's value: `opt == Some(value)`
+            Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if self.optional_vs_value(l, r).is_some() => {
+                let (opt, value, inner) = self.optional_vs_value(l, r).unwrap();
+                self.optional_eq(*op, opt, value, inner.as_ref());
+            }
             Binary(op @ (BinOp::Or | BinOp::And), l, r) if self.null_guard(*op, l, r).is_some() => {
                 let (x, ty, by_value) = self.null_guard(*op, l, r).unwrap();
                 self.e.w(&esc(&x));
@@ -3148,6 +3153,15 @@ impl<'a> Lowerer<'a> {
     /// The pattern of `if (val pat = expr)`, matched against the value (inside its `Some` when
     /// `implicit_some`).
     fn let_cond_pat(&mut self, pat: &Pat, expr: &Expr, implicit_some: bool) -> String {
+        // `if (val Token.Op(op) = peek())` on an optional matches its value: `Some(Token::Op(op))`
+        let wrapped;
+        let pat = match (implicit_some, self.optional_inner(expr)) {
+            (false, Some(inner)) => {
+                wrapped = self.some_pat(pat, inner.as_ref());
+                &wrapped
+            }
+            _ => pat,
+        };
         let ty = self.infer_type(expr);
         let ty = if implicit_some {
             match ty {
@@ -4181,6 +4195,118 @@ impl<'a> Lowerer<'a> {
                 self.expr(a, P_LOWEST);
             }
         }
+    }
+
+    /// `a == b` where one side is optional and the other a plain value (a literal, a case of an
+    /// enum, or a value of a known type that isn't optional): (optional, value, its value type).
+    fn optional_vs_value<'e>(&mut self, l: &'e Expr, r: &'e Expr) -> Option<(&'e Expr, &'e Expr, Option<Type>)> {
+        let plain = |me: &mut Self, e: &Expr| {
+            is_literal(e) && !matches!(e.kind, ExprKind::Null) || me.is_unit_value(e) || me.optional_inner(e).is_none() && me.infer_type(e).is_some()
+        };
+        if let Some(inner) = self.optional_inner(l) {
+            if plain(self, r) {
+                return Some((l, r, inner));
+            }
+        }
+        if let Some(inner) = self.optional_inner(r) {
+            if plain(self, l) {
+                return Some((r, l, inner));
+            }
+        }
+        None
+    }
+
+    /// `opt == value`: `opt == Some(value)`, `Some(&value)` for an optional reference,
+    /// `opt.as_deref() == Some("text")` for optional text, and `opt.as_ref() == Some(&value)` for a
+    /// value that a `Some(value)` would move.
+    fn optional_eq(&mut self, op: BinOp, opt: &Expr, value: &Expr, inner: Option<&Type>) {
+        let text = matches!(value.kind, ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Template(_));
+        let is_string = |t: &Type| t.single_name() == Some("String");
+        let (method, by_ref) = match inner {
+            Some(Type::Ref { inner, .. }) if text && is_string(inner) => (".map(String::as_str)", false),
+            Some(Type::Ref { .. }) => ("", !text),
+            Some(t) if text && is_string(t) => (".as_deref()", false),
+            // `user?.name` borrows the field
+            None if text && matches!(opt.kind, ExprKind::Field { safe: true, .. }) => (".map(String::as_str)", false),
+            None if text => (".as_deref()", false),
+            _ if text || is_literal(value) || self.is_unit_value(value) => ("", false),
+            _ => (".as_ref()", true),
+        };
+        self.expr(opt, P_POSTFIX);
+        self.e.w(method);
+        self.e.w(&format!(" {} Some({}", op.as_str(), if by_ref { "&" } else { "" }));
+        self.expr(value, if by_ref { P_UNARY } else { P_LOWEST });
+        self.e.w(")");
+    }
+
+    /// Is `e` a value that costs nothing to rebuild: a case of an enum without data or a constant
+    /// (`Color.Red`, `MAX`)?
+    fn is_unit_value(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path { segs, .. } => segs.len() > 1 || segs.first().is_some_and(|n| n.chars().next().is_some_and(char::is_uppercase)),
+            ExprKind::Field { recv, name, safe: false } => name.chars().next().is_some_and(char::is_uppercase) && recv.ident().is_some_and(|n| n.chars().next().is_some_and(char::is_uppercase)),
+            _ => false,
+        }
+    }
+
+    /// Is `name` a case of the enum `subject` is (or holds, as an optional)? Then a bare `name`
+    /// arm matches that case instead of binding the value.
+    fn pat_enum_has_variant(&self, subject: Option<&Expr>, name: &str) -> bool {
+        let mut t = subject.and_then(|s| self.infer_type(s));
+        loop {
+            match t {
+                Some(Type::Ref { inner, .. }) | Some(Type::Option(inner)) => t = Some(*inner),
+                _ => break,
+            }
+        }
+        t.as_ref().and_then(|t| t.last_name()).and_then(|n| self.enum_info(n)).is_some_and(|e| e.variant(name).is_some())
+    }
+
+    /// When `e` is optional (`T?`): `Some` of its value type, `Some(None)` when only that it is
+    /// optional is known (`names.iter().find { .. }`, `user?.name`).
+    pub(crate) fn optional_inner(&mut self, e: &Expr) -> Option<Option<Type>> {
+        fn inner(t: &Type) -> Option<Type> {
+            match t {
+                Type::Ref { inner: t, .. } => inner(t),
+                Type::Option(t) => Some((**t).clone()),
+                Type::Path { segs, .. } if segs.last().is_some_and(|s| s.name == "Option") => match segs.last()?.generics.as_deref() {
+                    Some([GenericArg::Type(t)]) => Some(t.clone()),
+                    _ => Some(Type::Infer),
+                },
+                _ => None,
+            }
+        }
+        match self.infer_type(e) {
+            Some(t) => inner(&t).map(|t| Some(t).filter(|t| *t != Type::Infer)),
+            None => matches!(self.template_form(e), Form::OrNull | Form::OrNullDebug).then_some(None),
+        }
+    }
+
+    /// `p` matching the value inside an optional of value type `inner`: `Some(p)` (`Some(&2)` for
+    /// a literal and an optional reference), for patterns that match a value, not the optional
+    /// (`null`, `Some(..)`, `_` and a name stay as written).
+    pub(crate) fn some_pat(&self, p: &Pat, inner: Option<&Type>) -> Pat {
+        let variant = |name: &str| {
+            let mut t = inner;
+            while let Some(Type::Ref { inner, .. }) = t {
+                t = Some(inner);
+            }
+            t.and_then(|t| t.last_name()).and_then(|n| self.enum_info(n)).is_some_and(|e| e.variant(name).is_some())
+        };
+        let value = match p {
+            Pat::Or(ps) => return Pat::Or(ps.iter().map(|p| self.some_pat(p, inner)).collect()),
+            Pat::Lit(_) | Pat::Range { .. } | Pat::Struct { .. } | Pat::Tuple(_) | Pat::Slice(_) => true,
+            Pat::Path(path, _) => path.last().is_some_and(|n| n != "None"),
+            Pat::TupleStruct { path, .. } => path.last().is_some_and(|n| n != "Some" && n != "None"),
+            Pat::Ident { name, sub: None, .. } => variant(name),
+            _ => false,
+        };
+        if !value {
+            return p.clone();
+        }
+        let by_ref = matches!(inner, Some(Type::Ref { .. })) && matches!(p, Pat::Lit(_) | Pat::Range { .. });
+        let p = if by_ref { Pat::Ref { mutable: false, pat: Box::new(p.clone()) } } else { p.clone() };
+        Pat::TupleStruct { path: vec!["Some".into()], elems: vec![p], span: Span::default() }
     }
 
     /// How `"$x"` prints `x`: lists, maps, sets and tuples in their debug form (`[1, 2]`), and an
@@ -5338,6 +5464,22 @@ impl<'a> Lowerer<'a> {
                 a
             })
             .collect();
+        // arms on an optional match its value: `T.A ->` is `Some(T::A) =>`
+        let inner = subject.and_then(|s| self.optional_inner(s));
+        let arms: Vec<WhenArm> = match &inner {
+            Some(inner) => arms
+                .into_iter()
+                .map(|mut a| {
+                    for c in a.conds.iter_mut() {
+                        if let WhenCond::Pat(p) = c {
+                            *p = self.some_pat(p, inner.as_ref());
+                        }
+                    }
+                    a
+                })
+                .collect(),
+            None => arms,
+        };
         let arms = &arms[..];
         match subject {
             Some(s) => {
@@ -5490,9 +5632,14 @@ impl<'a> Lowerer<'a> {
                             })
                             .collect();
                         self.e.w(&pats.join(" | "));
+                        // a name that catches every value is the subject, of its type
+                        let catch_all = match arm.conds.as_slice() {
+                            [WhenCond::Pat(Pat::Ident { name, sub: None, .. })] if !self.pat_enum_has_variant(subject, name) => subject.and_then(|s| self.infer_type(s)),
+                            _ => None,
+                        };
                         for c in &arm.conds {
                             if let WhenCond::Pat(p) = c {
-                                self.bind_pat(p, None);
+                                self.bind_pat(p, catch_all.clone());
                             }
                         }
                         if let Some(g) = &arm.guard {

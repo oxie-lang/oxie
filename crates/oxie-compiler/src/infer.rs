@@ -300,6 +300,14 @@ impl<'a> Lowerer<'a> {
                         self.infer_type(recv).as_ref().and_then(list_elem).map(|t| with_args("Vec", Some(&vec![GenericArg::Type(t)]), 1))
                     }
                     "map" | "map_indexed" | "flat_map" | "filter_map" | "chunked" => self.infer_type(recv).as_ref().and_then(list_elem).map(|_| generic("Vec", 1)),
+                    // `opt.cloned()` of an optional reference: an optional value
+                    "cloned" | "copied" => match self.infer_type(recv)? {
+                        Type::Option(t) => match *t {
+                            Type::Ref { inner, .. } => Some(Type::Option(inner)),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
                     // an element of a list, if there is one
                     "find" | "first" | "last" | "get" | "max_by_key" | "min_by_key" => self
                         .infer_type(recv)

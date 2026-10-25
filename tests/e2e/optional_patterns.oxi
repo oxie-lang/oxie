@@ -1,0 +1,70 @@
+// `when`, `if (val ...)`, `while (val ...)` and `==` on an optional (`T?`) match and compare its
+// value: `T.A ->` is `Some(T::A)`, `opt == 2` is `opt == Some(2)`; `null` matches no value.
+
+enum Tok { Op(c: char), Num(n: f64), End }
+
+data class User(name: String, nick: String?)
+
+class Lexer(toks: [Tok], var pos: usize = 0) {
+    fun peek(): &Tok? = toks.get(pos)
+
+    fun ops(): String {
+        var out = String()
+        while (val Tok.Op(c) = peek()) {
+            out.push(*c)
+            pos += 1
+        }
+        out
+    }
+}
+
+fun describe(t: Tok?): String = when (t) {
+    Tok.Op('+') | Tok.Op('-') -> "sign"
+    Tok.Op(c) -> "op $c"
+    Tok.Num(n) if n > 9.0 -> "big number"
+    Tok.Num(n) -> "number $n"
+    End -> "end"
+    null -> "nothing"
+}
+
+fun main() {
+    println("${describe(Tok.Op('+'))}, ${describe(Tok.Op('*'))}, ${describe(Tok.Num(12.0))}, ${describe(Tok.Num(2.0))}, ${describe(Tok.End)}, ${describe(null)}")
+
+    var lexer = Lexer([Tok.Op('+'), Tok.Op('*'), Tok.Num(1.0)])
+    println("ops ${lexer.ops()}, then ${describe(lexer.peek().cloned())}")
+    if (val Tok.Num(n) = lexer.peek()) println("number $n next")
+
+    val n: i32? = 4
+    when (n) {
+        1, 2 -> println("small")
+        in 3..=9 -> println("digit")
+        null -> println("none")
+        else -> println("large")
+    }
+    val xs: [i32] = [3]
+    println("${xs.first() == 3} ${xs.first() != 3} ${n == 4} ${n == null}")
+    when (xs.first()) {
+        3 -> println("starts with 3")
+        null -> println("empty")
+        else -> println("other")
+    }
+
+    val word: String? = "go"
+    when (word) {
+        "go" -> println("go!")
+        null -> println("none")
+        else -> println("other")
+    }
+    val name = "ada".to_string()
+    val nick: String? = "ada"
+    println("${nick == name} ${nick == "bob"} $name")
+    val u: User? = User("ada", null)
+    println("${u?.name == "ada"} ${u?.nick == "a"}")
+
+    val a: i32? = 1
+    val b: i32? = 1
+    println(a == b)
+    when (a) {
+        x -> println("the optional itself: $x")
+    }
+}

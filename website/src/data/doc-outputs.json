@@ -201,6 +201,11 @@
   },
   {
     "file": "docs/reference.md",
+    "output": "go\ntrue false\ngoing\n",
+    "source": "enum Light { Red, Green }\n\nfun main() {\n    val lights: [Light] = [Light.Green]\n    when (lights.first()) {\n        Light.Red -> println(\"stop\")\n        Light.Green -> println(\"go\")\n        null -> println(\"no light\")\n    }\n    println(\"${lights.first() == Light.Green} ${lights.get(5) == Light.Red}\")\n    val word: String? = \"go\"\n    if (word == \"go\") println(\"going\")\n}\n"
+  },
+  {
+    "file": "docs/reference.md",
     "output": "[Item { name: \"pen\", qty: 11 }, Item { name: \"ink\", qty: 12 }]\n",
     "source": "data class Item(name: String, var qty: i32)\n\nfun main() {\n    var items = vec[Item(\"pen\", 1), Item(\"ink\", 2)]\n    for (item in items) item.qty += 10      // for item in &mut items\n    println(items)\n}\n"
   },

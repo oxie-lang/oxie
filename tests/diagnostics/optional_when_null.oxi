@@ -1,0 +1,13 @@
+// A `when` on an optional that has an arm for each case of its value still needs one for `null`.
+
+enum Light { Red, Green }
+
+fun main() {
+    val light: Light? = Light.Red
+    when (light) {
+        // error: 7: this `when` doesn't handle `null`
+        // error: 7: add a `null ->` arm
+        Light.Red -> println("stop")
+        Light.Green -> println("go")
+    }
+}

@@ -570,6 +570,18 @@ the declared type of a variable, field, parameter or return value:
 
 * `T?` is `Option<T>`, `null` is `None`. `x == null` and `x != null` are `x.is_none()` and
   `x.is_some()`, so the value's type needn't support `==`.
+* An optional compared with a value compares its value: `xs.first() == 3` is
+  `xs.first() == Some(&3)`, `light == Light.Red` is `light == Some(Light::Red)`,
+  `name == "ada"` on a `String?` is `name.as_deref() == Some("ada")`, and a value that
+  `Some(..)` would move is borrowed (`nick.as_ref() == Some(&name)`).
+* A `when`, `if (val ...)` or `while (val ...)` on an optional matches its value: an arm or
+  pattern for a value (a literal, a range, a case of an enum, a tuple) is wrapped in `Some`,
+  and `null ->` matches no value. `when (light) { Red -> ...; null -> ... }` is
+  `match light { Some(Light::Red) => ..., None => ... }`, and
+  `while (val Token.Op(op) = peek())` is `while let Some(Token::Op(op)) = peek()`. A plain
+  name (`x -> ...`) still catches the optional itself, and `Some(x)` patterns work as written.
+  Oxie does this when it knows the value is optional (as for printing it, see
+  [Strings](#strings)).
 * A branch next to a `null` one is optional too: `val v = if (c) x else null` is
   `if c { Some(x) } else { None }`, and the same goes for `when` arms. For a value from Rust
   whose type Oxie doesn't know (a function of a Rust module), it is `x.into()`, which is
@@ -623,6 +635,22 @@ fun main() {
 }
 ```
 * `x?.let { ... }` runs the block when `x` is present.
+
+```oxie
+enum Light { Red, Green }
+
+fun main() {
+    val lights: [Light] = [Light.Green]
+    when (lights.first()) {
+        Light.Red -> println("stop")
+        Light.Green -> println("go")
+        null -> println("no light")
+    }
+    println("${lights.first() == Light.Green} ${lights.get(5) == Light.Red}")
+    val word: String? = "go"
+    if (word == "go") println("going")
+}
+```
 
 ## Errors
 
