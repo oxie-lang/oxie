@@ -1563,8 +1563,8 @@ impl<'a> Lowerer<'a> {
                 self.e.w(&format!(" as {}", tt));
             }
             Elvis(l, r) => self.elvis(l, r),
-            In { item, coll, negated } if matches!(strip_paren(coll).kind, Range { .. }) => {
-                let Range { start, end, inclusive } = &strip_paren(coll).kind else { unreachable!() };
+            In { item, coll, negated } if matches!(range_in(coll).kind, Range { .. }) => {
+                let Range { start, end, inclusive } = &range_in(coll).kind else { unreachable!() };
                 self.in_range(item, start.as_deref(), end.as_deref(), *inclusive, *negated);
             }
             In { item, coll, negated } => {
@@ -4024,7 +4024,7 @@ impl<'a> Lowerer<'a> {
                             }
                             match c {
                                 WhenCond::In { expr, negated } => {
-                                    if let ExprKind::Range { start, end, inclusive } = &strip_paren(expr).kind {
+                                    if let ExprKind::Range { start, end, inclusive } = &range_in(expr).kind {
                                         let item = Expr::new(ExprKind::Unary(UnOp::Deref, Box::new(Expr::new(ExprKind::Path { segs: vec![w.clone()], generics: None, global: false }, expr.span))), expr.span);
                                         self.push_scope();
                                         self.bind_name(&w, None);
@@ -4441,6 +4441,14 @@ fn strip_paren(e: &Expr) -> &Expr {
     match &e.kind {
         ExprKind::Paren(x) => strip_paren(x),
         _ => e,
+    }
+}
+
+/// The range an `in` checks: `10 downTo 0` is `(0..=10).rev()`, which holds the same numbers.
+fn range_in(e: &Expr) -> &Expr {
+    match &strip_paren(e).kind {
+        ExprKind::MethodCall { recv, name, args, safe: false, .. } if name == "rev" && args.is_empty() && matches!(strip_paren(recv).kind, ExprKind::Range { .. }) => strip_paren(recv),
+        _ => strip_paren(e),
     }
 }
 

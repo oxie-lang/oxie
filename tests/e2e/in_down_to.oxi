@@ -1,0 +1,12 @@
+// `x in a downTo b` checks the numbers from b to a
+fun main() {
+    val n = 7
+    println(n in 10 downTo 0)
+    println(11 in 10 downTo 0)
+    println(n !in 10 downTo 8)
+    when (n) {
+        in 3 downTo 1 -> println("low")
+        in 10 downTo 4 -> println("high")
+        else -> println("other")
+    }
+}
