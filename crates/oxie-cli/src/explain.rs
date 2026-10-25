@@ -1598,6 +1598,18 @@ fn placeholder_len(line: &str, col: u32) -> Option<u32> {
 fn debug_spec_fix(d: &MappedDiag, lines: &[&str]) -> Option<Fix> {
     let line = lines.get(d.line as usize).copied()?;
     let chars: Vec<char> = line.chars().collect();
+    // a value printed on its own: `println(xs)` -> `println("${xs:?}")`
+    let (s, e) = (d.col as usize, d.end_col as usize);
+    if d.end_line == d.line && s < e && e <= chars.len() {
+        let before: String = chars[..s].iter().collect();
+        let before = before.trim_end();
+        let after: String = chars[e..].iter().collect();
+        let print = ["println(", "print(", "eprintln(", "eprint("].iter().find_map(|p| before.strip_suffix(p));
+        if print.is_some_and(|h| !h.ends_with(|c: char| is_ident_char(c) || c == '.')) && after.trim_start().starts_with(')') {
+            let expr: String = chars[s..e].iter().collect();
+            return Some(Fix { title: "print the debug form (`:?`)".into(), edits: vec![edit(d.line, s as u32, e as u32, &format!("\"${{{}:?}}\"", expr))] });
+        }
+    }
     // `{name}` inline arguments in the generated format string
     if let Some(gen) = d.gen_text.as_deref().and_then(|g| g.strip_prefix('{')).and_then(|g| g.strip_suffix('}')) {
         if !gen.is_empty() && gen.chars().all(|c| c.is_alphanumeric() || c == '_') {
