@@ -1873,6 +1873,7 @@ impl<'a> Parser<'a> {
                 "static" => self.is_ident_at(1) || self.is_kw_at(1, "mut"),
                 "type" => self.is_ident_at(1) && (self.is_punct_at(2, "=") || self.is_punct_at(2, "<")),
                 "object" => self.is_ident_at(1) && self.is_punct_at(2, "{"),
+                "unsafe" => self.is_kw_at(1, "impl") || self.is_kw_at(1, "trait") || self.is_kw_at(1, "interface"),
                 _ => false,
             },
             Tok::Punct("@") => true,

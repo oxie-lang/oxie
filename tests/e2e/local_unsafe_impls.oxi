@@ -1,0 +1,13 @@
+// `unsafe impl` inside a function body, as at the top level.
+@derive(Clone, Copy)
+class Point(x: f64, y: f64)
+
+fun main() {
+    rust {
+        /// A marker the caller promises only for plain-data types.
+        unsafe trait Plain {}
+    }
+    unsafe impl Plain for Point {}
+    fun bytes<T: Plain>(_: &T): usize = std::mem::size_of::<T>()
+    println(bytes(&Point(1.0, 2.0)))
+}
