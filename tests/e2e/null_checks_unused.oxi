@@ -1,0 +1,20 @@
+// A null check whose branch (or rest of the block) doesn't use the variable stays a check
+fun check(name: String?): bool {
+    if (name == null) return false
+    true
+}
+fun first(name: String?): usize {
+    if (name == null) return 0
+    name.len()
+}
+fun main() {
+    val a: i32? = null
+    val b: i32? = Some(2)
+    if (a != null) println("a") else if (b != null) println("only b")
+    if (b != null && b > 1) println("b > 1")
+    val s: String? = "x".to_string()
+    if (s != null) println("s is set")
+    println(check(null))
+    println(check("x".to_string()))
+    println(first("abc".to_string()))
+}

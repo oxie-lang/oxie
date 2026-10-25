@@ -1,0 +1,3 @@
+P { age: Some(5), name: None } P { age: Some(7), name: None } P { age: None, name: Some("ada") } P { age: Some(3), name: Some("ada") }
+Team { lead: P { age: Some(9), name: None }, size: Some(3) }
+Some(4)

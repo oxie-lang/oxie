@@ -1,0 +1,15 @@
+// `?.` on a `&T?` (a method declared to return one, `find_last`) borrows the fields it reads
+data class Player(name: String, score: i32)
+class Game(players: Vec<Player>) {
+    fun leader(): &Player? = players.max_by_key { it.score }
+    fun loser(): Option<&Player> = players.min_by_key { it.score }
+}
+fun main() {
+    val g = Game(vec[Player("a", 1), Player("b", 5)])
+    println(g.leader()?.name ?: "nobody")
+    println(g.loser()?.name ?: "nobody")
+    println("${g.players.find_last { it.score > 0 }?.name:?}")
+    println("${g.players.find_last { it.score > 9 }?.name:?}")
+    val empty = Game(vec[])
+    println(empty.leader()?.name ?: "nobody")
+}

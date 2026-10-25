@@ -271,6 +271,9 @@ pub struct Lowerer<'a> {
     pub(crate) reused_iters: HashMap<u32, Option<u32>>,
     /// Variables a null check in the `if` being lowered unwraps, with their value types.
     pub(crate) narrowed_types: Vec<(String, Type)>,
+    /// The variables of an `if (x == null) return` statement that the rest of its block doesn't
+    /// use, so the check stays a check (`narrowing_exit`).
+    pub(crate) unused_after_check: Vec<String>,
     /// Methods of the shared class being lowered that use `this` as a value, or call one that
     /// does: their data methods take the handle as `__this` (see `shared.rs`).
     pub(crate) needs_this: HashSet<String>,
@@ -380,6 +383,7 @@ impl<'a> Lowerer<'a> {
             next_lambda_refs: false,
             reused_iters: HashMap::new(),
             narrowed_types: Vec::new(),
+            unused_after_check: Vec::new(),
             needs_this: HashSet::new(),
             this_recv: None,
             extra_param: None,

@@ -1,0 +1,10 @@
+// Messages don't name the values Oxie names in generated code (`__oxie_v1` in a `?.` chain).
+
+data class Player(name: String, score: i32)
+
+fun main() {
+    val players = vec[Player("a", 1)]
+    val n = players.iter().nth(0)?.name
+    // error: 7: can't take `name` out of a value that is only borrowed
+    println("${n:?}")
+}

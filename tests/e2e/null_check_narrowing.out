@@ -1,0 +1,15 @@
+none
+len 3
+a 2
+missing
+true
+false
+true
+10
+1
+none
+short
+long
+t is Some("ok")
+true
+Some("x") Some("ok")

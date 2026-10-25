@@ -1,0 +1,18 @@
+// `a ?: b ?: c` with an optional `b` tries `a`, then `b`, then `c`; a call on the right runs only when needed
+fun fallback(): i32? {
+    println("fallback runs")
+    Some(9)
+}
+fun main() {
+    val a: i32? = null
+    val b: i32? = 4
+    println(a ?: b ?: 0)
+    val c: i32? = 1
+    println(c ?: fallback() ?: 0)
+    println(a ?: fallback() ?: 0)
+    val s: String? = null
+    val t: String? = "t".to_string()
+    println(s ?: t ?: "none".to_string())
+    val d: i32? = a ?: b
+    println("${d:?}")
+}
