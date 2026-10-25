@@ -779,6 +779,35 @@ impl Printer<'_> {
         }
     }
 
+    /// An `if`/`else` whose branches are all `Ok(..)` or `Err(..)`, as one that returns or throws
+    /// in each branch.
+    fn returned_branches(&mut self, e: &syn::Expr) -> Option<String> {
+        match e {
+            syn::Expr::Paren(p) => self.returned_branches(&p.expr),
+            syn::Expr::If(i) => {
+                let (_, els) = i.else_branch.as_ref()?;
+                let then = self.returned_branches(self.single_expr(&i.then_branch)?)?;
+                let els = match &**els {
+                    syn::Expr::Block(b) if b.label.is_none() => self.returned_branches(self.single_expr(&b.block)?)?,
+                    other => self.returned_branches(other)?,
+                };
+                Some(format!("if ({}) {} else {}", self.cond(&i.cond), then, els))
+            }
+            _ => {
+                if let Some(args) = call_of(e, "Err").filter(|a| a.len() == 1) {
+                    return Some(format!("throw {}", self.thrown(&args[0])));
+                }
+                let args = call_of(e, "Ok").filter(|a| a.len() == 1)?;
+                let v = &args[0];
+                if matches!(v, syn::Expr::Tuple(t) if t.elems.is_empty()) {
+                    return Some("return".into());
+                }
+                let ret = self.cx.ret.clone();
+                Some(format!("return {}", self.ex(v, &Ctx::expect(ret.as_ref()))))
+            }
+        }
+    }
+
     fn return_expr(&mut self, r: &syn::ExprReturn) -> String {
         let Some(v) = &r.expr else { return "return".into() };
         if self.cx.throws {
@@ -795,6 +824,11 @@ impl Printer<'_> {
                 if args.len() == 1 {
                     return format!("throw {}", self.thrown(&args[0]));
                 }
+            }
+            // `return if c { Err(e.into()) } else { Ok(x) }`: each branch returns or throws, which
+            // also gives `e.into()` its target (`?` on the whole wouldn't)
+            if let Some(s) = self.returned_branches(v) {
+                return s;
             }
             return format!("return {}", self.propagated(v));
         }
