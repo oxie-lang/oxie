@@ -569,7 +569,7 @@ fn walk_all(items: &[Item], f: &mut dyn FnMut(&Expr) -> bool) {
 }
 
 /// The items declared in the blocks directly inside `e`.
-fn local_items(e: &Expr) -> Vec<&Item> {
+pub(crate) fn local_items(e: &Expr) -> Vec<&Item> {
     let blocks: Vec<&Block> = match &e.kind {
         ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::ConstBlock(b) | ExprKind::LabeledBlock { block: b, .. } | ExprKind::Loop { body: b, .. } | ExprKind::Async { block: b, .. } | ExprKind::DoWhile { body: b, .. } => vec![b],
         ExprKind::While { body, .. } | ExprKind::If { then: body, .. } | ExprKind::For { body, .. } => vec![body],
