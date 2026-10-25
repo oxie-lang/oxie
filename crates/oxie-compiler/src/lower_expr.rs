@@ -3829,12 +3829,8 @@ impl<'a> Lowerer<'a> {
                     self.e.mark(el.span);
                     match mode {
                         Some(t) => self.tail_moving_args(el, t),
-                        None => {
-                            let bl = self.stmt_expr(el);
-                            if !bl {
-                                self.e.w(";");
-                            }
-                        }
+                        // as a statement, so a throwing call passes its error on
+                        None => self.stmt(&Stmt::Expr { expr: el.clone(), semi: false }),
                     }
                     self.e.dedent();
                     self.e.nl();
@@ -4083,12 +4079,8 @@ impl<'a> Lowerer<'a> {
                             self.e.mark(arm.body.span);
                             match mode {
                                 Some(t) => self.tail_moving_args(&arm.body, t),
-                                None => {
-                                    let bl = self.stmt_expr(&arm.body);
-                                    if !bl {
-                                        self.e.w(";");
-                                    }
-                                }
+                                // as a statement, so a throwing call passes its error on
+                                None => self.stmt(&Stmt::Expr { expr: arm.body.clone(), semi: false }),
                             }
                         }
                     }
@@ -4132,8 +4124,8 @@ impl<'a> Lowerer<'a> {
                     self.e.w("{");
                     self.e.indent();
                     self.e.nl();
-                    self.stmt_expr(body);
-                    self.e.w(";");
+                    // as a statement, so a throwing call passes its error on
+                    self.stmt(&Stmt::Expr { expr: body.clone(), semi: true });
                     self.e.dedent();
                     self.e.nl();
                     self.e.w("}");

@@ -1,0 +1,32 @@
+// A throwing call in a `when` arm or a brace-less `else` passes its error on, as any statement.
+
+fun step(fail: bool) throws { if (fail) throw "failed" }
+
+fun with_subject(m: i32) throws {
+    when (m) { 1 -> step(true); else -> println("other") }
+    println("finished")
+}
+
+fun in_else(m: i32) throws {
+    if (m == 1) step(false) else step(true)
+    println("finished")
+}
+
+fun without_subject(m: i32) throws {
+    when { m > 0 -> step(true) }
+    println("finished")
+}
+
+fun main() {
+    println("${with_subject(1):?} ${with_subject(2):?}")
+    println("${in_else(1):?} ${in_else(2):?}")
+    println("${without_subject(1):?}")
+    val r = try {
+        when (1) { 1 -> step(true); else -> {} }
+        5
+    } catch (e) {
+        println("caught $e")
+        -1
+    }
+    println(r)
+}

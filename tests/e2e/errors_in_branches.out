@@ -1,0 +1,8 @@
+other
+finished
+Err("failed") Ok(())
+finished
+Ok(()) Err("failed")
+Err("failed")
+caught failed
+-1

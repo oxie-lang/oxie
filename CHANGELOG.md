@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+* A throwing call in a `when` arm or a brace-less `else` (`if (c) a() else b()`) passes its error
+  on, as any statement in a throwing function or a `try` does. Before, the error was dropped with
+  only a warning, and the function went on.
+
 * Context parameters: `context(log: &mut Log) fun record(line: &str)` takes `log` without its
   callers writing it. Each call passes the variable named `log` where it is made, or one given by
   name (`record("x", log = &mut other)`). Before a class,
