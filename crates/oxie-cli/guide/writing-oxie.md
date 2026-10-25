@@ -106,8 +106,8 @@ fun main() {
   `var stock: [String: i32] = [:]`, `["a": 1]`. Without a declared type `[1, 2]` is a
   fixed-size array, unless the code after a `var` grows it (`xs.push(3)`), which makes it a list.
   After `&`, `[T]` is a slice: `&[T]` takes any list or array. A function that adds to the
-  caller's list can still write `&mut [T]`: when it grows it (`push`, `insert`, `clear`), Oxie
-  makes it `&mut Vec<T>`. `iter.to_list()` collects an iterator into a list.
+  caller's list can still write `&mut [T]`: when it grows it (`push`, `insert`, `clear`) or
+  passes it on to a function that does, Oxie makes it `&mut Vec<T>`. `iter.to_list()` collects an iterator into a list.
   `Vec<T>`, `HashMap<K, V>`, `vec[...]`, `listOf(...)` and `mapOf(k to v)` still work.
   `m[k] = v` puts a value in a map, but `m[k] += 1` is an error (the key may be missing): write
   `*m.entry(k).or_default() += 1` to start a missing key at 0.
@@ -183,7 +183,8 @@ fun main() {
 * **Text.** `a + b` joins text into a new `String` without moving either side, and
   `s += t` appends; a `when` on a `String` matches its text arms (`"go" -> ...`).
 * **Destructuring.** `val (x, y) = point` takes a data class's fields in constructor order, and
-  `if (val (k, v) = pair_or_null)` unwraps an optional pair.
+  `if (val (k, v) = pair_or_null)` unwraps an optional pair. `val (tx, var rx) = ...` lets only
+  `rx` change (write `var`, not Rust's `mut`).
 * **Printing.** `"$x"` needs `Display`: numbers, text and types with `toString()`. Lists,
   maps, options and other values print with `"${x:?}"`. A whole `f64` prints without
   decimals (`43`); write `"${x:.1}"` for a fixed number of decimals.

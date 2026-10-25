@@ -2235,7 +2235,21 @@ fn unused_mut(d: &mut MappedDiag, lines: &[&str]) {
         rewrite(d, format!("{} never changes, so it doesn't need to be a `var`", part));
         d.label = None;
         d.notes.retain(|n| !n.contains("remove this `mut`") && !n.contains("#[warn(unused_mut)]"));
-        d.notes.push(help("`var` makes every part of a destructuring changeable; declare the ones that change with their own `var` to leave the others read-only."));
+        d.notes.push(help("`var` makes every part of a destructuring changeable; declare it with `val` and mark the parts that change with `var`, as in `val (a, var b)`."));
+        let unchanged = d.gen_text.as_deref().and_then(|t| t.strip_prefix("mut ")).unwrap_or("");
+        if let Some((end, pattern)) = val_with_var_parts(line, c as usize + 3, unchanged) {
+            d.fixes.push(Fix { title: "mark only the parts that change with `var`".into(), edits: vec![edit(d.line, c, end, &format!("val {}", pattern))] });
+        }
+        return;
+    }
+    // `val (a, var b)`: a part of a destructuring that never changes needs no `var`
+    if line.chars().take(c as usize).collect::<String>().trim_end().ends_with(['(', ',']) {
+        rewrite(d, format!("`{}` never changes, so it doesn't need `var`", name));
+        d.col = c;
+        d.end_col = c + 3;
+        d.label = None;
+        d.notes.retain(|n| !n.contains("remove this `mut`") && !n.contains("#[warn(unused_mut)]"));
+        d.fixes.push(Fix { title: format!("remove `var` from `{}`", name), edits: vec![edit(d.line, c, c + 4, "")] });
         return;
     }
     rewrite(d, format!("`{}` never changes, so it can be a `val`", name));
@@ -2244,6 +2258,25 @@ fn unused_mut(d: &mut MappedDiag, lines: &[&str]) {
     d.label = None;
     d.notes.retain(|n| !n.contains("remove this `mut`") && !n.contains("#[warn(unused_mut)]"));
     d.fixes.push(Fix { title: format!("declare `{}` with `val`", name), edits: vec![edit(d.line, c, c + 3, "val")] });
+}
+
+/// The tuple pattern after `var` at char column `from` of `line` (`var (tx, rx)`) with every part
+/// but `unchanged` marked `var`: its end column and text, `(tx, var rx)`. Only for parts that are
+/// plain names.
+fn val_with_var_parts(line: &str, from: usize, unchanged: &str) -> Option<(u32, String)> {
+    let chars: Vec<char> = line.chars().collect();
+    let open = from + chars.get(from..)?.iter().position(|c| !c.is_whitespace())?;
+    if chars[open] != '(' || unchanged.is_empty() {
+        return None;
+    }
+    let close = open + chars[open..].iter().position(|c| *c == ')')?;
+    let inner: String = chars[open + 1..close].iter().collect();
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if !parts.iter().all(|p| !p.is_empty() && p.chars().all(is_ident_char)) || !parts.contains(&unchanged) {
+        return None;
+    }
+    let marked: Vec<String> = parts.iter().map(|p| if *p == unchanged { p.to_string() } else { format!("var {}", p) }).collect();
+    Some((close as u32 + 1, format!("({})", marked.join(", "))))
 }
 
 /// A call that can fail, used as a statement in a function that doesn't `throw`: its error is
@@ -3124,7 +3157,30 @@ mod tests {
         d.gen_text = Some("mut a".into());
         explain(&mut d, &Sources::from_texts(&[("/crate/main.oxi", src)]));
         assert_eq!(d.message, "`a` never changes, so it doesn't need to be a `var`");
-        assert!(d.fixes.is_empty(), "{:?}", d.fixes);
+        assert_eq!(fixed_line(src, &d), "    val (a, var b) = (vec[1], 2)");
+    }
+
+    #[test]
+    fn a_var_part_that_never_changes_loses_its_var() {
+        let src = "fun main() {\n    val (a, var b) = (vec[1], 2)\n    println(\"${a:?} $b\")\n}\n";
+        let mut d = diag("/crate/main.oxi", "unused_mut", "variable does not need to be mutable", 1, 12, 15);
+        d.level = "warning".into();
+        d.gen_text = Some("mut b".into());
+        explain(&mut d, &Sources::from_texts(&[("/crate/main.oxi", src)]));
+        assert_eq!(d.message, "`b` never changes, so it doesn't need `var`");
+        assert_eq!(fixed_line(src, &d), "    val (a, b) = (vec[1], 2)");
+    }
+
+    /// The diagnostic's line of `src` with its first fix applied.
+    fn fixed_line(src: &str, d: &MappedDiag) -> String {
+        let fix = d.fixes.first().unwrap_or_else(|| panic!("no fix: {:?}", d));
+        let mut chars: Vec<char> = src.lines().nth(d.line as usize).unwrap().chars().collect();
+        let mut edits = fix.edits.clone();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.col));
+        for e in edits {
+            chars.splice(e.col as usize..e.end_col as usize, e.text.chars());
+        }
+        chars.into_iter().collect()
     }
 
     #[test]

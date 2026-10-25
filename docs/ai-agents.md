@@ -79,9 +79,9 @@ Oxie follows Rust's rules, so the mistakes a model makes are often Rust's: a val
 function took it, a `val` that is changed later. This function has both:
 
 ```oxie
-fun register(names: &mut Vec<String>, name: String) = names.push(name)
+fun register(names: &mut [String], name: String) = names.push(name)
 
-fun sign_up(names: &mut Vec<String>, name: String) {
+fun sign_up(names: &mut [String], name: String) {
     register(names, name)
     val count = names.len()
     count += 1
@@ -96,7 +96,7 @@ error[E0384]: `count` is a `val`, so it can't be changed
  --> src/main.oxi:6:5
   |
 5 |     val count = names.len()
-  |     ----- declared with `val` here
+  |         ----- declared with `val` here
 6 |     count += 1
   |     ^^^^^ changed here
   = help: declare it with `var` to allow changes: `var count = ...`.
@@ -106,8 +106,8 @@ error[E0384]: `count` is a `val`, so it can't be changed
 error[E0382]: `name` was moved, so it can't be used anymore
  --> src/main.oxi:7:24
   |
-1 | fun register(names: &mut Vec<String>, name: String) = names.push(name)
-  |                                                                  ---- `register` keeps it: it passes `name` to `.push()`
+1 | fun register(names: &mut [String], name: String) = names.push(name)
+  |                                                               ---- `register` keeps it: it passes `name` to `.push()`
 ...
 4 |     register(names, name)
   |                     ---- `name` moved into `register()` here
@@ -122,9 +122,9 @@ error[E0382]: `name` was moved, so it can't be used anymore
 With both fixes the program builds and runs:
 
 ```oxie
-fun register(names: &mut Vec<String>, name: String) = names.push(name)
+fun register(names: &mut [String], name: String) = names.push(name)
 
-fun sign_up(names: &mut Vec<String>, name: String) {
+fun sign_up(names: &mut [String], name: String) {
     register(names, name.clone())
     var count = names.len()
     count += 1

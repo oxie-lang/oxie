@@ -1,6 +1,6 @@
-// A `&mut [T]` parameter that its function grows (`push`, `insert`, `clear`, ...) is a
-// `&mut Vec<T>`, since a slice can't change its length. One that only changes its elements stays a
-// slice, so it also takes arrays.
+// A `&mut [T]` parameter that its function grows (`push`, `insert`, `clear`, ...), or passes on
+// to a function that grows it, is a `&mut Vec<T>`, since a slice can't change its length. One that
+// only changes its elements stays a slice, so it also takes arrays.
 
 fun add_one(items: &mut [i32]) {
     items.push(1)
@@ -10,6 +10,13 @@ fun add_two(items: &mut [i32]) = items.extend([2, 2])
 
 fun zero(items: &mut [i32]) {
     for (i in 0 until items.len()) items[i] = 0
+}
+
+fun register(names: &mut [String], name: String) = names.push(name)
+
+fun sign_up(names: &mut [String], name: String) {
+    register(names, name.clone())
+    println("welcome, $name, member ${names.len()}")
 }
 
 class Log(var lines: [String] = []) {
@@ -33,4 +40,7 @@ fun main() {
     var out: [String] = []
     log.flush(out)
     println("${out:?} ${log.lines.len()}")
+
+    var names: [String] = ["bob"]
+    sign_up(names, "ada")
 }

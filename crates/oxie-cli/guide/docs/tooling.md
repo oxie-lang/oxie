@@ -90,8 +90,8 @@ rewrites rustc's messages so they point at `.oxi` lines, including warnings:
 error[E0382]: `name` was moved, so it can't be used anymore
  --> src/main.oxi:7:30
   |
-1 | fun register(names: &mut Vec<String>, name: String) = names.push(name)
-  |                                                                  ---- `register` keeps it: it passes `name` to `.push()`
+1 | fun register(names: &mut [String], name: String) = names.push(name)
+  |                                                               ---- `register` keeps it: it passes `name` to `.push()`
 ...
 6 |     register(names, name)
   |                     ---- `name` moved into `register()` here

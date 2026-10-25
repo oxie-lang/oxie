@@ -142,7 +142,9 @@
 * `x in a downTo b` is checked as `b <= x && x <= a`.
 * Files with Windows line endings: multi-line strings and `\` line continuations compile, and
   `oxie fmt` keeps CRLF line endings.
-* `var (x, y) = ...` makes only the parts that change mutable.
+* `var (x, y) = ...` makes only the parts that change mutable, and `val (tx, var rx) = ...`
+  declares only `rx` changeable. The warning for a part of a `var` destructuring that never
+  changes offers that form; before, it described a `var` per part, which didn't parse.
 * Kotlin's `Int.MAX`, `Long.MAX_VALUE`, `Double.POSITIVE_INFINITY` work, as do `1.5f`, `\b`,
   labels written `outer@ for` / `break@outer`, `do x += 1 while (c)` without braces, and typed
   destructuring `val (a: Int, b: String) = ...`. `n++` and `return@label` get Oxie errors that
@@ -174,9 +176,10 @@
 * Changing a parameter (`fun fill(c: Cart) { c.add("x") }`) offers `c: &mut Cart`. A function
   that stores or returns its parameter no longer gets a fix that would borrow it (which didn't
   compile); the error says where it keeps it.
-* A `&mut [T]` parameter that its function grows (`items.push(x)`, `insert`, `clear`, ...) is a
-  `&mut Vec<T>`, as a grown `var xs = [..]` is a list. Before, the `items: &mut [T]` that the
-  fix above offers for a list parameter failed with "no method named `push`".
+* A `&mut [T]` parameter that its function grows (`items.push(x)`, `insert`, `clear`, ...), or
+  passes on to a function that does, is a `&mut Vec<T>`, as a grown `var xs = [..]` is a list.
+  Before, the `items: &mut [T]` that the fix above offers for a list parameter failed with "no
+  method named `push`".
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.

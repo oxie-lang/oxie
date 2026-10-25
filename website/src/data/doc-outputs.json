@@ -7,7 +7,7 @@
   {
     "file": "docs/ai-agents.md",
     "output": "welcome, ada, member 3\n",
-    "source": "fun register(names: &mut Vec<String>, name: String) = names.push(name)\n\nfun sign_up(names: &mut Vec<String>, name: String) {\n    register(names, name.clone())\n    var count = names.len()\n    count += 1\n    println(\"welcome, $name, member $count\")\n}\n\nfun main() {\n    var names: [String] = [\"bob\"]\n    sign_up(names, \"ada\")\n}\n"
+    "source": "fun register(names: &mut [String], name: String) = names.push(name)\n\nfun sign_up(names: &mut [String], name: String) {\n    register(names, name.clone())\n    var count = names.len()\n    count += 1\n    println(\"welcome, $name, member $count\")\n}\n\nfun main() {\n    var names: [String] = [\"bob\"]\n    sign_up(names, \"ada\")\n}\n"
   },
   {
     "file": "docs/cheatsheet.md",

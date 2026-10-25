@@ -4004,7 +4004,8 @@ impl<'a> Parser<'a> {
                 let name = self.ident()?;
                 Ok(Pat::Ident { name, by_ref: true, mutable, sub: None, span: start.to(self.prev_span()) })
             }
-            Tok::Ident(s) if s == "mut" => {
+            // `val (tx, var rx) = ...`: only `rx` changes
+            Tok::Ident(s) if s == "mut" || (s == "var" && self.is_ident_at(1)) => {
                 self.bump();
                 let name = self.ident()?;
                 Ok(Pat::Ident { name, by_ref: false, mutable: true, sub: None, span: start.to(self.prev_span()) })

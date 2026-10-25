@@ -49,7 +49,8 @@ Contents: [Lexical structure](#lexical-structure) · [Declarations](#declaration
 | `val x: T = v` | `let x: T = v;` |
 | `val (a, b) = pair` | `let (a, b) = pair;` |
 | `val (a: i32, b: String) = pair` | `let (a, b): (i32, String) = pair;` |
-| `var (a, b) = pair` | `let (mut a, mut b) = pair;` |
+| `var (a, b) = pair` | `let (mut a, mut b) = pair;` (only the parts that change get `mut`) |
+| `val (a, var b) = pair` | `let (a, mut b) = pair;` |
 | `val (x, y) = point` (a data class) | `let Point { x, y } = point;` (fields in constructor order) |
 | `let`/`let mut` (Rust style) | unchanged |
 | `val Some(x) = opt else { return }` | `let Some(x) = opt else { return };` |
@@ -240,7 +241,7 @@ fun main() {
 | `i32`, `u8`, `f64`, `bool`, `char`, `str`, `String`, ... | same |
 | `Int`, `Long`, `Short`, `Byte`, `UInt`, `ULong`, `Double`, `Float`, `Boolean`, `Char`, `Unit` | `i32`, `i64`, `i16`, `i8`, `u32`, `u64`, `f64`, `f32`, `bool`, `char`, `()` |
 | `T?` | `Option<T>` (`&T?` is `Option<&T>`) |
-| `[T]` | `Vec<T>`, a list; Rust's slice `[T]` right after `&`, `&mut`, `*const` and `*mut`, inside `Box`, `Rc`, `Arc`, `Cow` and `Weak`, in a trait's type arguments (`impl AsRef<[u8]>`), and as an `impl` block's type or an associated type (`type Target = [T]`); a `&mut [T]` parameter that its function grows (`push`, `insert`, `clear`, ...) is `&mut Vec<T>` |
+| `[T]` | `Vec<T>`, a list; Rust's slice `[T]` right after `&`, `&mut`, `*const` and `*mut`, inside `Box`, `Rc`, `Arc`, `Cow` and `Weak`, in a trait's type arguments (`impl AsRef<[u8]>`), and as an `impl` block's type or an associated type (`type Target = [T]`); a `&mut [T]` parameter that its function grows (`push`, `insert`, `clear`, ...), or passes on to a function's `&mut Vec<T>` parameter, is `&mut Vec<T>` |
 | `[K: V]` | `HashMap<K, V>`, std's map |
 | `(A, B) -> R` | `impl FnMut(A, B) -> R`, `Box<dyn Fn(A, B) -> R>` or `dyn Fn(..)` depending on position |
 | `Shape` (an interface used as a type) | `impl Shape` (parameters, returns; `impl Shape + 'static` for a parameter the function stores), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, returns of different classes, and parameters and results of interface methods) |

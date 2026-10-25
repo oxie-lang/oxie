@@ -134,6 +134,7 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         }
         parsed.push(Parsed { input, module, is_root, file, diags });
     }
+    crate::lists::grow_params(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>());
     // context parameters first: every later pass sees them as parameters
     let context_diags = crate::contexts::add_contexts(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>());
     for (i, d) in context_diags {

@@ -505,8 +505,9 @@ fun main() {
 ```
 
 `&[i32]` is Rust's slice: any list or array, read-only. `&mut [i32]` can change the elements of
-any list or array. When a function grows it (`push`, `insert`, `clear`, ...), Oxie makes the
-parameter `&mut Vec<i32>`, the caller's list, since a slice can't change its length.
+any list or array. When a function grows it (`push`, `insert`, `clear`, ...), or passes it on to
+a function that does, Oxie makes the parameter `&mut Vec<i32>`, the caller's list, since a slice
+can't change its length.
 
 What Oxie removes is the bookkeeping around it:
 

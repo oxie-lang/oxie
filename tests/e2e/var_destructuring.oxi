@@ -1,4 +1,5 @@
-// `var (x, y)` makes only the parts that change mutable (no warnings for the others)
+// `var (x, y)` makes only the parts that change mutable (no warnings for the others), and
+// `val (x, var y)` declares only `y` changeable
 
 fun fill(v: &mut Vec<i32>) { v.push(9) }
 
@@ -10,4 +11,7 @@ fun main() {
     a.push(2)
     fill(b)
     println("${a:?} ${b:?} $c")
+    val (first, var rest) = (1, vec[2])
+    rest.push(first)
+    println("$first ${rest:?}")
 }
