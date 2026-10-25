@@ -339,6 +339,13 @@ impl<'a> Parser<'a> {
             let start = self.pos;
             match self.item() {
                 Ok(Some(item)) => items.push(item),
+                Ok(None) if self.is_kw("var") => {
+                    let sp = self.span();
+                    self.diags.push(Diag::error(sp, "a file can't declare a `var`").with_help(
+                        "a value every function can change is a `static var`, which only `unsafe` code may use; an atomic (`static COUNT: AtomicI32 = AtomicI32.new(0)`) or a `Mutex` is safe. Or pass the value to the functions that change it.",
+                    ));
+                    self.recover_stmt();
+                }
                 Ok(None) => {
                     let found = self.describe();
                     self.err::<()>(format!("expected a declaration (fun, class, val, import, ...), found {}", found)).ok();
@@ -1968,7 +1975,10 @@ impl<'a> Parser<'a> {
             if self.eat_kw("mut") {
                 mutable = true;
             }
-            let mut pat = self.pattern()?;
+            let (mut pat, typed) = match self.typed_tuple_pattern() {
+                Some((p, t)) => (p, Some(t)),
+                None => (self.pattern()?, None),
+            };
             if mutable {
                 if let Pat::Ident { mutable: m, .. } = &mut pat {
                     *m = true;
@@ -1977,7 +1987,7 @@ impl<'a> Parser<'a> {
                 }
                 mutable = false;
             }
-            let ty = if self.eat_punct(":") { Some(self.ty()?) } else { None };
+            let ty = if typed.is_none() && self.eat_punct(":") { Some(self.ty()?) } else { typed };
             let init = if self.eat_punct("=") {
                 self.skip_nl_only();
                 Some(self.expr()?)
@@ -2311,6 +2321,12 @@ impl<'a> Parser<'a> {
 
     fn unary_expr(&mut self) -> PResult<Expr> {
         let start = self.span();
+        // Kotlin's `++n` and `--n`
+        if let Tok::Punct(p @ ("++" | "--")) = self.tok().clone() {
+            self.bump();
+            let e = self.unary_expr()?;
+            return Ok(self.step_by_one(e, p, start));
+        }
         let op = match self.tok() {
             Tok::Punct("-") => Some(UnOp::Neg),
             Tok::Punct("!") => Some(UnOp::Not),
@@ -2447,6 +2463,10 @@ impl<'a> Parser<'a> {
                     let sp = e.span.to(self.prev_span());
                     e = Expr::new(ExprKind::Try(Box::new(e)), sp);
                 }
+                Tok::Punct(p @ ("++" | "--")) => {
+                    let at = self.bump().span;
+                    e = self.step_by_one(e, p, at);
+                }
                 Tok::Punct("!!") if !stop_at_try => {
                     self.bump();
                     let sp = e.span.to(self.prev_span());
@@ -2461,6 +2481,16 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(e)
+    }
+
+    /// `n++` and `--n`, which Oxie doesn't have: an error saying `n += 1`, read as that.
+    fn step_by_one(&mut self, e: Expr, op: &str, at: Span) -> Expr {
+        let target = self.src.get(e.span.start as usize..e.span.end as usize).unwrap_or("n");
+        let fix = format!("{} {}= 1", target, &op[..1]);
+        self.diags.push(Diag::error(at, format!("Oxie has no `{}`", op)).with_help(format!("write `{}`", fix)));
+        let sp = e.span.to(at);
+        let one = Expr::new(ExprKind::Int("1".into()), at);
+        Expr::new(ExprKind::Assign(Some(if op == "++" { BinOp::Add } else { BinOp::Sub }), Box::new(e), Box::new(one)), sp)
     }
 
     fn trailing_lambda_ok(&self) -> bool {
@@ -2646,27 +2676,9 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.string_expr(parts, start)
             }
-            Tok::Lifetime(label) if self.is_punct_at(1, ":") => {
-                self.bump();
-                self.bump();
-                let label = Some(label);
-                if self.is_kw("loop") {
-                    self.bump();
-                    let body = self.block()?;
-                    return Ok(Expr::new(ExprKind::Loop { label, body }, start.to(self.prev_span())));
-                }
-                if self.is_kw("while") {
-                    return self.while_expr(label, start);
-                }
-                if self.is_kw("for") {
-                    return self.for_expr(label, start);
-                }
-                if self.is_punct("{") {
-                    let block = self.block()?;
-                    return Ok(Expr::new(ExprKind::LabeledBlock { label: label.unwrap(), block }, start.to(self.prev_span())));
-                }
-                self.expected("`loop`, `while`, `for` or `{` after label")
-            }
+            // `'outer: for`, and Kotlin's `outer@ for`
+            Tok::Lifetime(label) if self.is_punct_at(1, ":") => self.labeled(label, start),
+            Tok::Ident(label) if self.is_punct_at(1, "@") && (["for", "while", "loop"].iter().any(|k| self.is_kw_at(2, k)) || self.is_punct_at(2, "{")) => self.labeled(label, start),
             Tok::Punct("(") => self.paren_or_lambda(),
             Tok::Punct("[") => {
                 self.bump();
@@ -2716,9 +2728,10 @@ impl<'a> Parser<'a> {
                 "match" => self.match_expr(),
                 "for" => self.for_expr(None, start),
                 "while" => self.while_expr(None, start),
-                "do" if self.is_punct_at(1, "{") => {
+                // `do { } while (c)`, or with a single statement: `do x += 1 while (c)`
+                "do" if self.is_punct_at(1, "{") || self.can_start_expr_at(1) => {
                     self.bump();
-                    let body = self.block()?;
+                    let body = self.branch_body(true)?;
                     if !self.peek_past_newlines_kw("while") {
                         return self.expected("`while` after `do { }`");
                     }
@@ -2764,6 +2777,15 @@ impl<'a> Parser<'a> {
                 }
                 "return" => {
                     self.bump();
+                    // Kotlin's `return@for_each` leaves a lambda, which a `return` in it does
+                    if self.is_punct("@") && matches!(self.tok_at(1), Tok::Ident(_)) {
+                        let at = self.bump().span;
+                        let Tok::Ident(l) = self.bump().tok else { unreachable!() };
+                        self.diags.push(
+                            Diag::error(at.to(self.prev_span()), format!("Oxie has no `return@{}`", l))
+                                .with_help("`return` in a lambda already returns from the lambda: write `return`. To leave a loop, label it (`outer@ for (...)`) and `break@outer`."),
+                        );
+                    }
                     let v = if self.can_start_expr() && !self.is_punct("}") && !self.is_punct(")") && !self.is_punct(",") && !self.is_punct(";") {
                         Some(Box::new(self.expr()?))
                     } else {
@@ -2778,12 +2800,7 @@ impl<'a> Parser<'a> {
                 }
                 "break" => {
                     self.bump();
-                    let label = if let Tok::Lifetime(l) = self.tok().clone() {
-                        self.bump();
-                        Some(l)
-                    } else {
-                        None
-                    };
+                    let label = self.jump_label();
                     let v = if self.can_start_expr() && !self.is_punct("}") && !self.is_punct(")") && !self.is_punct(",") && !self.is_punct(";") {
                         Some(Box::new(self.expr()?))
                     } else {
@@ -2793,12 +2810,7 @@ impl<'a> Parser<'a> {
                 }
                 "continue" => {
                     self.bump();
-                    let label = if let Tok::Lifetime(l) = self.tok().clone() {
-                        self.bump();
-                        Some(l)
-                    } else {
-                        None
-                    };
+                    let label = self.jump_label();
                     Ok(Expr::new(ExprKind::Continue(label), start.to(self.prev_span())))
                 }
                 "const" if self.is_punct_at(1, "{") => {
@@ -3395,6 +3407,45 @@ impl<'a> Parser<'a> {
         Ok(Expr::new(ExprKind::If { cond: Box::new(cond), then, else_ }, start.to(self.prev_span())))
     }
 
+    /// A labeled loop or block, after its label (`'outer:` or `outer@`).
+    fn labeled(&mut self, label: String, start: Span) -> PResult<Expr> {
+        self.bump();
+        self.bump();
+        let label = Some(label);
+        if self.is_kw("loop") {
+            self.bump();
+            let body = self.block()?;
+            return Ok(Expr::new(ExprKind::Loop { label, body }, start.to(self.prev_span())));
+        }
+        if self.is_kw("while") {
+            return self.while_expr(label, start);
+        }
+        if self.is_kw("for") {
+            return self.for_expr(label, start);
+        }
+        if self.is_punct("{") {
+            let block = self.block()?;
+            return Ok(Expr::new(ExprKind::LabeledBlock { label: label.unwrap(), block }, start.to(self.prev_span())));
+        }
+        self.expected("`loop`, `while`, `for` or `{` after label")
+    }
+
+    /// The label of `break 'outer` or Kotlin's `break@outer`.
+    fn jump_label(&mut self) -> Option<String> {
+        match self.tok().clone() {
+            Tok::Lifetime(l) => {
+                self.bump();
+                Some(l)
+            }
+            Tok::Punct("@") if matches!(self.tok_at(1), Tok::Ident(_)) => {
+                self.bump();
+                let Tok::Ident(l) = self.bump().tok else { unreachable!() };
+                Some(l)
+            }
+            _ => None,
+        }
+    }
+
     fn for_expr(&mut self, label: Option<String>, start: Span) -> PResult<Expr> {
         self.bump(); // for
         let parens = self.is_punct("(");
@@ -3597,6 +3648,38 @@ impl<'a> Parser<'a> {
             alts.push(self.pattern_no_or()?);
         }
         Ok(Pat::Or(alts))
+    }
+
+    /// `(a: Int, b: String)` after `val`: the plain pattern and the tuple type it declares
+    /// (`_` for parts without a type). None, with nothing consumed, when no part has a type.
+    fn typed_tuple_pattern(&mut self) -> Option<(Pat, Type)> {
+        if !self.is_punct("(") {
+            return None;
+        }
+        let (save, nd) = (self.pos, self.diags.len());
+        let mut parse = |p: &mut Self| -> PResult<Option<(Pat, Type)>> {
+            p.bump();
+            let (mut pats, mut tys, mut any) = (Vec::new(), Vec::new(), false);
+            while !p.eat_punct(")") {
+                pats.push(p.pattern()?);
+                let typed = p.eat_punct(":");
+                any |= typed;
+                tys.push(if typed { p.ty()? } else { Type::Infer });
+                if !p.eat_punct(",") {
+                    p.expect_punct(")")?;
+                    break;
+                }
+            }
+            Ok((any && pats.len() > 1).then_some((Pat::Tuple(pats), Type::Tuple(tys))))
+        };
+        match parse(self) {
+            Ok(Some(r)) => Some(r),
+            _ => {
+                self.pos = save;
+                self.diags.truncate(nd);
+                None
+            }
+        }
     }
 
     fn pattern_no_or(&mut self) -> PResult<Pat> {

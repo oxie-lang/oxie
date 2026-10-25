@@ -65,7 +65,7 @@ pub struct Token {
 
 const PUNCTS: &[&str] = &[
     "...", "..=", "..<", "<<=", "::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=",
-    "%=", "^=", "&=", "|=", "<<", "..", "?.", "?:", "!!", "+", "-", "*", "/", "%", "^", "!", "&", "|", "=",
+    "%=", "^=", "&=", "|=", "<<", "..", "?.", "?:", "!!", "++", "--", "+", "-", "*", "/", "%", "^", "!", "&", "|", "=",
     "<", ">", "@", ".", ",", ";", ":", "#", "$", "?", "~", "(", ")", "[", "]", "{", "}",
 ];
 
@@ -78,6 +78,8 @@ fn continues_after(t: &Tok) -> bool {
                 | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "->" | "=>" | "." | "?." | "?:" | "::" | ","
                 | "(" | "[" | "{" | ":" | "<" | "&" | "^" | "<<" | "@" | "#"
         ),
+        // `x as\n i64`, `x in\n xs`, `x is\n Shape`
+        Tok::Ident(w) => matches!(w.as_str(), "as" | "in" | "is"),
         Tok::DocOuter(_) | Tok::DocInner(_) => false,
         _ => false,
     }
@@ -326,6 +328,10 @@ impl<'a> Lexer<'a> {
         let suffix = &self.src[suffix_start..self.pos];
         if suffix == "L" {
             text = format!("{}i64", &self.src[start..suffix_start]);
+        } else if suffix == "f" || suffix == "F" {
+            // Kotlin's `1.5f`
+            text = format!("{}f32", &self.src[start..suffix_start]);
+            is_float = true;
         } else if suffix.starts_with('f') && (suffix == "f32" || suffix == "f64") {
             is_float = true;
         }

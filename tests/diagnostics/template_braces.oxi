@@ -1,0 +1,7 @@
+// `{}` in a `$` template is text: the advice doesn't show the generated format string.
+fun main() {
+    val x = 2
+    println("$x {}", 1)
+    // error: 4: in a text with `$` templates, `{}` is just text
+    // not: 4: {{}}
+}

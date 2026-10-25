@@ -3105,6 +3105,23 @@ impl<'a> Lowerer<'a> {
             if lead > 0 {
                 self.e.w(", ");
             }
+            // `println("total:", n)`: text without `{}` placeholders is no format string, so the
+            // values are printed after it, separated by spaces, as without the text
+            let print = matches!(name, "println" | "print" | "eprintln" | "eprint");
+            let text: Option<Vec<TemplatePart>> = match &rest[0].value.kind {
+                ExprKind::Str(parts) => Some(vec![TemplatePart::Lit(crate::lower::lit_parts(parts))]),
+                ExprKind::Template(parts) => Some(parts.clone()),
+                _ => None,
+            };
+            if let Some(mut parts) = text.filter(|ps| print && rest.len() > 1 && !ps.iter().any(|p| matches!(p, TemplatePart::Lit(s) if s.contains('{')))) {
+                for a in &rest[1..] {
+                    parts.push(TemplatePart::Lit(" ".into()));
+                    parts.push(TemplatePart::Expr(a.value.clone(), None));
+                }
+                self.format_args(&parts);
+                self.e.w(")");
+                return;
+            }
             match &rest[0].value.kind {
                 ExprKind::Template(parts) => {
                     self.format_args(parts);
@@ -3761,7 +3778,12 @@ impl<'a> Lowerer<'a> {
             return false;
         }
         let borrowed_text = |o: &Expr| matches!(self.infer_type(o), Some(Type::Ref { inner, .. }) if matches!(inner.single_name(), Some("str" | "String")));
-        ops.iter().any(|o| is_string_lit(o)) || borrowed_text(ops[0]) || ops[1..].iter().any(|o| self.is_owned_string(o))
+        // text plus a number or char (`name + n`) puts it in the text, as a template would
+        let number_or_char = |o: &Expr| self.infer_type(o).is_some_and(|t| t.single_name().is_some_and(|n| n == "char" || crate::lower::PRIMITIVES.contains(&n) && !matches!(n, "bool" | "str")));
+        ops.iter().any(|o| is_string_lit(o))
+            || borrowed_text(ops[0])
+            || ops[1..].iter().any(|o| self.is_owned_string(o))
+            || self.is_owned_string(ops[0]) && ops[1..].iter().any(|o| number_or_char(o))
     }
 
     /// Is `e` known to be an owned `String`?

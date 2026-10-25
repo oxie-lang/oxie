@@ -88,6 +88,14 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
         "E0277" => trait_missing(d, sources, &lines, &names),
         "E0308" => mismatched(d, src, &lines),
         "E0615" => getter_call(d, &lines, &first),
+        "E0609" => no_field(d, &lines, &first),
+        "E0004" => {
+            let missing = d.message.strip_prefix("non-exhaustive patterns: ").map(oxie_terms).unwrap_or_default();
+            rewrite(d, format!("this `when` doesn't handle {}", missing.trim_end_matches(" not covered")));
+            d.label = d.label.take().map(|l| oxie_terms(&l));
+            d.notes.retain(|n| !n.contains("wildcard pattern"));
+            d.notes.push(help("add an arm for each case it doesn't handle, or an `else ->` arm for all of them."));
+        }
         // `filter { seen.insert(it) }`: the lambda's parameter is a reference into the iteration
         "E0521" if d.label.as_deref().is_some_and(|l| l.ends_with("escapes the closure body here")) => {
             let name = d.label.as_deref().and_then(|l| between(l, "`", "`")).unwrap_or_else(|| "it".to_string());
@@ -98,6 +106,11 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
         "E0283" if d.notes.iter().any(|n| n.contains("Option<_>: From<Option<")) => optional_already(d, &lines),
         // reported without a code
         _ if d.message.starts_with("future cannot be sent between threads safely") => thread_safety(d, sources, ""),
+        // `println("$x {}", 1)`: rustc's advice shows the generated format string
+        _ if (d.message.starts_with("argument never used") || d.message.starts_with("multiple unused formatting arguments")) && lines.get(d.line as usize).is_some_and(|l| l.contains('$')) => {
+            d.notes.retain(|n| !n.contains("format specifier") && !n.contains("{{"));
+            d.notes.push(help("in a text with `$` templates, `{}` is just text: put the value in the text instead (`\"total: $n\"`, `\"${a + b}\"`)."));
+        }
         _ => {}
     }
     match d.code.as_deref() {
@@ -1121,10 +1134,50 @@ const KOTLIN_METHODS: &[(&str, &str)] = &[
     ("toDouble", "parse::<f64>"),
     ("charAt", "chars().nth"),
     ("substring", "get(a..b)"),
-    ("joinToString", "join"),
-    ("reversed", "rev"),
-    ("first", "first"),
+    // Oxie's list operations (docs/reference.md, "Collection operations")
+    ("joinToString", "join_to_string"),
+    ("mapIndexed", "map_indexed"),
+    ("mapNotNull", "filter_map"),
+    ("filterNot", "filter_not"),
+    ("flatMap", "flat_map"),
+    ("forEachIndexed", "for_each_indexed"),
+    ("findLast", "find_last"),
+    ("indexOfFirst", "index_of_first"),
+    ("sumOf", "sum_of"),
+    ("maxOf", "max_of"),
+    ("minOf", "min_of"),
+    ("maxBy", "max_by_key"),
+    ("minBy", "min_by_key"),
+    ("maxByOrNull", "max_by_key"),
+    ("minByOrNull", "min_by_key"),
+    ("sortedBy", "sorted_by"),
+    ("sortedByDescending", "sorted_by_descending"),
+    ("sortedDescending", "sorted_descending"),
+    ("distinctBy", "distinct_by"),
+    ("groupBy", "group_by"),
+    ("associateBy", "associate_by"),
 ];
+
+/// Kotlin's `xs.size` and `s.length` (rustc: "no field `size` on type `Vec<i32>`"): Rust's is
+/// the method `len()`. rustc's span starts at the value; it moves to the field.
+fn no_field(d: &mut MappedDiag, lines: &[&str], field: &str) {
+    let line = lines.get(d.line as usize).copied().unwrap_or("");
+    let chars: Vec<char> = line.chars().collect();
+    let dot: Vec<char> = format!(".{}", field).chars().collect();
+    let at = (d.col as usize..chars.len().saturating_sub(dot.len() - 1)).find(|&i| chars[i..i + dot.len()] == dot[..] && !chars.get(i + dot.len()).is_some_and(|c| is_ident_char(*c)));
+    if let Some(i) = at {
+        d.col = i as u32 + 1;
+        d.end_line = d.line;
+        d.end_col = (i + dot.len()) as u32;
+    }
+    if matches!(field, "size" | "length" | "count") {
+        d.notes.retain(|n| !n.contains("available field"));
+        d.notes.push(help(&format!("the number of elements is the method `len()`, not a field `{}`.", field)));
+        if let Some(i) = at {
+            d.fixes.push(Fix { title: "use `len()`".into(), edits: vec![edit(d.line, i as u32 + 1, (i + dot.len()) as u32, "len()")] });
+        }
+    }
+}
 
 fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str) {
     if !d.message.starts_with("no method named") && !d.message.starts_with("no function or associated item named") {
@@ -1151,7 +1204,7 @@ fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str
     if let Some(r) = rust.filter(|r| r != method) {
         let plain = r.chars().all(|c| c.is_alphanumeric() || c == '_');
         d.notes.retain(|n| !n.contains("similar name") && !n.contains("you might have meant"));
-        d.notes.push(help(&format!("Rust names this `{}`; standard library methods use Rust's snake_case names.", r)));
+        d.notes.push(help(&format!("this is `{}`: Rust and Oxie name methods in snake_case.", r)));
         let line = lines.get(d.line as usize).copied().unwrap_or("");
         if plain && word_at(line, d.col as usize) == Some(method) {
             let end = d.col + method.chars().count() as u32;
