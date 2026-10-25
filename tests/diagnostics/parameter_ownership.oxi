@@ -10,7 +10,7 @@ class Holder(t: Tag)
 fun fill(c: Cart) { c.add("x") }
 // error: 10: `c` is a parameter, so `fill` can't change it
 // error: 10: fix: let `fill` change `c` (`&mut`): `fun fill(c: &mut Cart) { c.add("x") }`
-fun bump(k: Counter) { k.n += 1 }
+fun bump(k: Counter) { k.n += 1; println(k.n) }
 // error: 13: `k` is a parameter, so `bump` can't change it
 // error: 13: fix: let `bump` change `k` (`&mut`)
 fun store(t: Tag): Holder = Holder(t)
