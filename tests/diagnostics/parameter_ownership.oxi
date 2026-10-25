@@ -1,0 +1,33 @@
+// Changing a parameter offers `&mut`; a parameter that its function stores or returns gets no
+// fix that would lend it, which couldn't compile: pass a copy instead.
+class Cart(var items: Vec<String> = vec[]) {
+    fun add(x: &str) = items.push(x.to_string())
+}
+data class Counter(var n: i32)
+class Tag(name: String)
+class Holder(t: Tag)
+
+fun fill(c: Cart) { c.add("x") }
+// error: 10: `c` is a parameter, so `fill` can't change it
+// error: 10: fix: let `fill` change `c` (`&mut`): `fun fill(c: &mut Cart) { c.add("x") }`
+fun bump(k: Counter) { k.n += 1 }
+// error: 13: `k` is a parameter, so `bump` can't change it
+// error: 13: fix: let `bump` change `k` (`&mut`)
+fun store(t: Tag): Holder = Holder(t)
+pub fun keep(v: Vec<i32>): Vec<i32> = v
+
+fun main() {
+    var c = Cart()
+    fill(c)
+    bump(Counter(1))
+    val t = Tag("a")
+    val h = store(t)
+    println(t.name)
+    // error: 25: `store` keeps it (it passes `t` to `Holder`, which takes it by value)
+    // not: 25: let `store` borrow it
+    val v = vec[1]
+    val k = keep(v)
+    println("${v.len()} ${k.len()} ${h.t.name}")
+    // error: 30: `keep` keeps it (it returns `v`)
+    // not: 30: let `keep` borrow it
+}

@@ -757,6 +757,73 @@ pub fn kept_reason(files: &[&File], fun: &str, index: usize) -> Option<(usize, S
     Some((c.file, span, why))
 }
 
+/// Where and why the function `fun` (declared once in the crate, at the top level or in a
+/// class) keeps its parameter number `index` in a way no borrow could serve: it returns it,
+/// stores it (in a variable, a field, a struct or a collection), passes it on by value, or a
+/// `move` lambda captures it. The index of the file declaring it, the use, and a clause like
+/// "it returns `v`". For the fix that would lend the parameter, which can't compile then.
+pub fn stored_reason(files: &[&File], fun: &str, index: usize) -> Option<(usize, Span, String)> {
+    fn funs<'a>(items: &'a [Item], out: &mut Vec<&'a FunDecl>) {
+        for it in items {
+            match &it.kind {
+                ItemKind::Fun(f) => out.push(f),
+                ItemKind::Type(t) => funs(&t.members, out),
+                ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => funs(items, out),
+                _ => {}
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for (i, f) in files.iter().enumerate() {
+        let mut here = Vec::new();
+        funs(&f.items, &mut here);
+        found.extend(here.into_iter().filter(|d| d.name == fun).map(|d| (i, d)));
+    }
+    let [(file, d)] = found[..] else { return None };
+    let p = d.params.get(index)?;
+    let name = p.name()?;
+    let body = match d.body.as_ref()? {
+        FunBody::Block(b) => b.clone(),
+        FunBody::Expr(e) => Block { stmts: vec![Stmt::Expr { expr: e.clone(), semi: false }], span: e.span },
+    };
+    if rebinds(&body, name) {
+        return None;
+    }
+    let views: Vec<(&[String], &File)> = files.iter().map(|f| (&[][..], *f)).collect();
+    let a = Analysis::new(&views, Stage::Text);
+    let c = Cand { file, fun: d, index, kind: Kind::Class, name, ty: p.ty.clone(), module: Vec::new(), body, class: None, drops: None };
+    // the uses, without those lent to a call; a `move` lambda's start for what it captures
+    let mut uses: Vec<u32> = Vec::new();
+    let mut lent: HashSet<u32> = HashSet::new();
+    walk_block(&c.body, &mut |e| {
+        let is_p = |x: &Expr| x.ident() == Some(name);
+        match &e.kind {
+            ExprKind::Path { .. } if is_p(e) => uses.push(e.span.start),
+            ExprKind::Call { callee, args } => {
+                if let Some(f) = callee.ident() {
+                    for (pos, arg) in args.iter().enumerate() {
+                        if is_p(&arg.value) && (PRINTS.contains(&f) && !a.decls.contains_key(f) || a.lends(f, pos, arg)) {
+                            lent.insert(arg.value.span.start);
+                        }
+                    }
+                }
+            }
+            ExprKind::Lambda { is_move: true, body, .. } => walk_expr(body, &mut |x| {
+                if is_p(x) {
+                    uses.push(e.span.start);
+                }
+                true
+            }),
+            _ => {}
+        }
+        true
+    });
+    uses.sort();
+    uses.dedup();
+    let stores = |why: &str| ["it returns", "it stores", "it passes", "a `move` lambda"].iter().any(|s| why.starts_with(s));
+    uses.into_iter().filter(|u| !lent.contains(u)).map(|at| kept_use(&c, at)).find(|(_, why)| stores(why)).map(|(span, why)| (file, span, why))
+}
+
 /// The use of the candidate's parameter at `at` that needs the owned value, as a span and a
 /// clause ("it returns `v`").
 fn kept_use(c: &Cand, at: u32) -> (Span, String) {

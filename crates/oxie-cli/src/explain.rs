@@ -55,6 +55,7 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
             }
             d.notes.push(help(&format!("{} Take a copy with `.clone()`, or borrow it with `&`.", reason)));
         }
+        "E0594" if d.message.contains("not declared as mutable") => borrow_mut(d, sources, &lines, &first),
         "E0594" if d.message.contains("behind a `&` reference") => {
             let name = first.trim_start_matches('*').split(['.', '[']).next().unwrap_or("").to_string();
             rewrite(d, format!("`{}` is a read-only reference (`&`), so it can't be changed through it", name));
@@ -216,11 +217,14 @@ fn moved_value(d: &mut MappedDiag, sources: &Sources, lines: &[&str], name: &str
         Some((sources.elsewhere(&file.path, &d.file), pl, pc, pe, ty, lines[pl as usize].to_string()))
     });
     // Oxie already lends `String` and `Vec` parameters that a top-level function only reads; one
-    // that stayed owned is kept by the function (stored or returned), so `&` wouldn't compile
-    let kept = param.as_ref().is_some_and(|(.., ty, decl)| ["fun ", "private fun ", "internal fun "].iter().any(|p| decl.starts_with(p)) && (ty == "String" || ty.starts_with("Vec<")));
+    // that stayed owned is kept by the function (stored or returned), so `&` wouldn't compile.
+    // Nor would it for a parameter of any function that stores or returns it.
+    let stored = callee.as_ref().filter(|_| param.is_some()).and_then(|(f, index)| stored_reason(sources, &d.file, f, *index));
+    let lent_kind = param.as_ref().is_some_and(|(.., ty, decl)| ["fun ", "private fun ", "internal fun "].iter().any(|p| decl.starts_with(p)) && (ty == "String" || ty.starts_with("Vec<")));
+    let kept = lent_kind || stored.is_some();
     if kept {
         // say where and why the function keeps it, from the same rules that decided it
-        let why = callee.as_ref().and_then(|(f, index)| kept_reason(sources, &d.file, f, *index));
+        let why = callee.as_ref().and_then(|(f, index)| kept_reason(sources, &d.file, f, *index)).or(stored);
         if let Some((file, l, c, e, why)) = &why {
             d.secondary.push(Label { file: file.clone(), line: *l, col: *c, end_col: *e, text: format!("{} keeps it: {}", callee_text, why), exact: true });
         }
@@ -469,10 +473,37 @@ fn borrow_mut(d: &mut MappedDiag, sources: &Sources, lines: &[&str], first: &str
         return;
     }
     if d.message.contains("not declared as mutable") {
+        if find_decl(lines, &name, d.line, "val").is_none() && param_mut(d, lines, &name) {
+            mut_self_call(d, sources, d.line, d.col, &name);
+            return;
+        }
         rewrite(d, format!("`{}` is a `val`, so it can't be changed", name));
         mut_self_call(d, sources, d.line, d.col, &name);
         make_var(d, lines, &name);
     }
+}
+
+/// `name` is a parameter (not a reference) that its function changes: to change the caller's
+/// value, it asks for `&mut`, which callers lend automatically.
+fn param_mut(d: &mut MappedDiag, lines: &[&str], name: &str) -> bool {
+    let Some((pl, pc, fname, index)) = param_decl(lines, name, d.line) else { return false };
+    let Some((_, _, _, ty)) = fun_param(lines, &fname, index).filter(|(l, c, ..)| (*l, *c) == (pl, pc)) else { return false };
+    if ty.starts_with('&') || ty.starts_with('*') || ty.is_empty() {
+        return false;
+    }
+    rewrite(d, format!("`{}` is a parameter, so `{}` can't change it", name, fname));
+    d.notes.retain(|n| !n.contains("`mut ") && !n.contains("make this binding mutable"));
+    for s in d.secondary.iter_mut() {
+        if s.text.contains("help: consider") {
+            s.text = String::new();
+        }
+    }
+    d.notes.push(help(&format!(
+        "to change the caller's value, `{}` must ask for a mutable reference: `{}: &mut {}`. Callers then lend theirs: `{}(x)` passes `&mut x`.",
+        fname, name, ty, fname
+    )));
+    d.fixes.push(Fix { title: format!("let `{}` change `{}` (`&mut`)", fname, name), edits: vec![edit(pl, pc, pc, "&mut ")] });
+    true
 }
 
 /// `name` is the variable of a loop that reads its list (`for (x in items)`): to change the
@@ -2571,6 +2602,18 @@ fn fun_param(lines: &[&str], name: &str, index: usize) -> Option<(u32, u32, u32,
 fn kept_reason(sources: &Sources, current: &Path, f: &str, index: usize) -> Option<(Option<PathBuf>, u32, u32, u32, String)> {
     let files: Vec<&oxie_compiler::ast::File> = sources.files.iter().map(|s| s.ast()).collect();
     let (i, span, why) = oxie_compiler::params::kept_reason(&files, f, index)?;
+    let file = &sources.files[i];
+    let idx = oxie_compiler::LineIndex::new(&file.text);
+    let (l, c) = idx.line_col(&file.text, span.start as usize);
+    let (el, ec) = idx.line_col(&file.text, span.end as usize);
+    Some((sources.elsewhere(&file.path, current), l as u32, c as u32, if el == l { ec as u32 } else { c as u32 + 1 }, why))
+}
+
+/// Where and why the function `f` stores or returns its parameter number `index`, so lending it
+/// can't work (`params::stored_reason`), like `kept_reason`.
+fn stored_reason(sources: &Sources, current: &Path, f: &str, index: usize) -> Option<(Option<PathBuf>, u32, u32, u32, String)> {
+    let files: Vec<&oxie_compiler::ast::File> = sources.files.iter().map(|s| s.ast()).collect();
+    let (i, span, why) = oxie_compiler::params::stored_reason(&files, f, index)?;
     let file = &sources.files[i];
     let idx = oxie_compiler::LineIndex::new(&file.text);
     let (l, c) = idx.line_col(&file.text, span.start as usize);
