@@ -2192,7 +2192,7 @@ impl<'a> Parser<'a> {
                         _ => lhs,
                     };
                     let n = Expr::new(ExprKind::Cast(Box::new(rhs), Type::simple("usize")), sp);
-                    Expr::new(ExprKind::MethodCall { recv: Box::new(recv), name: "step_by".into(), generics: None, args: vec![Arg { name: None, value: n }], safe: false }, sp)
+                    Expr::new(ExprKind::MethodCall { recv: Box::new(recv), name: "step_by".into(), generics: None, args: vec![Arg { name: None, value: n, trailing: false }], safe: false }, sp)
                 }
             };
         }
@@ -2360,7 +2360,7 @@ impl<'a> Parser<'a> {
                         let lam = self.lambda_braces()?;
                         let sp = e.span.to(lam.span);
                         e = Expr::new(
-                            ExprKind::MethodCall { recv: Box::new(e), name: "let".into(), generics: None, args: vec![Arg { name: None, value: lam }], safe },
+                            ExprKind::MethodCall { recv: Box::new(e), name: "let".into(), generics: None, args: vec![Arg { name: None, value: lam, trailing: true }], safe },
                             sp,
                         );
                         continue;
@@ -2394,14 +2394,14 @@ impl<'a> Parser<'a> {
                     } else if self.is_punct("(") {
                         let mut args = self.call_args()?;
                         if self.trailing_lambda_ok() {
-                            args.push(Arg { name: None, value: self.lambda_braces()? });
+                            args.push(Arg { name: None, value: self.lambda_braces()?, trailing: true });
                         }
                         let sp = e.span.to(self.prev_span());
                         e = Expr::new(ExprKind::MethodCall { recv: Box::new(e), name, generics, args, safe }, sp);
                     } else if self.trailing_lambda_ok() {
                         let lam = self.lambda_braces()?;
                         let sp = e.span.to(lam.span);
-                        e = Expr::new(ExprKind::MethodCall { recv: Box::new(e), name, generics, args: vec![Arg { name: None, value: lam }], safe }, sp);
+                        e = Expr::new(ExprKind::MethodCall { recv: Box::new(e), name, generics, args: vec![Arg { name: None, value: lam, trailing: true }], safe }, sp);
                     } else if let (Some(g), Some(mut segs)) = (generics.clone(), dot_path(&e)) {
                         // `std.collections.HashMap::<K, V>.new()`: a type path with arguments
                         segs.push(name);
@@ -2415,7 +2415,7 @@ impl<'a> Parser<'a> {
                 Tok::Punct("(") => {
                     let mut args = self.call_args()?;
                     if self.trailing_lambda_ok() {
-                        args.push(Arg { name: None, value: self.lambda_braces()? });
+                        args.push(Arg { name: None, value: self.lambda_braces()?, trailing: true });
                     }
                     let sp = e.span.to(self.prev_span());
                     e = Expr::new(ExprKind::Call { callee: Box::new(e), args }, sp);
@@ -2443,7 +2443,7 @@ impl<'a> Parser<'a> {
                 Tok::Punct("{") if self.trailing_lambda_ok() && is_lambda_callee(&e) => {
                     let lam = self.lambda_braces()?;
                     let sp = e.span.to(lam.span);
-                    e = Expr::new(ExprKind::Call { callee: Box::new(e), args: vec![Arg { name: None, value: lam }] }, sp);
+                    e = Expr::new(ExprKind::Call { callee: Box::new(e), args: vec![Arg { name: None, value: lam, trailing: true }] }, sp);
                 }
                 _ => break,
             }
@@ -2472,7 +2472,7 @@ impl<'a> Parser<'a> {
                 None
             };
             let value = self.expr()?;
-            args.push(Arg { name, value });
+            args.push(Arg { name, value, trailing: false });
             if !self.eat_punct(",") {
                 if self.expect_punct(")").is_err() {
                     self.no_struct = saved;

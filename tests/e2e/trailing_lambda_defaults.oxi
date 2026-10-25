@@ -1,0 +1,18 @@
+// A trailing lambda goes to the last parameter, past parameters with defaults
+fun with_opts(a: i32, b: i32 = 10, f: (i32) -> i32): i32 = f(a + b)
+
+fun label(text: String, sep: String = ": ", render: (String) -> String): String = render(text) + sep
+
+class Box2(n: i32) {
+    fun apply(scale: i32 = 2, f: (i32) -> i32): i32 = f(n * scale)
+}
+
+fun main() {
+    println(with_opts(1) { it * 2 })
+    println(with_opts(1, 5) { it * 2 })
+    println(with_opts(1, f = { it + 1 }))
+    println(label("x") { it.to_uppercase() })
+    val b = Box2(3)
+    println(b.apply { it + 1 })
+    println(b.apply(3) { it + 1 })
+}

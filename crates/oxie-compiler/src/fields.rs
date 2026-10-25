@@ -681,11 +681,11 @@ fn pass_fields_to(e: &mut Expr, s: &Split) -> bool {
     let mut new_args = Vec::new();
     for (p, slot) in s.params.iter().zip(slots) {
         let Some(value) = slot.or_else(|| p.default.clone()) else { return true };
-        new_args.push(Arg { name: None, value });
+        new_args.push(Arg { name: None, value, trailing: false });
     }
     for p in &s.fields {
         let this = Expr::new(ExprKind::SelfValue, e.span);
-        new_args.push(Arg { name: None, value: Expr::new(ExprKind::Field { recv: Box::new(this), name: p.name.clone(), safe: false }, e.span) });
+        new_args.push(Arg { name: None, value: Expr::new(ExprKind::Field { recv: Box::new(this), name: p.name.clone(), safe: false }, e.span), trailing: false });
     }
     let callee = Expr::new(ExprKind::Path { segs: vec![s.method.clone()], generics, global: false }, e.span);
     e.kind = ExprKind::Call { callee: Box::new(callee), args: new_args };

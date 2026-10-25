@@ -387,7 +387,7 @@ impl<'a> Lowerer<'a> {
                         let v = format!("__arg{}", i);
                         let text = self.capture(&a.value, P_LOWEST);
                         hoisted.push(format!("let {} = {};", v, text));
-                        new_args.push(Arg { name: a.name.clone(), value: Expr::new(ExprKind::Raw(v), a.value.span) });
+                        new_args.push(Arg { name: a.name.clone(), value: Expr::new(ExprKind::Raw(v), a.value.span), trailing: a.trailing });
                     }
                 }
                 let base = self.borrowed_field(obj, field, true);

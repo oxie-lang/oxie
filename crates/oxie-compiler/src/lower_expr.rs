@@ -2746,12 +2746,15 @@ impl<'a> Lowerer<'a> {
         let mut next = 0;
         // a context the callee doesn't use is named `_cx`, and still passed as `cx`
         let named = |p: &ParamInfo, n: &str| p.name.as_deref() == Some(n) || p.context.is_some() && p.name.as_deref().and_then(|x| x.strip_prefix('_')) == Some(n);
+        // a trailing lambda goes to the last parameter, as in Kotlin, past any with defaults
+        let last = params.iter().rposition(|p| p.context.is_none() && p.name.as_deref() != Some("__this"));
         for a in args {
             match &a.name {
                 Some(n) => match params.iter().position(|p| named(p, n)) {
                     Some(i) => slots[i] = Some(a.value.clone()),
                     None => self.error(a.value.span, format!("no parameter named `{}`", n)),
                 },
+                None if a.trailing && last.is_some_and(|i| i >= next && slots[i].is_none()) => slots[last.unwrap()] = Some(a.value.clone()),
                 None => {
                     while next < slots.len() && slots[next].is_some() {
                         next += 1;
@@ -2807,7 +2810,7 @@ impl<'a> Lowerer<'a> {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
             params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new() });
-            args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span) });
+            args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span), trailing: false });
         }
         (args, params)
     }

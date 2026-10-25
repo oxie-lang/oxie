@@ -1997,7 +1997,7 @@ impl<'a> Lowerer<'a> {
             .fields
             .iter()
             .filter(|f| f.in_ctor && f.default.is_none())
-            .map(|f| Arg { name: Some(f.name.clone()), value: Expr::new(ExprKind::Raw("Default::default()".into()), span) })
+            .map(|f| Arg { name: Some(f.name.clone()), value: Expr::new(ExprKind::Raw("Default::default()".into()), span), trailing: false })
             .collect();
         let callee = Expr::new(ExprKind::Path { segs: vec![t.name.clone()], generics: None, global: false }, span);
         let call = Expr::new(ExprKind::Call { callee: Box::new(callee), args }, span);
