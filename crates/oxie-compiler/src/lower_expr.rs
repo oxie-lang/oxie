@@ -119,8 +119,32 @@ fn is_scalar_literal(e: &Expr) -> bool {
 #[derive(PartialEq)]
 enum Contains {
     Key,
+    Set,
     Text,
     Value,
+}
+
+/// The two forms of text a collection holds: `String` or `&str`.
+#[derive(PartialEq, Clone, Copy)]
+enum TextForm {
+    Owned,
+    Str,
+}
+
+/// The references around a type, and the form of the text below them, if it is text.
+fn ref_depth(t: &Type) -> (usize, Option<TextForm>) {
+    let mut d = 0;
+    let mut t = t;
+    while let Type::Ref { inner, .. } = t {
+        d += 1;
+        t = inner;
+    }
+    let text = match t.single_name() {
+        Some("String") => Some(TextForm::Owned),
+        Some("str") if d > 0 => Some(TextForm::Str),
+        _ => None,
+    };
+    (d, text)
 }
 
 fn is_string_lit(e: &Expr) -> bool {
@@ -1532,23 +1556,7 @@ impl<'a> Lowerer<'a> {
                 if *negated {
                     self.e.w("!");
                 }
-                self.expr(coll, P_POSTFIX);
-                let kind = self.contains_kind(coll);
-                self.e.w(if kind == Contains::Key { ".contains_key(" } else { ".contains(" });
-                // a key that already is a reference (`"ada"`, a `&str`) is looked up as it is, so it
-                // works for `String` keys too
-                let lend = match kind {
-                    Contains::Key => self.auto_borrow(item, false),
-                    Contains::Text => !is_string_lit(coll) && !self.is_char(item),
-                    Contains::Value => true,
-                };
-                if lend {
-                    self.e.w("&");
-                    self.expr(item, P_UNARY);
-                } else {
-                    self.expr(item, P_LOWEST);
-                }
-                self.e.w(")");
+                self.contains(coll, item);
             }
             Is { expr, pat, negated } => {
                 if *negated {
@@ -1724,6 +1732,13 @@ impl<'a> Lowerer<'a> {
                         self.elem_type(iter).map(|t| if copy && !writes_elements { t } else { Type::Ref { lifetime: None, mutable: writes_elements, inner: Box::new(t) } })
                     }
                     (Pat::Ident { by_ref: false, sub: None, .. }, None) if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
+                    // `for (x in xs.iter())`: references to the elements
+                    (Pat::Ident { by_ref: false, sub: None, .. }, None) => match &strip_paren(iter).kind {
+                        MethodCall { recv, name, args, .. } if args.is_empty() && name == "iter" => {
+                            self.elem_type(recv).map(|t| Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) })
+                        }
+                        _ => None,
+                    },
                     _ => None,
                 };
                 self.bind_pat(pat, elem);
@@ -2492,8 +2507,87 @@ impl<'a> Lowerer<'a> {
         }
         match t.and_then(|t| t.last_name()) {
             Some("HashMap" | "BTreeMap") => Contains::Key,
+            Some("HashSet" | "BTreeSet") => Contains::Set,
             Some("str" | "String") => Contains::Text,
             _ => Contains::Value,
+        }
+    }
+
+    /// `coll.contains(..)` for `item in coll` (written without the `!` of `!in`).
+    fn contains(&mut self, coll: &Expr, item: &Expr) {
+        let kind = self.contains_kind(coll);
+        let item_ty = self.infer_type(item);
+        let (item_refs, item_text) = item_ty.as_ref().map_or((0, None), ref_depth);
+        match kind {
+            // a map's or set's lookup takes any borrowed form of the key: `"ada"` and a `&String`
+            // as they are, a `String` lent, a `&&str` read through once
+            Contains::Key | Contains::Set => {
+                self.expr(coll, P_POSTFIX);
+                self.e.w(if kind == Contains::Key { ".contains_key(" } else { ".contains(" });
+                if item_refs >= 2 {
+                    self.e.w("*");
+                    self.expr(item, P_UNARY);
+                } else if self.auto_borrow(item, false) {
+                    self.e.w("&");
+                    self.expr(item, P_UNARY);
+                } else {
+                    self.expr(item, P_LOWEST);
+                }
+                self.e.w(")");
+            }
+            Contains::Text => {
+                self.expr(coll, P_POSTFIX);
+                self.e.w(".contains(");
+                if !is_string_lit(coll) && !self.is_char(item) {
+                    self.e.w("&");
+                    self.expr(item, P_UNARY);
+                } else {
+                    self.expr(item, P_LOWEST);
+                }
+                self.e.w(")");
+            }
+            // a list's `contains` takes a reference to exactly its element type
+            Contains::Value => {
+                let (elem_refs, elem_text) = self.elem_type(coll).as_ref().map_or((None, None), |t| {
+                    let (d, text) = ref_depth(t);
+                    (Some(d), text)
+                });
+                self.expr(coll, P_POSTFIX);
+                match (elem_text, item_text) {
+                    // `String`s and a `&str`: compared one by one
+                    (Some(TextForm::Owned), Some(TextForm::Str)) => {
+                        let mut names = Vec::new();
+                        visit::idents_in(item, &mut names);
+                        let e = ["e", "x", "elem"].into_iter().find(|n| !names.iter().any(|m| m == n)).unwrap_or("e");
+                        self.e.w(&format!(".iter().any(|{e}| {e} == "));
+                        self.expr(item, 6);
+                        self.e.w(")");
+                    }
+                    // `&str`s and a `String`
+                    (Some(TextForm::Str), Some(TextForm::Owned)) => {
+                        self.e.w(".contains(&");
+                        self.expr(item, P_POSTFIX);
+                        self.e.w(".as_str())");
+                    }
+                    _ => {
+                        // an item that already is a reference to an element (a loop variable over
+                        // a borrowed list) is passed as it is
+                        let as_is = match elem_refs {
+                            _ if self.is_ref_lambda_param(item) => true,
+                            Some(d) => item_ty.is_some() && item_refs == d + 1,
+                            None => item_refs > 0 && item_text != Some(TextForm::Str),
+                        };
+                        self.e.w(".contains(");
+                        if as_is {
+                            self.expr(item, P_LOWEST);
+                        } else {
+                            self.e.w("&");
+                            self.expr(item, P_UNARY);
+                        }
+                        self.e.w(")");
+                    }
+                }
+            }
         }
     }
 
@@ -3911,7 +4005,8 @@ impl<'a> Lowerer<'a> {
                 // text arms on a `String` compare it as `&str`, the type of the literals: `&*s`
                 // (which a `&str` the inference took for a `String` gives too), `s.as_str()` for
                 // a `&String`
-                match self.text_when(s, arms) {
+                let text_kind = self.text_when(s, arms);
+                match text_kind {
                     Some(true) => {
                         self.expr(s, P_POSTFIX);
                         self.e.w(".as_str()");
@@ -3965,12 +4060,33 @@ impl<'a> Lowerer<'a> {
                                         if *negated {
                                             self.e.w("!");
                                         }
-                                        self.expr(expr, P_POSTFIX);
                                         // `w` is a reference to the subject
-                                        match self.contains_kind(expr) {
-                                            Contains::Key => self.e.w(&format!(".contains_key({})", w)),
-                                            Contains::Text if subject.is_some_and(|s| self.is_char(s)) => self.e.w(&format!(".contains(*{})", w)),
-                                            _ => self.e.w(&format!(".contains({})", w)),
+                                        if self.contains_kind(expr) == Contains::Text {
+                                            self.expr(expr, P_POSTFIX);
+                                            if subject.is_some_and(|s| self.is_char(s)) {
+                                                self.e.w(&format!(".contains(*{})", w));
+                                            } else {
+                                                self.e.w(&format!(".contains({})", w));
+                                            }
+                                        } else {
+                                            let subject_ty = match text_kind {
+                                                Some(_) => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(Type::simple("str")) }),
+                                                None => subject.and_then(|s| self.infer_type(s)),
+                                            };
+                                            match subject_ty {
+                                                Some(t) => {
+                                                    let item = Expr::new(ExprKind::Path { segs: vec![w.clone()], generics: None, global: false }, expr.span);
+                                                    self.push_scope();
+                                                    self.bind_name(&w, Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) }));
+                                                    self.contains(expr, &item);
+                                                    self.pop_scope();
+                                                }
+                                                None => {
+                                                    self.expr(expr, P_POSTFIX);
+                                                    let method = if self.contains_kind(expr) == Contains::Key { "contains_key" } else { "contains" };
+                                                    self.e.w(&format!(".{}({})", method, w));
+                                                }
+                                            }
                                         }
                                     }
                                 }
