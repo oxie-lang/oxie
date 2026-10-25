@@ -4,4 +4,5 @@ fun main() {
     val nums = vec[1, 2, 3]
     val n = consume(nums)
     println("$n ${nums.len()}")
+    println(vec[vec[4]].into_iter().map(consume).count())
 }
