@@ -112,6 +112,17 @@ starlight-theme-select:has(select:focus-visible) {
 	display: block;
 }
 
+/* Commands in the banner: Starlight styles inline code only in page content, so give them the
+   same chip, tinted for the banner's accent background */
+.sl-banner code {
+	padding: 0.125em 0.375em;
+	border: 1px solid color-mix(in srgb, var(--sl-color-accent-high) 30%, transparent);
+	border-radius: 5px;
+	background-color: color-mix(in srgb, var(--sl-color-accent-high) 14%, transparent);
+	font-size: 0.875em;
+	white-space: nowrap;
+}
+
 /* keep prose on the home page to a readable measure; tables and code use the full width */
 [data-has-hero] .sl-markdown-content > :is(p, ul, ol) {
 	max-width: 72ch;

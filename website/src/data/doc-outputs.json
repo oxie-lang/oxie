@@ -5,6 +5,11 @@
     "source": "error enum BankError {\n    Insufficient(needed: u64, available: u64) = \"need $needed, have $available\"\n    Frozen = \"account is frozen\"\n}\n\ndata class Account(owner: String, balance: u64 = 0, frozen: bool = false) {\n    fun deposit(amount: u64) { balance += amount }\n\n    fun withdraw(amount: u64): u64 throws BankError {\n        if (frozen) throw BankError.Frozen\n        if (amount > balance) throw BankError.Insufficient(amount, balance)\n        balance -= amount\n        balance\n    }\n\n    override fun toString() = \"$owner: $balance\"\n}\n\nfun main() {\n    var account = Account(\"Ada\")\n    account.deposit(100)\n\n    when (account.withdraw(250)) {\n        Ok(left) -> println(\"withdrew, $left left\")\n        Err(e) -> println(\"failed: $e\")\n    }\n    println(\"$account\")\n}\n"
   },
   {
+    "file": "docs/ai-agents.md",
+    "output": "welcome, ada, member 3\n",
+    "source": "fun register(names: &mut Vec<String>, name: String) = names.push(name)\n\nfun sign_up(names: &mut Vec<String>, name: String) {\n    register(names, name.clone())\n    var count = names.len()\n    count += 1\n    println(\"welcome, $name, member $count\")\n}\n\nfun main() {\n    var names = vec[\"bob\".to_string()]\n    sign_up(&mut names, \"ada\".to_string())\n}\n"
+  },
+  {
     "file": "docs/cheatsheet.md",
     "output": "1 names\n[\"ada\", \"bob\"] [\"ada\", \"bob\"]\n",
     "source": "fun show(names: &Vec<String>) = println(\"${names.len()} names\")\n\nfun main() {\n    var names = vec[\"ada\".to_string()]\n    show(&names)              // lend\n    names.push(\"bob\".to_string())\n    val copy = names.clone()  // explicit copy\n    val moved = names         // `names` is moved\n    println(\"${copy:?} ${moved:?}\")\n}\n"
