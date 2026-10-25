@@ -460,7 +460,10 @@ impl Printer<'_> {
                 format!("async {}{}", if a.capture.is_some() { "move " } else { "" }, b)
             }
             syn::Expr::Await(a) => format!("{}.await", self.postfix(&a.base)),
-            syn::Expr::Binary(b) => format!("{} {} {}", self.operand(&b.left), tok(&b.op), self.expr(&b.right)),
+            syn::Expr::Binary(b) => {
+                let right = if matches!(&*b.right, syn::Expr::Macro(_)) { self.operand(&b.right) } else { self.expr(&b.right) };
+                format!("{} {} {}", self.operand(&b.left), tok(&b.op), right)
+            }
             syn::Expr::Block(b) => {
                 let label = b.label.as_ref().map(|l| format!("{}: ", l.name)).unwrap_or_default();
                 // a function, method or variable named `run` hides Oxie's `run { }` block
@@ -616,7 +619,9 @@ impl Printer<'_> {
     /// The left operand of a binary operator or `as`: `if`/`when` and friends need parentheses.
     fn operand(&mut self, e: &syn::Expr) -> String {
         let s = self.expr(e);
-        if is_blocky(e) || matches!(e, syn::Expr::Closure(_)) {
+        // `matches!(..)` becomes `x is P`, which binds looser than `as` and arithmetic
+        let is_test = matches!(e, syn::Expr::Macro(m) if m.mac.path.is_ident("matches")) && s.contains(" is ");
+        if is_blocky(e) || matches!(e, syn::Expr::Closure(_)) || is_test {
             format!("({})", s)
         } else {
             s
