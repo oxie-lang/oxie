@@ -1,0 +1,14 @@
+// A `String` parameter kept owned says what keeps it.
+fun has(names: Vec<String>, who: String): Boolean = names.contains(&who)
+fun find(names: Vec<String>, who: String): Boolean = who in names
+
+fun main() {
+    val who = "x".to_string()
+    println(has(vec["x".to_string()], who))
+    println(who)
+    // error: 8: `has` keeps it (it uses `&who`, a reference to the value itself)
+    val other = "y".to_string()
+    println(find(vec["y".to_string()], other))
+    println(other)
+    // error: 12: `find` keeps it (it looks for `who` with `in`, which compares the value itself)
+}

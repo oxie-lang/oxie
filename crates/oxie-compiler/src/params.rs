@@ -95,6 +95,17 @@ fn chain_text(e: &Expr) -> String {
     }
 }
 
+/// The operands of a `+` chain: `a + b + c` → `[a, b, c]`.
+fn concat_operands<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Binary(BinOp::Add, l, r) => {
+            concat_operands(l, out);
+            out.push(r);
+        }
+        _ => out.push(e),
+    }
+}
+
 /// The element type of a collection a `for` loop can borrow (`Vec<T>`, `HashSet<T>`, ...).
 fn loop_elem(t: &Type) -> Option<&Type> {
     let Type::Path { segs, .. } = t else { return None };
@@ -597,10 +608,21 @@ impl<'a> Analysis<'a> {
                     if let Some(f) = callee.ident() {
                         for (pos, a) in args.iter().enumerate() {
                             if self.lends(f, pos, a) {
-                                ok.extend(read_at(&a.value, true));
+                                // `&s` too: a reference to the reference coerces
+                                let v = match &a.value.kind {
+                                    ExprKind::Unary(UnOp::Ref, x) => x,
+                                    _ => &a.value,
+                                };
+                                ok.extend(read_at(v, true));
                             }
                         }
                     }
+                }
+                // joining text with `+` formats it: `format!("{}{}", a, b)`
+                ExprKind::Binary(BinOp::Add, ..) if c.kind == Kind::Str => {
+                    let mut ops = Vec::new();
+                    concat_operands(e, &mut ops);
+                    ok.extend(ops.into_iter().filter(|o| is_p(o)).map(|o| o.span.start));
                 }
                 ExprKind::Lambda { is_move: true, body, .. } => {
                     walk_expr(body, &mut |x| {
@@ -769,6 +791,8 @@ fn kept_use(c: &Cand, at: u32) -> (Span, String) {
             ExprKind::MethodCall { recv, name: m, .. } if chain_root(recv, name) == Some(at) => Some(format!("it calls `.{}()` on `{}`", m, chain_text(recv))),
             ExprKind::Field { .. } if chain_root(e, name) == Some(at) => Some(format!("it uses `{}` by value", chain_text(e))),
             ExprKind::MethodCall { args, name: m, .. } if args.iter().any(|a| is_at(&a.value)) => Some(format!("it passes `{}` to `.{}()`", name, m)),
+            ExprKind::Unary(UnOp::Ref | UnOp::RefMut, x) if is_at(x) => Some(format!("it uses `&{}`, a reference to the value itself", name)),
+            ExprKind::In { item, .. } if is_at(item) => Some(format!("it looks for `{}` with `in`, which compares the value itself", name)),
             ExprKind::Assign(_, _, rhs) if is_at(rhs) => Some(format!("it stores `{}`", name)),
             ExprKind::StructLit { fields, .. } if fields.iter().any(|(_, v)| v.as_ref().is_some_and(is_at)) => Some(format!("it stores `{}` in a struct", name)),
             _ => None,

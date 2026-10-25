@@ -3734,7 +3734,9 @@ impl<'a> Lowerer<'a> {
             return false;
         }
         let borrowed_text = |o: &Expr| matches!(self.infer_type(o), Some(Type::Ref { inner, .. }) if matches!(inner.single_name(), Some("str" | "String")));
-        ops.iter().any(|o| is_string_lit(o)) || borrowed_text(ops[0]) || ops[1..].iter().any(|o| self.is_owned_string(o))
+        // a `String` parameter that Oxie lends as `&str` is still joined as text
+        let lent_text = |o: &Expr| o.ident().is_some_and(|n| self.lent.iter().any(|l| l == n)) && borrowed_text(o);
+        ops.iter().any(|o| is_string_lit(o)) || borrowed_text(ops[0]) || ops[1..].iter().any(|o| self.is_owned_string(o) || lent_text(o))
     }
 
     /// Is `e` known to be an owned `String`?
