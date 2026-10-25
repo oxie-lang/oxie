@@ -331,6 +331,24 @@ pub fn esc(name: &str) -> String {
 }
 
 /// `"NotFound"` -> `"not found"`
+/// Where a returned reference points (see `with_field_ret_lifetime`).
+#[derive(Clone, Debug, PartialEq)]
+enum RetLt {
+    Any,
+    Field(String),
+    Other,
+}
+
+impl RetLt {
+    fn join(self, o: RetLt) -> RetLt {
+        match (self, o) {
+            (RetLt::Any, x) | (x, RetLt::Any) => x,
+            (RetLt::Field(a), RetLt::Field(b)) if a == b => RetLt::Field(a),
+            _ => RetLt::Other,
+        }
+    }
+}
+
 /// The result type interface `tr` declares for method `name`, with the interface's type
 /// parameters replaced by `tr`'s arguments (`Vec<T>` of `Repo<String>` is `Vec<String>`).
 pub(crate) fn trait_ret(tr: &Type, info: Option<&sema::TraitInfo>, name: &str) -> Option<Type> {
@@ -1848,7 +1866,9 @@ impl<'a> Lowerer<'a> {
             Some(_) => false,
             None => matches!(recv, Recv::Ref | Recv::RefMut),
         };
-        let f = &auto_lifetimes(&self.with_inferred_ret(f, trait_ret), by_ref, &|n| self.k.type_lifetimes_in(n, &self.module));
+        let f = &self.with_inferred_ret(f, trait_ret);
+        let f = &self.with_field_ret_lifetime(f, by_ref);
+        let f = &auto_lifetimes(f, by_ref, &|n| self.k.type_lifetimes_in(n, &self.module));
         let f = &match self.class.as_ref() {
             Some(c) if !f.mods.is_override && !self.trait_impl && c.trait_methods.as_ref().is_some_and(|t| !t.contains(&f.name)) => {
                 let fields: Vec<(String, Type)> = c.fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
@@ -2366,6 +2386,91 @@ impl<'a> Lowerer<'a> {
                 self.e.nl();
             }
             _ => self.item(m, ItemCtx::Top),
+        }
+    }
+
+    /// A method returning a reference into a reference field (`class Parser(input: &str)`,
+    /// `fun word(): &str = &input[a..b]`) returns it with the field's lifetime (`&'a str`), not
+    /// one tied to `self`: the caller can keep it while changing the object.
+    fn with_field_ret_lifetime(&self, f: &FunDecl, by_ref: bool) -> FunDecl {
+        let (Some(Type::Ref { lifetime: None, .. }), true, Some(body)) = (&f.ret, by_ref, &f.body) else { return f.clone() };
+        let mut found = RetLt::Any;
+        let mut returns = Vec::new();
+        let mut collect = |e: &Expr| {
+            visit::walk_expr(e, &mut |x| match &x.kind {
+                ExprKind::Lambda { .. } => false,
+                ExprKind::Return(v) => {
+                    returns.push(v.as_deref().cloned());
+                    true
+                }
+                _ => true,
+            })
+        };
+        match body {
+            FunBody::Expr(e) => {
+                collect(e);
+                found = self.ret_lt(e);
+            }
+            FunBody::Block(b) => {
+                for st in &b.stmts {
+                    if let Stmt::Expr { expr, .. } | Stmt::Let { init: Some(expr), .. } = st {
+                        collect(expr);
+                    }
+                }
+                if let Some(Stmt::Expr { expr, semi: false }) = b.stmts.last() {
+                    found = self.ret_lt(expr);
+                }
+            }
+        }
+        for r in returns {
+            let Some(r) = r else { return f.clone() };
+            found = found.join(self.ret_lt(&r));
+        }
+        self.set_ret_lt(f, found)
+    }
+
+    fn set_ret_lt(&self, f: &FunDecl, lt: RetLt) -> FunDecl {
+        let RetLt::Field(l) = lt else { return f.clone() };
+        let mut f2 = f.clone();
+        if let Some(Type::Ref { lifetime, .. }) = &mut f2.ret {
+            *lifetime = Some(l);
+        }
+        f2
+    }
+
+    /// Where the reference `e` points: into a reference field of the class (its lifetime), at a
+    /// literal (any lifetime), or elsewhere.
+    fn ret_lt(&self, e: &Expr) -> RetLt {
+        let field_lt = |name: &str| match self.class.as_ref().and_then(|c| c.fields.get(name)) {
+            Some(Type::Ref { lifetime: Some(l), mutable: false, .. }) if l != "_" && l != "static" => RetLt::Field(l.clone()),
+            _ => RetLt::Other,
+        };
+        match &e.kind {
+            ExprKind::Str(_) | ExprKind::RawStr(_) => RetLt::Any,
+            ExprKind::Paren(x) => self.ret_lt(x),
+            ExprKind::Path { segs, generics: None, global: false } if segs.len() == 1 => field_lt(&segs[0]),
+            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => field_lt(name),
+            // `&input[a..b]`, `input[a..].trim()`
+            ExprKind::Unary(UnOp::Ref, x) => match &x.kind {
+                ExprKind::Index(root, _) => self.ret_lt(root),
+                _ => RetLt::Other,
+            },
+            ExprKind::MethodCall { recv, name, safe: false, .. } if matches!(name.as_str(), "trim" | "trim_start" | "trim_end") => match &recv.kind {
+                ExprKind::Index(root, _) => self.ret_lt(root),
+                _ => self.ret_lt(recv),
+            },
+            ExprKind::If { then, else_: Some(els), .. } => {
+                let t = match then.stmts.last() {
+                    Some(Stmt::Expr { expr, semi: false }) => self.ret_lt(expr),
+                    _ => RetLt::Other,
+                };
+                t.join(self.ret_lt(els))
+            }
+            ExprKind::Block(b) => match b.stmts.last() {
+                Some(Stmt::Expr { expr, semi: false }) => self.ret_lt(expr),
+                _ => RetLt::Other,
+            },
+            _ => RetLt::Other,
         }
     }
 
