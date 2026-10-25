@@ -470,6 +470,16 @@ editing the grammar, run `editors/build-kuana-extension.sh` and **Reload Extensi
 Kuana's own source (branch `oxie-language` of the editor) additionally shows a `.oxi` file icon
 and adds `oxie run`, `oxie test`, `oxie build` and `oxie fmt` to the Run… list of Oxie projects.
 
+### Zed
+
+The extension in [`editors/zed-oxie`](../editors/zed-oxie) gives Zed the same highlighting
+(with `rust { }` blocks highlighted as Rust), outline, ▶ buttons, tasks and snippets as Kuana's,
+whose files it copies (`editors/build-zed-extension.sh`), and the language server (needs `oxie`
+on your `PATH`; `lsp.oxie.binary.path` in Zed's settings picks another one).
+
+Install: **zed: install dev extension** from the command palette → choose `editors/zed-oxie`
+(Zed needs Rust installed with rustup to build it).
+
 ### VS Code
 
 The extension in [`editors/vscode-oxie`](../editors/vscode-oxie) adds:
@@ -498,6 +508,6 @@ change to the extension, run `npm install` and `npm run package` in `editors/vsc
 ### Other editors
 
 Any editor with LSP support can use `oxie lsp` for `*.oxi` files. For syntax highlighting, use
-the tree-sitter grammar in `editors/tree-sitter-oxie` (Neovim, Helix, Zed), the TextMate grammar
+the tree-sitter grammar in `editors/tree-sitter-oxie` (Neovim, Helix), the TextMate grammar
 `editors/vscode-oxie/syntaxes/oxie.tmLanguage.json` (JetBrains IDEs through TextMate Bundles,
 Shiki), or Kotlin highlighting as a fallback.

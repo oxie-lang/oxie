@@ -1,0 +1,16 @@
+[package]
+name = "zed_oxie"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+# Not part of the repository's workspace: Zed builds it on its own, for wasm32-wasip2.
+[workspace]

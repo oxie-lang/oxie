@@ -1,0 +1,19 @@
+{
+  "main": { "prefix": "main", "body": ["fun main() {", "\t$0", "}"], "description": "main function" },
+  "main throws": { "prefix": "mainthrows", "body": ["fun main() throws {", "\t$0", "}"], "description": "main function that can fail" },
+  "fun": { "prefix": "fun", "body": ["fun ${1:name}(${2}): ${3:Type} {", "\t$0", "}"], "description": "function" },
+  "fun expression": { "prefix": "fune", "body": ["fun ${1:name}(${2}) = ${0:value}"], "description": "expression-bodied function" },
+  "class": { "prefix": "class", "body": ["class ${1:Name}(${2:var value: i32}) {", "\t$0", "}"], "description": "class" },
+  "data class": { "prefix": "data", "body": ["data class ${1:Name}(${2:x: i32, y: i32})"], "description": "data class (Debug, Clone, PartialEq, ...)" },
+  "enum": { "prefix": "enum", "body": ["enum ${1:Name} {", "\t${2:First}", "\t${3:Second}(${4:value}: ${5:i32})", "}"], "description": "enum" },
+  "error enum": { "prefix": "errenum", "body": ["error enum ${1:MyError} {", "\t${2:NotFound}(${3:name}: String) = \"${4:not found}: \\$${3:name}\"", "}"], "description": "error type with messages" },
+  "interface": { "prefix": "interface", "body": ["interface ${1:Name} {", "\tfun ${2:method}(): ${3:String}", "}"], "description": "interface (trait)" },
+  "when": { "prefix": "when", "body": ["when (${1:value}) {", "\t${2:pattern} -> ${3:result}", "\telse -> ${0:other}", "}"], "description": "when expression" },
+  "if": { "prefix": "if", "body": ["if (${1:condition}) {", "\t$0", "}"], "description": "if" },
+  "for": { "prefix": "for", "body": ["for (${1:item} in ${2:items}) {", "\t$0", "}"], "description": "for loop" },
+  "try": { "prefix": "try", "body": ["try {", "\t${1}", "} catch (e) {", "\t$0", "}"], "description": "try / catch" },
+  "test": { "prefix": "test", "body": ["test \"${1:description}\" {", "\t$0", "}"], "description": "unit test" },
+  "println": { "prefix": "pl", "body": ["println(\"$0\")"], "description": "println" },
+  "val": { "prefix": "val", "body": ["val ${1:name} = ${0:value}"], "description": "immutable variable" },
+  "var": { "prefix": "var", "body": ["var ${1:name} = ${0:value}"], "description": "mutable variable" }
+}

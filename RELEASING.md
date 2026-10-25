@@ -18,6 +18,13 @@ Where Oxie and its editor extensions are published, and how each is released.
 The Kuana extension (`editors/kuana-oxie`, regenerated with `editors/build-kuana-extension.sh`)
 is not published anywhere yet.
 
+The Zed extension (`editors/zed-oxie`, copied from the Kuana extension by
+`editors/build-zed-extension.sh`) is not published yet either. Zed lists an extension through a
+pull request to https://github.com/zed-industries/extensions that adds this repository as a
+submodule with `path = "editors/zed-oxie"`; each update bumps `version` in its `extension.toml`
+and the submodule commit. Its grammar is built from the commit that `extension.toml` pins, so
+push that commit first.
+
 ## Oxie
 
 1. Bump `version` in `[workspace.package]` and the versions in `[workspace.dependencies]` of the

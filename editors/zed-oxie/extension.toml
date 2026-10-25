@@ -1,0 +1,18 @@
+id = "oxie"
+name = "Oxie"
+version = "0.1.0"
+schema_version = 1
+description = "Support for the Oxie programming language: syntax highlighting, outline, run and test buttons, and the Oxie language server (diagnostics, completion, hover, go to definition, rename, formatting)."
+authors = ["Berkay Akin"]
+repository = "https://github.com/oxie-lang/oxie"
+snippets = ["./snippets/oxie.json"]
+
+# Zed builds the grammar from the repository at this commit: the last one that changed
+# editors/tree-sitter-oxie (set by ../build-zed-extension.sh).
+[grammars.oxie]
+repository = "https://github.com/oxie-lang/oxie"
+rev = "a3a355d3368bee053c47e2f5356d37e9f4e58ff9"
+path = "editors/tree-sitter-oxie"
+
+[language_servers.oxie]
+languages = ["Oxie"]

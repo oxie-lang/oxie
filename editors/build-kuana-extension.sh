@@ -1,5 +1,6 @@
 #!/bin/sh
-# Regenerates the tree-sitter parser and copies it with the queries into the Kuana extension.
+# Regenerates the tree-sitter parser and copies it with the queries into the Kuana extension, then
+# updates the Zed extension from it.
 set -e
 cd "$(dirname "$0")/tree-sitter-oxie"
 [ -x node_modules/.bin/tree-sitter ] || npm install --no-audit --no-fund
@@ -13,3 +14,4 @@ for q in highlights outline indents brackets textobjects runnables injections; d
     cp "tree-sitter-oxie/queries/$q.scm" "kuana-oxie/languages/oxie/$q.scm"
 done
 echo "Kuana extension updated: $(pwd)/kuana-oxie"
+./build-zed-extension.sh
