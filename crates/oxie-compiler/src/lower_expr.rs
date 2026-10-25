@@ -3720,6 +3720,16 @@ impl<'a> Lowerer<'a> {
         if let Some(el) = else_ {
             self.e.w(" else ");
             match &el.kind {
+                // a let chain lowers to `match`, which needs braces after `else`
+                ExprKind::If { cond, then, else_ } if matches!(**cond, Cond::Chain(_)) || matches!(self.narrow_cond(cond, then).0, Some(Cond::Chain(_))) => {
+                    self.e.w("{");
+                    self.e.indent();
+                    self.e.nl();
+                    self.if_expr(cond, then, else_.as_deref(), mode);
+                    self.e.dedent();
+                    self.e.nl();
+                    self.e.w("}");
+                }
                 ExprKind::If { cond, then, else_ } => self.if_expr(cond, then, else_.as_deref(), mode),
                 ExprKind::Block(b) => match mode {
                     Some(t) => self.block_value(b, t),

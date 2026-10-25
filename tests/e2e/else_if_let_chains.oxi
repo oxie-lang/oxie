@@ -1,0 +1,19 @@
+// A let chain after `else if`, as a statement and as a value.
+fun pick(a: i32?, b: Result<i32, String>): i32 {
+    if (a == Some(0)) {
+        return 0
+    } else if (val x = a && val Ok(y) = b) {
+        return x + y
+    }
+    -1
+}
+
+fun describe(a: i32?, b: i32?): String =
+    if (a == b) "same"
+    else if (val x = a && val y = b && x > y) "first is larger by ${x - y}"
+    else "other"
+
+fun main() {
+    println("${pick(Some(2), Ok(1))} ${pick(Some(0), Ok(1))} ${pick(null, Ok(1))}")
+    println("${describe(Some(5), Some(2))}, ${describe(Some(1), Some(1))}, ${describe(Some(1), null)}")
+}
