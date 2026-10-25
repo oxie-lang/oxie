@@ -506,6 +506,88 @@ fn no_type_args(seg: &PathSeg) -> bool {
     seg.generics.as_ref().is_none_or(|g| g.iter().all(|a| matches!(a, GenericArg::Lifetime(_))))
 }
 
+/// Methods that return `this` itself as their class (`fun url(u: &str): B { url = u; this }`, a
+/// builder) take `self` by value, or `mut self` when they change it: a reference can't be
+/// returned as the value. Not interface methods, whose receivers the interface decides, nor
+/// methods of shared classes, whose `this` is a handle. Runs after receiver inference (`k`)
+/// tells which methods change `this`; returns whether it changed any.
+pub fn by_value_receivers(files: &mut [(&[String], &mut File)], k: &Crate) -> bool {
+    fn go(items: &mut [Item], module: &[String], k: &Crate) -> bool {
+        let mut changed = false;
+        for it in items {
+            match &mut it.kind {
+                ItemKind::Type(t) if !t.shared => {
+                    let key = k.decl_key(module, &t.name);
+                    let iface = |n: &str| t.supertypes.iter().filter_map(|s| s.last_name()).any(|st| k.traits.get(st).is_some_and(|ti| ti.methods.contains_key(n)));
+                    // `this`, or what a method found here returns for it (`reset().times(2)`)
+                    fn this(e: &Expr, by_value: &[(String, bool)]) -> bool {
+                        let found = |n: &str| by_value.iter().any(|(m, _)| m == n);
+                        match &e.kind {
+                            ExprKind::SelfValue => true,
+                            ExprKind::Paren(x) => this(x, by_value),
+                            ExprKind::Call { callee, .. } => callee.ident().is_some_and(found),
+                            ExprKind::MethodCall { recv, name, safe: false, .. } => found(name) && this(recv, by_value),
+                            _ => false,
+                        }
+                    }
+                    // does the method change `this` (so it takes `mut self`), other than by passing it
+                    // on to a method that takes `self`?
+                    let class = k.classes.get(&key);
+                    let changes = |f: &FunDecl, by_value: &[(String, bool)]| {
+                        let Some((why, _)) = class.and_then(|c| c.methods.get(&f.name)).filter(|mi| mi.recv == Recv::RefMut).and_then(|mi| mi.recv_why.as_ref()) else { return false };
+                        if !by_value.iter().any(|(n, _)| why.starts_with(&format!("it calls `{}()`", n))) {
+                            return true;
+                        }
+                        let fields: HashSet<String> = class.map(|c| c.fields.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
+                        let mut recvs: HashMap<String, Recv> = class.map(|c| c.methods.iter().map(|(n, m)| (n.clone(), m.recv)).collect()).unwrap_or_default();
+                        recvs.extend(by_value.iter().map(|(n, _)| (n.clone(), Recv::Value)));
+                        analyze_fun(f, &fields, &recvs).mutates_self
+                    };
+                    let mut by_value: Vec<(String, bool)> = Vec::new();
+                    loop {
+                        let before = by_value.len();
+                        for m in &t.members {
+                            let ItemKind::Fun(f) = &m.kind else { continue };
+                            let own = f.ret.as_ref().and_then(|r| r.single_name()).is_some_and(|n| n == "Self" || n == t.name);
+                            if f.self_param.is_some() || f.mods.is_static || f.mods.is_override || !own || iface(&f.name) || by_value.iter().any(|(n, _)| *n == f.name) {
+                                continue;
+                            }
+                            let Some(body) = &f.body else { continue };
+                            if crate::visit::return_values(body).iter().any(|e| this(e, &by_value)) {
+                                by_value.push((f.name.clone(), f.mods.is_mut || changes(f, &by_value)));
+                            }
+                        }
+                        if by_value.len() == before {
+                            break;
+                        }
+                    }
+                    for m in &mut t.members {
+                        if let ItemKind::Fun(f) = &mut m.kind {
+                            if let Some((_, mutable)) = by_value.iter().find(|(n, _)| *n == f.name) {
+                                f.self_param = Some(SelfParam::Value { mutable: *mutable });
+                                f.mods.is_mut = false;
+                                changed = true;
+                            }
+                        }
+                    }
+                    changed |= go(&mut t.members, module, k);
+                }
+                ItemKind::Mod { name, items } => {
+                    let inner: Vec<String> = module.iter().cloned().chain([name.clone()]).collect();
+                    changed |= go(items, &inner, k);
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+    let mut changed = false;
+    for (module, f) in files.iter_mut() {
+        changed |= go(&mut f.items, module, k);
+    }
+    changed
+}
+
 /// Classes and enums whose fields hold references get a lifetime parameter: `class Parser(input: &str)`
 /// becomes `struct Parser<'a> { input: &'a str }`. A field naming such a type (`Vec<Token>`) needs
 /// one too, so this runs over the whole crate before symbols are collected.

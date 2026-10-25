@@ -141,6 +141,10 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         sema::collect(&units, &opts.crate_name, opts.extern_crates.clone(), has_lib)
     };
     let mut k = collect(&parsed);
+    // builder methods that return `this` take `self`; sema again for their receivers
+    if sema::by_value_receivers(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k) {
+        k = collect(&parsed);
+    }
     // what takes the receivers: methods that take only the fields they use, and class and `Box`
     // parameters to lend. Then sema again, for the new signatures.
     let field_notes = crate::fields::take_fields(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
