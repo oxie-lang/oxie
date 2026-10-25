@@ -79,7 +79,7 @@ so callers don't write it.
 class Config(verbose: bool)
 
 context(config: &Config)
-fun log(msg: &str) {
+fun log(msg: String) {
     if (config.verbose) println(msg)
 }
 
@@ -237,15 +237,15 @@ you.
 data class Address(city: String)
 data class Person(name: String, address: Address?)
 
-fun find(people: &[Person], name: &str): &Person? = people.iter().find { it.name == name }
+fun find(people: [Person], name: String): &Person? = people.find { it.name == name }
 
 fun main() {
     val people = listOf(Person("Ada", Address("London")), Person("Bob", null))
 
-    val city = find(&people, "Ada")?.address?.city   // safe navigation
+    val city = find(people, "Ada")?.address?.city   // safe navigation
     println("${city:?}")
 
-    val len = find(&people, "Zed")?.name?.len() ?: 0  // elvis: default when null
+    val len = find(people, "Zed")?.name?.len() ?: 0  // elvis: default when null
     println(len)
 
     if (val p = find(&people, "Bob")) {             // unwraps (Rust `if let Some(p)`)
@@ -381,7 +381,7 @@ enum Direction { North, East, South, West }
 
 fun main() {
     val shapes = listOf(Shape.Circle(1.0), Shape.Rect(2.0, 3.0), Shape.Empty)
-    for (s in &shapes) println("${s:?} has area ${s.area():.2}")
+    for (s in shapes) println("${s:?} has area ${s.area():.2}")
     println(Direction.North == Direction.East)
 }
 ```
@@ -412,7 +412,7 @@ fun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`
 
 fun main() {
     val zoo: [Animal] = [Dog(), Cat("Tom")]
-    for (a in &zoo) introduce(a)                          // lends the boxed value
+    for (a in zoo) introduce(a)                           // lends the boxed value
 }
 ```
 
@@ -451,7 +451,7 @@ error enum ConfigError {
     Invalid(key: String, value: String) = "invalid value '$value' for $key"
 }
 
-fun port(text: &str): u16 throws ConfigError {
+fun port(text: String): u16 throws ConfigError {
     if (text.is_empty()) throw ConfigError.Missing("port")
     text.parse().map_err { ConfigError.Invalid("port", text) }?
 }
@@ -477,10 +477,10 @@ Every `.oxi` file in `src/` is a module named after the file (`src/net/http.oxi`
 `net::http`). Import with `import`:
 
 ```oxie
-import std::collections::{HashMap, HashSet}
-import std.fs                     // dots work in paths too
+import std.collections.{HashMap, HashSet}
+import std::fs                    // Rust's `::` works too
 import { Deserialize, Serialize } from serde
-import model::user::User          // your own module
+import model.user.User            // your own module
 ```
 
 Declarations are visible in the whole project by default. Mark them `private` to keep them in
@@ -584,7 +584,7 @@ class Inventory(var items: [String]) {
     var count = 0
 
     // fn note(item: &str, count: &mut i32) { *count += 1; ... }
-    fun note(item: &str) {
+    fun note(item: String) {
         count += 1
         println("$count: $item")
     }
@@ -632,7 +632,7 @@ test "adds numbers" {
 }
 
 test "parsing fails on letters" throws {
-    val r = "x".parse::<i32>()
+    val r = "x".parse<i32>()
     assert(r.is_err())
 }
 
@@ -645,7 +645,7 @@ fun main() = println(add(1, 1))
 
 ```oxie
 // dep: tokio = { version = "1", features = ["full"] }
-import std::time::Duration
+import std.time.Duration
 
 async fun fetch(id: u32): String {
     tokio.time.sleep(Duration.from_millis(10)).await

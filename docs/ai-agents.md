@@ -132,8 +132,8 @@ fun sign_up(names: &mut Vec<String>, name: String) {
 }
 
 fun main() {
-    var names = vec["bob".to_string()]
-    sign_up(&mut names, "ada".to_string())
+    var names: [String] = ["bob"]
+    sign_up(names, "ada")
 }
 ```
 

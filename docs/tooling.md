@@ -218,7 +218,7 @@ A `.oxi` file outside a project runs as a script. Its dependencies go in header 
 ```oxie
 // dep: rand = "0.8"
 // dep: serde = { version = "1", features = ["derive"] }
-fun main() = println(rand.random::<u32>())    // output varies
+fun main() = println(rand.random<u32>())    // output varies
 ```
 
 Scripts are built in `~/.cache/oxie` (set `OXIE_CACHE` to change it) with a shared target

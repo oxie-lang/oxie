@@ -9,7 +9,7 @@ ordinary `Result` code.
 A function that can fail declares `throws`:
 
 ```oxie
-fun parse_age(text: &str): u32 throws {
+fun parse_age(text: String): u32 throws {
     val age: u32 = text.trim().parse()?          // `?` passes a failure on to the caller
     if (age > 150) throw "age $age is not realistic"
     age                                          // wrapped in Ok automatically
@@ -42,13 +42,13 @@ fun check(x: i32) throws {
     if (x < 0) throw "negative: $x"
 }
 
-fun check_all(xs: &[i32]) throws {
-    for (x in xs) check(*x)              // same as `check(*x)?`
+fun check_all(xs: [i32]) throws {
+    for (x in xs) check(x)               // same as `check(x)?`
 }
 
 fun main() {
-    println("${check_all(&[1, 2]):?}")
-    println("${check_all(&[1, -2]):?}")
+    println("${check_all([1, 2]):?}")
+    println("${check_all([1, -2]):?}")
 }
 ```
 
@@ -65,7 +65,7 @@ warns about it.
 `std::error::Error` and `Debug` for it:
 
 ```oxie
-import std::num::ParseIntError
+import std.num.ParseIntError
 
 error enum ConfigError {
     Missing(key: String) = "missing setting '$key'"
@@ -73,7 +73,7 @@ error enum ConfigError {
     BadNumber(ParseIntError)                       // wraps another error
 }
 
-fun read_port(text: &str): u16 throws ConfigError {
+fun read_port(text: String): u16 throws ConfigError {
     if (text.is_empty()) throw ConfigError.Missing("port")
     val n: i64 = text.parse()?                      // ParseIntError converts via From
     if (n > 65535) throw ConfigError.OutOfRange("port", n, 65535)
@@ -149,8 +149,8 @@ fun main() {
 
 ```oxie
 fun main() {
-    val n = "abc".parse::<i32>() ?: 0
-    val m = "7".parse::<i32>() ?: 0
+    val n = "abc".parse<i32>() ?: 0
+    val m = "7".parse<i32>() ?: 0
     println("$n $m")
 }
 ```
@@ -164,7 +164,7 @@ or `?: return`.
 original as its cause:
 
 ```oxie
-import std::fs
+import std.fs
 
 fun load(path: &str): String throws {
     val text = fs.read_to_string(path).context("cannot read config '$path'")?
@@ -189,7 +189,7 @@ fun main() {
 A throwing `main` prints the error and its causes and exits with status 1:
 
 ```oxie
-import std::fs
+import std.fs
 
 fun main() throws {
     val config = fs.read_to_string("/no/such/app.toml").context("loading app.toml")?

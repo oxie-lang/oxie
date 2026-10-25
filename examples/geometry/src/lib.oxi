@@ -41,7 +41,7 @@ pub data class Polygon(points: [Point]) : Shape {
 }
 
 /// Sum of the areas of all shapes.
-pub fun total_area(shapes: &[&dyn Shape]): f64 = shapes.iter().map { it.area() }.sum()
+pub fun total_area(shapes: &[&Shape]): f64 = shapes.sum_of { it.area() }
 
 test "distance" {
     assert_eq(Point(0.0, 0.0).distance_to(Point(3.0, 4.0)), 5.0)

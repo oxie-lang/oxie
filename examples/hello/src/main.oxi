@@ -2,7 +2,7 @@
 
 data class Person(name: String, age: u32)
 
-fun greet(p: &Person): String = when {
+fun greet(p: Person): String = when {
     p.age < 18 -> "Hi ${p.name}!"
     else -> "Hello, ${p.name}."
 }
@@ -18,12 +18,12 @@ fun main() {
 
     // collections and lambdas
     val people = listOf(Person("Ada", 36), Person("Tim", 12), Person("Grace", 45))
-    val adults = people.iter().filter { it.age >= 18 }.map { it.name.as_str() }.to_list()
+    val adults = people.filter { it.age >= 18 }.map { it.name.clone() }
     println("adults: ${adults.join(", ")}")
 
     // control flow is an expression
-    for (p in &people) println(greet(p))
-    val oldest = people.iter().max_by_key { it.age }
+    for (p in people) println(greet(p))
+    val oldest = people.max_by_key { it.age }
     println("oldest: ${oldest?.name ?: "nobody"}")
 
     // null safety
@@ -31,6 +31,6 @@ fun main() {
     println("nickname: ${nickname ?: "none"}")
 
     // errors without boilerplate
-    val parsed = "42".parse::<i32>().ok() ?: 0
+    val parsed = "42".parse<i32>() ?: 0
     println("parsed: $parsed")
 }

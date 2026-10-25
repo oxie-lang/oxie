@@ -1,5 +1,5 @@
-import std::env
-import std::fs
+import std.env
+import std.fs
 
 data class WordStat(word: String, count: usize)
 
@@ -15,13 +15,14 @@ fun count_words(text: String): [String: usize] {
 
 fun top(counts: [String: usize], n: usize): [WordStat] {
     var stats = counts.iter().map { (w, c) -> WordStat(w.clone(), *c) }.to_list()
-    stats.sort_by { a, b -> b.count.cmp(&a.count).then_with { a.word.cmp(&b.word) } }
+        .sorted_by { &it.word }
+        .sorted_by_descending { it.count }      // stable: equal counts stay in word order
     stats.truncate(n)
     stats
 }
 
 fun main() throws {
-    val path = env.args().nth(1) ?: "sample.txt".to_string()
+    val path = env.args().nth(1) ?: "sample.txt"
     val text = fs.read_to_string(&path).context("cannot read '$path'")?
     val counts = count_words(text)
     val total: usize = counts.values().sum()
@@ -35,5 +36,6 @@ fun main() throws {
 test "counts case-insensitively" {
     val c = count_words("A a b")
     assert_eq(c["a"], 2)
-    assert_eq(c.get("b"), Some(&1))
+    assert_eq(c["b"], 1)
+    assert(c.get("z") == null)
 }

@@ -28,7 +28,7 @@ when this guide or the compiler disagrees with what you remember about Oxie, the
 ## The language at a glance
 
 ```oxie
-import std::collections::HashMap
+import std.collections.HashMap
 
 data class Item(name: String, price: f64, qty: u32 = 1)    // fields, ==, copy(), Debug
 
@@ -44,7 +44,7 @@ class Cart(owner: String) : Priced {                        // no inheritance, o
     override fun total() = items.sum_of { it.price * it.qty as f64 }
 }
 
-fun cheapest(items: &[Item]): &Item? = items.min_by_key { it.price }
+fun cheapest(items: [Item]): &Item? = items.min_by_key { it.price }
 
 fun main() {
     var cart = Cart("ada")                                  // `var`, because add() changes it
@@ -53,7 +53,7 @@ fun main() {
     println("${cart.owner}'s cart ${cart.label()}")
 
     val names = cart.items.filter { it.price < 10.0 }.map { it.name.clone() }
-    println("cheap: ${names.join_to_string(", ")}, first: ${cheapest(&cart.items)?.name ?: "none"}")
+    println("cheap: ${names.join_to_string(", ")}, first: ${cheapest(cart.items)?.name ?: "none"}")
 
     var counts = HashMap()
     for (word in "a b a".split(' ')) *counts.entry(word).or_insert(0) += 1
@@ -236,7 +236,7 @@ fun parse_all(text: String): [i32] throws ParseError {
 fun main() {
     for (input in ["1, 2, 3", "", "4, x"]) {
         when (val r = parse_all(input)) {
-            Ok(nums) -> println("sum ${nums.iter().sum::<i32>()}")
+            Ok(nums) -> println("sum ${nums.sum()}")
             Err(e) -> println("error: $e")
         }
     }
@@ -262,16 +262,16 @@ fun main() {
 ```oxie
 data class User(name: String, email: String?)
 
-fun find(users: &[User], name: &str): &User? = users.iter().find { it.name == name }
+fun find(users: [User], name: String): &User? = users.find { it.name == name }
 
 fun main() {
     val users: [User] = [User("ada", "ada@example.org"), User("bob", null)]
-    println(find(&users, "ada")?.email.clone() ?: "no email")
-    println(find(&users, "bob")?.email.clone() ?: "no email")
-    if (val u = find(&users, "bob")) println("found ${u.name}")
+    println(find(users, "ada")?.email.clone() ?: "no email")
+    println(find(users, "bob")?.email.clone() ?: "no email")
+    if (val u = find(users, "bob")) println("found ${u.name}")
     val port: u16? = "8080".parse().ok()
     println(port ?: 80)
-    val n = "x".parse::<i32>().ok().and_then { if (it > 0) Some(it) else null } ?: -1
+    val n = "x".parse<i32>().ok().and_then { if (it > 0) Some(it) else null } ?: -1
     println(n)
 }
 ```
@@ -318,7 +318,7 @@ fun describe(s: &Shape) = println("${s.name()}: ${s.area():.2}")
 fun main() {
     var shapes: [Shape] = [Square(2.0), Circle(1.0)]          // each value is boxed for you
     shapes.sort_by { a, b -> a.area().total_cmp(&b.area()) }
-    for (s in &shapes) describe(s)
+    for (s in shapes) describe(s)
     describe(shapes[0])
 }
 ```
@@ -367,7 +367,7 @@ fun apply_twice(x: i32, f: (i32) -> i32): i32 {
 fun main() {
     val steps = vec[Step("double", { it * 2 }), Step("add 3", Box.new(make_adder(3)))]
     var v = 5
-    for (s in &steps) {
+    for (s in steps) {
         v = (s.run)(v)                                     // call a field that holds a function
         println("${s.name}: $v")
     }

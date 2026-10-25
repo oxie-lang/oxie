@@ -187,14 +187,14 @@ class Log(var lines: [String] = []) {
 
 // every call passes the `log` where it is made
 context(log: &mut Log)
-fun record(line: &str) = log.add(line.to_string())
+fun record(line: String) = log.add(line)
 
 // each method takes the contexts it uses
 context(log: &mut Log)
 class Cart(var items: [String] = []) {
-    fun add(item: &str) {
-        items.push(item.to_string())
+    fun add(item: String) {
         record("added $item")              // passes its own `log`
+        items.push(item)
     }
     fun count(): usize = items.len()       // takes none
 }
@@ -509,11 +509,11 @@ the left (`a + b` for two `&str`). Neither side is moved. `s += t` appends `&t`.
 
 ```oxie
 fun main() {
-    val first = "Ada".to_string()
-    val last = "Lovelace".to_string()
+    val first: String = "Ada"
+    val last: String = "Lovelace"
     val full = first + " " + last      // format!("{} {}", first, last)
     val joined = first + last          // format!("{}{}", first, last)
-    var log = "start".to_string()
+    var log: String = "start"
     log += last                        // log += &last
     println("$full, $joined, $log, $first $last")
 }
@@ -609,7 +609,7 @@ fun initial(name: String?): char {
 }
 
 fun main() {
-    val nick: String? = "ada".to_string()
+    val nick: String? = "ada"
     if (nick != null && nick.len() > 2) println("hello ${nick.to_uppercase()}")
     println("${initial(nick.clone())} ${initial(null)}")
 }
@@ -850,7 +850,7 @@ its default value, or the type's `Default`.
 test "addition works" {
     assert_eq(1 + 1, 2)
 }
-test "can fail" throws { "1".parse::<i32>()? }
+test "can fail" throws { "1".parse<i32>()? }
 async test "needs tokio" { ... }      // add @tokio::test
 ```
 

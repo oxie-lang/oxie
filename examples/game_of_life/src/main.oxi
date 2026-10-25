@@ -5,7 +5,7 @@ class Grid(width: usize, height: usize, cells: [bool]) {
             val lines = pattern.lines().map { it.trim() }.filter { !it.is_empty() }.to_list()
             val height = lines.len()
             val width = lines[0].len()
-            val cells = lines.iter().flat_map { it.chars().map { c -> c == '#' } }.to_list()
+            val cells = lines.flat_map { it.chars().map { c -> c == '#' } }
             Grid(width, height, cells)
         }
     }
@@ -42,7 +42,7 @@ class Grid(width: usize, height: usize, cells: [bool]) {
         Grid(width, height, next)
     }
 
-    fun population(): usize = cells.iter().filter { **it }.count()
+    fun population(): usize = cells.count { *it }
 
     override fun toString(): String {
         var s = String()

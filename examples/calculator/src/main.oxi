@@ -38,7 +38,7 @@ fun eval(e: &Expr, vars: [String: f64]): f64 throws EvalError = when (e) {
 fun calculate(input: String, vars: [String: f64]): f64 throws {
     val tokens = tokenize(input)?
     val ast = Parser(tokens).parse()?
-    eval(&ast, vars)?
+    eval(ast, vars)?
 }
 
 fun main() {

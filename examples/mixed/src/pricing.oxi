@@ -1,15 +1,15 @@
-import crate::legacy::money
+import crate.legacy.money
 
 data class Line(name: String, qty: u32, unit_cents: u64) {
     fun total(): u64 = qty as u64 * unit_cents
 }
 
-class Invoice(customer: String, lines: Vec<Line>) {
-    fun subtotal(): u64 = lines.iter().map { it.total() }.sum()
+class Invoice(customer: String, lines: [Line]) {
+    fun subtotal(): u64 = lines.sum_of { it.total() }
 
     override fun toString(): String {
         var s = "Invoice for $customer\n"
-        for (l in &lines) s += "  ${l.name:<8} ${l.qty:>3} x ${money(l.unit_cents)}\n"
+        for (l in lines) s += "  ${l.name:<8} ${l.qty:>3} x ${money(l.unit_cents)}\n"
         s + "  subtotal: ${money(subtotal())}"
     }
 }
@@ -20,9 +20,9 @@ error class BadLine(text: String) = "cannot parse line '$text' (expected: NAME x
 
 /// Parses `NAME x QTY @ CENTS`.
 fun parse_line(text: &str): Line throws BadLine {
-    val parts: Vec<&str> = text.split_whitespace().collect()
-    if (parts.len() != 5 || parts[1] != "x" || parts[3] != "@") throw BadLine(text.to_string())
-    val qty = parts[2].parse().map_err { BadLine(text.to_string()) }?
-    val cents = parts[4].parse().map_err { BadLine(text.to_string()) }?
+    val parts = text.split_whitespace().to_list()
+    if (parts.len() != 5 || parts[1] != "x" || parts[3] != "@") throw BadLine(text)
+    val qty = parts[2].parse().map_err { BadLine(text) }?
+    val cents = parts[4].parse().map_err { BadLine(text) }?
     Line(parts[0].to_string(), qty, cents)
 }

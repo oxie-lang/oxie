@@ -25,7 +25,7 @@ them:
 ```oxie
 // dep: serde = { version = "1", features = ["derive"] }
 // dep: serde_json = "1"
-import serde::{Deserialize, Serialize}
+import serde.{Deserialize, Serialize}
 
 @derive(Serialize, Deserialize)
 data class Config(name: String, port: u16, debug: bool = false)

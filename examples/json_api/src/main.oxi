@@ -1,5 +1,5 @@
-import serde::{Deserialize, Serialize}
-import std::collections::BTreeMap
+import serde.{Deserialize, Serialize}
+import std.collections.BTreeMap
 
 @derive(Serialize, Deserialize)
 enum Role { Admin, Member, Guest }
@@ -20,7 +20,7 @@ data class User(
 data class Directory(users: [User], meta: BTreeMap<String, String>)
 
 fun summarize(dir: Directory): String {
-    val admins = dir.users.iter().filter { it.role == Role.Admin }.map { it.display_name.as_str() }.to_list()
+    val admins = dir.users.filter { it.role == Role.Admin }.map { it.display_name.clone() }
     "${dir.users.len()} users, admins: ${admins.join(", ")}"
 }
 
@@ -38,9 +38,9 @@ fun main() throws {
     var dir: Directory = serde_json.from_str(input).context("invalid directory JSON")?
     println(summarize(dir))
     dir.users.push(User(4, "Guest", Role.Guest))
-    val linus = dir.users.iter().find { it.id == 2 } ?: throw "Linus missing"
+    val linus = dir.users.find { it.id == 2 } ?: throw "Linus missing"
     println("Linus reports to ${linus.manager_id:?}")
     println(serde_json.to_string(&dir.users[3])?)
-    val bad = serde_json.from_str::<Directory>("{ \"users\": 5 }")
+    val bad = serde_json.from_str<Directory>("{ \"users\": 5 }")
     if (val Err(e) = bad) println("rejected bad input: ${e.classify():?}")
 }

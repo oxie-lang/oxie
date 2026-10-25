@@ -1,6 +1,6 @@
-import std::env
-import std::fs
-import std::path::PathBuf
+import std.env
+import std.fs
+import std.path.PathBuf
 
 /// One item on the list.
 data class Task(id: u32, title: String, done: bool = false)
@@ -28,12 +28,12 @@ class TodoList(path: PathBuf, tasks: [Task] = []) {
     }
 
     fun save() throws {
-        val text = tasks.iter().map { t -> "${t.id}\t${if (t.done) "x" else " "}\t${t.title}\n" }.collect::<String>()
-        fs.write(&path, text)?
+        val text = tasks.join_with("") { t -> "${t.id}\t${if (t.done) "x" else " "}\t${t.title}\n" }
+        fs.write(&path, text)
     }
 
     fun add(title: String): u32 {
-        val id = tasks.iter().map { it.id }.max().unwrap_or(0) + 1
+        val id = (tasks.max_of { it.id } ?: 0) + 1
         tasks.push(Task(id, title))
         id
     }
@@ -54,11 +54,11 @@ class TodoList(path: PathBuf, tasks: [Task] = []) {
             println("Nothing to do!")
             return
         }
-        for (t in &tasks) {
+        for (t in tasks) {
             val mark = if (t.done) "✔" else " "
             println("[$mark] ${t.id:>2}. ${t.title}")
         }
-        val left = tasks.iter().filter { !it.done }.count()
+        val left = tasks.count { !it.done }
         println("$left of ${tasks.len()} left")
     }
 }
@@ -70,9 +70,9 @@ fun arg_id(args: [String]): u32 throws {
 
 fun main() throws {
     val args = env.args().to_list()
-    val path = env.var("TODO_FILE").map(PathBuf.from).unwrap_or(PathBuf.from("todo.txt"))
+    val path = PathBuf.from(env.var("TODO_FILE") ?: "todo.txt")
     var list = TodoList.load(path)?
-    val cmd = args.get(1).map { it.as_str() } ?: "list"
+    val cmd = args.get(1) ?: "list"
     when (cmd) {
         "add" -> {
             val title = args[2..].join(" ")
@@ -80,8 +80,8 @@ fun main() throws {
             val id = list.add(title)
             println("Added task $id")
         }
-        "done" -> list.complete(arg_id(args)?)?
-        "remove" -> list.remove(arg_id(args)?)?
+        "done" -> list.complete(arg_id(args)?)
+        "remove" -> list.remove(arg_id(args)?)
         "clear" -> list.tasks.clear()
         "list" -> {}
         else -> throw TodoError.BadCommand(cmd.to_string())

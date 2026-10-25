@@ -1,6 +1,6 @@
-import std::time::{Duration, Instant}
-import tokio::sync::mpsc
-import tokio::task::JoinSet
+import std.time.{Duration, Instant}
+import tokio.sync.mpsc
+import tokio.task.JoinSet
 
 data class Job(id: u32, cost_ms: u64)
 
@@ -22,7 +22,7 @@ async fun main() {
     for (id in 1..=8) {
         set.spawn(run_job(Job(id, 10 * (9 - id) as u64)))
     }
-    var ok = 0u64
+    var ok: u64 = 0
     var failed = []
     while (val Some(res) = set.join_next().await) {
         when (res.unwrap()) {
@@ -34,10 +34,10 @@ async fun main() {
     println("failures: ${failed:?}")
 
     // producer / consumer over a channel
-    val (tx, mut rx) = mpsc.channel::<String>(4)
+    val (tx, mut rx) = mpsc.channel<String>(4)
     val producer = tokio.spawn(async move {
         for (i in 1..=3) {
-            tx.send("message $i".to_string()).await.unwrap()
+            tx.send("message $i").await.unwrap()
         }
     })
     var received = []

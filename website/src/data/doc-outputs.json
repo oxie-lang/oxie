@@ -7,7 +7,7 @@
   {
     "file": "docs/ai-agents.md",
     "output": "welcome, ada, member 3\n",
-    "source": "fun register(names: &mut Vec<String>, name: String) = names.push(name)\n\nfun sign_up(names: &mut Vec<String>, name: String) {\n    register(names, name.clone())\n    var count = names.len()\n    count += 1\n    println(\"welcome, $name, member $count\")\n}\n\nfun main() {\n    var names = vec[\"bob\".to_string()]\n    sign_up(&mut names, \"ada\".to_string())\n}\n"
+    "source": "fun register(names: &mut Vec<String>, name: String) = names.push(name)\n\nfun sign_up(names: &mut Vec<String>, name: String) {\n    register(names, name.clone())\n    var count = names.len()\n    count += 1\n    println(\"welcome, $name, member $count\")\n}\n\nfun main() {\n    var names: [String] = [\"bob\"]\n    sign_up(names, \"ada\")\n}\n"
   },
   {
     "file": "docs/cheatsheet.md",
@@ -22,17 +22,17 @@
   {
     "file": "docs/errors.md",
     "output": "Ok(42)\nErr(ParseIntError { kind: InvalidDigit })\nErr(\"age 200 is not realistic\")\n",
-    "source": "fun parse_age(text: &str): u32 throws {\n    val age: u32 = text.trim().parse()?          // `?` passes a failure on to the caller\n    if (age > 150) throw \"age $age is not realistic\"\n    age                                          // wrapped in Ok automatically\n}\n\nfun main() {\n    println(\"${parse_age(\"42\"):?}\")\n    println(\"${parse_age(\"abc\"):?}\")\n    println(\"${parse_age(\"200\"):?}\")\n}\n"
+    "source": "fun parse_age(text: String): u32 throws {\n    val age: u32 = text.trim().parse()?          // `?` passes a failure on to the caller\n    if (age > 150) throw \"age $age is not realistic\"\n    age                                          // wrapped in Ok automatically\n}\n\nfun main() {\n    println(\"${parse_age(\"42\"):?}\")\n    println(\"${parse_age(\"abc\"):?}\")\n    println(\"${parse_age(\"200\"):?}\")\n}\n"
   },
   {
     "file": "docs/errors.md",
     "output": "Ok(())\nErr(\"negative: -2\")\n",
-    "source": "fun check(x: i32) throws {\n    if (x < 0) throw \"negative: $x\"\n}\n\nfun check_all(xs: &[i32]) throws {\n    for (x in xs) check(*x)              // same as `check(*x)?`\n}\n\nfun main() {\n    println(\"${check_all(&[1, 2]):?}\")\n    println(\"${check_all(&[1, -2]):?}\")\n}\n"
+    "source": "fun check(x: i32) throws {\n    if (x < 0) throw \"negative: $x\"\n}\n\nfun check_all(xs: [i32]) throws {\n    for (x in xs) check(x)               // same as `check(x)?`\n}\n\nfun main() {\n    println(\"${check_all([1, 2]):?}\")\n    println(\"${check_all([1, -2]):?}\")\n}\n"
   },
   {
     "file": "docs/errors.md",
     "output": "port 8080\nerror: missing setting 'port'\nerror: invalid digit found in string\nerror: port = 99999 is larger than 65535\n",
-    "source": "import std::num::ParseIntError\n\nerror enum ConfigError {\n    Missing(key: String) = \"missing setting '$key'\"\n    OutOfRange(key: String, value: i64, max: i64) = \"$key = $value is larger than $max\"\n    BadNumber(ParseIntError)                       // wraps another error\n}\n\nfun read_port(text: &str): u16 throws ConfigError {\n    if (text.is_empty()) throw ConfigError.Missing(\"port\")\n    val n: i64 = text.parse()?                      // ParseIntError converts via From\n    if (n > 65535) throw ConfigError.OutOfRange(\"port\", n, 65535)\n    n as u16\n}\n\nfun main() {\n    for (input in listOf(\"8080\", \"\", \"x\", \"99999\")) {\n        when (val r = read_port(input)) {\n            Ok(port) -> println(\"port $port\")\n            Err(e) -> println(\"error: $e\")\n        }\n    }\n}\n"
+    "source": "import std.num.ParseIntError\n\nerror enum ConfigError {\n    Missing(key: String) = \"missing setting '$key'\"\n    OutOfRange(key: String, value: i64, max: i64) = \"$key = $value is larger than $max\"\n    BadNumber(ParseIntError)                       // wraps another error\n}\n\nfun read_port(text: String): u16 throws ConfigError {\n    if (text.is_empty()) throw ConfigError.Missing(\"port\")\n    val n: i64 = text.parse()?                      // ParseIntError converts via From\n    if (n > 65535) throw ConfigError.OutOfRange(\"port\", n, 65535)\n    n as u16\n}\n\nfun main() {\n    for (input in listOf(\"8080\", \"\", \"x\", \"99999\")) {\n        when (val r = read_port(input)) {\n            Ok(port) -> println(\"port $port\")\n            Err(e) -> println(\"error: $e\")\n        }\n    }\n}\n"
   },
   {
     "file": "docs/errors.md",
@@ -47,17 +47,17 @@
   {
     "file": "docs/errors.md",
     "output": "0 7\n",
-    "source": "fun main() {\n    val n = \"abc\".parse::<i32>() ?: 0\n    val m = \"7\".parse::<i32>() ?: 0\n    println(\"$n $m\")\n}\n"
+    "source": "fun main() {\n    val n = \"abc\".parse<i32>() ?: 0\n    val m = \"7\".parse<i32>() ?: 0\n    println(\"$n $m\")\n}\n"
   },
   {
     "file": "docs/errors.md",
     "output": "error: cannot read config '/no/such/file.toml'\ncause: No such file or directory (os error 2)\n",
-    "source": "import std::fs\n\nfun load(path: &str): String throws {\n    val text = fs.read_to_string(path).context(\"cannot read config '$path'\")?\n    text\n}\n\nfun main() {\n    when (val r = load(\"/no/such/file.toml\")) {\n        Ok(t) -> println(t)\n        Err(e) -> {\n            println(\"error: $e\")\n            println(\"cause: ${e.source().unwrap()}\")\n        }\n    }\n}\n"
+    "source": "import std.fs\n\nfun load(path: &str): String throws {\n    val text = fs.read_to_string(path).context(\"cannot read config '$path'\")?\n    text\n}\n\nfun main() {\n    when (val r = load(\"/no/such/file.toml\")) {\n        Ok(t) -> println(t)\n        Err(e) -> {\n            println(\"error: $e\")\n            println(\"cause: ${e.source().unwrap()}\")\n        }\n    }\n}\n"
   },
   {
     "file": "docs/errors.md",
     "output": "",
-    "source": "import std::fs\n\nfun main() throws {\n    val config = fs.read_to_string(\"/no/such/app.toml\").context(\"loading app.toml\")?\n    println(config)\n}\n// exits with an error:\n//   error: loading app.toml\n//     caused by: No such file or directory (os error 2)\n"
+    "source": "import std.fs\n\nfun main() throws {\n    val config = fs.read_to_string(\"/no/such/app.toml\").context(\"loading app.toml\")?\n    println(config)\n}\n// exits with an error:\n//   error: loading app.toml\n//     caused by: No such file or directory (os error 2)\n"
   },
   {
     "file": "docs/guide.md",
@@ -77,7 +77,7 @@
   {
     "file": "docs/guide.md",
     "output": "step 1\nstep 2\n",
-    "source": "class Config(verbose: bool)\n\ncontext(config: &Config)\nfun log(msg: &str) {\n    if (config.verbose) println(msg)\n}\n\ncontext(config: &Config)\nfun run_step(n: i32) = log(\"step $n\")     // passes its own `config` on\n\nfun main() {\n    val config = Config(true)\n    run_step(1)                           // run_step(1, &config)\n    run_step(2)\n}\n"
+    "source": "class Config(verbose: bool)\n\ncontext(config: &Config)\nfun log(msg: String) {\n    if (config.verbose) println(msg)\n}\n\ncontext(config: &Config)\nfun run_step(n: i32) = log(\"step $n\")     // passes its own `config` on\n\nfun main() {\n    val config = Config(true)\n    run_step(1)                           // run_step(1, &config)\n    run_step(2)\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -102,7 +102,7 @@
   {
     "file": "docs/guide.md",
     "output": "Some(\"London\")\n0\nfound Bob\nhello Ada\ntrue\n6\n",
-    "source": "data class Address(city: String)\ndata class Person(name: String, address: Address?)\n\nfun find(people: &[Person], name: &str): &Person? = people.iter().find { it.name == name }\n\nfun main() {\n    val people = listOf(Person(\"Ada\", Address(\"London\")), Person(\"Bob\", null))\n\n    val city = find(&people, \"Ada\")?.address?.city   // safe navigation\n    println(\"${city:?}\")\n\n    val len = find(&people, \"Zed\")?.name?.len() ?: 0  // elvis: default when null\n    println(len)\n\n    if (val p = find(&people, \"Bob\")) {             // unwraps (Rust `if let Some(p)`)\n        println(\"found ${p.name}\")\n    }\n    find(&people, \"Ada\")?.let { println(\"hello ${it.name}\") }\n\n    var x: i32? = null\n    println(x.is_none())\n    x = 5                                           // wrapped in Some automatically\n    println(\"${x!! + 1}\")                           // `!!` unwraps (panics on null)\n}\n"
+    "source": "data class Address(city: String)\ndata class Person(name: String, address: Address?)\n\nfun find(people: [Person], name: String): &Person? = people.find { it.name == name }\n\nfun main() {\n    val people = listOf(Person(\"Ada\", Address(\"London\")), Person(\"Bob\", null))\n\n    val city = find(people, \"Ada\")?.address?.city   // safe navigation\n    println(\"${city:?}\")\n\n    val len = find(people, \"Zed\")?.name?.len() ?: 0  // elvis: default when null\n    println(len)\n\n    if (val p = find(&people, \"Bob\")) {             // unwraps (Rust `if let Some(p)`)\n        println(\"found ${p.name}\")\n    }\n    find(&people, \"Ada\")?.let { println(\"hello ${it.name}\") }\n\n    var x: i32? = null\n    println(x.is_none())\n    x = 5                                           // wrapped in Some automatically\n    println(\"${x!! + 1}\")                           // `!!` unwraps (panics on null)\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -122,12 +122,12 @@
   {
     "file": "docs/guide.md",
     "output": "Circle { radius: 1.0 } has area 3.14\nRect { w: 2.0, h: 3.0 } has area 6.00\nEmpty has area 0.00\nfalse\n",
-    "source": "enum Shape {\n    Circle(radius: f64)\n    Rect(w: f64, h: f64)\n    Empty\n\n    fun area(): f64 = when (this) {\n        Circle(r) -> 3.14159 * r * r      // variants can be used without `Shape.`\n        Rect(w, h) -> w * h\n        Empty -> 0.0\n    }\n}\n\nenum Direction { North, East, South, West }\n\nfun main() {\n    val shapes = listOf(Shape.Circle(1.0), Shape.Rect(2.0, 3.0), Shape.Empty)\n    for (s in &shapes) println(\"${s:?} has area ${s.area():.2}\")\n    println(Direction.North == Direction.East)\n}\n"
+    "source": "enum Shape {\n    Circle(radius: f64)\n    Rect(w: f64, h: f64)\n    Empty\n\n    fun area(): f64 = when (this) {\n        Circle(r) -> 3.14159 * r * r      // variants can be used without `Shape.`\n        Rect(w, h) -> w * h\n        Empty -> 0.0\n    }\n}\n\nenum Direction { North, East, South, West }\n\nfun main() {\n    val shapes = listOf(Shape.Circle(1.0), Shape.Rect(2.0, 3.0), Shape.Empty)\n    for (s in shapes) println(\"${s:?} has area ${s.area():.2}\")\n    println(Direction.North == Direction.East)\n}\n"
   },
   {
     "file": "docs/guide.md",
     "output": "Dog says woof\nTom says meow\n",
-    "source": "interface Animal {\n    fun name(): String\n    fun sound(): String\n    fun speak(): String = \"${name()} says ${sound()}\"    // default method\n}\n\nclass Dog : Animal {\n    override fun name() = \"Dog\"\n    override fun sound() = \"woof\"\n}\n\nclass Cat(name: String) : Animal {\n    override fun name() = name.clone()\n    override fun sound() = \"meow\"\n}\n\nfun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`\n\nfun main() {\n    val zoo: [Animal] = [Dog(), Cat(\"Tom\")]\n    for (a in &zoo) introduce(a)                          // lends the boxed value\n}\n"
+    "source": "interface Animal {\n    fun name(): String\n    fun sound(): String\n    fun speak(): String = \"${name()} says ${sound()}\"    // default method\n}\n\nclass Dog : Animal {\n    override fun name() = \"Dog\"\n    override fun sound() = \"woof\"\n}\n\nclass Cat(name: String) : Animal {\n    override fun name() = name.clone()\n    override fun sound() = \"meow\"\n}\n\nfun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`\n\nfun main() {\n    val zoo: [Animal] = [Dog(), Cat(\"Tom\")]\n    for (a in zoo) introduce(a)                           // lends the boxed value\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -137,7 +137,7 @@
   {
     "file": "docs/guide.md",
     "output": "8080\nerror: invalid value 'eighty' for port\n80\n",
-    "source": "error enum ConfigError {\n    Missing(key: String) = \"missing key: $key\"\n    Invalid(key: String, value: String) = \"invalid value '$value' for $key\"\n}\n\nfun port(text: &str): u16 throws ConfigError {\n    if (text.is_empty()) throw ConfigError.Missing(\"port\")\n    text.parse().map_err { ConfigError.Invalid(\"port\", text) }?\n}\n\nfun main() {\n    println(port(\"8080\").unwrap())\n    when (val r = port(\"eighty\")) {\n        Ok(p) -> println(\"port $p\")\n        Err(e) -> println(\"error: $e\")\n    }\n    val fallback = port(\"\") ?: 80\n    println(fallback)\n}\n"
+    "source": "error enum ConfigError {\n    Missing(key: String) = \"missing key: $key\"\n    Invalid(key: String, value: String) = \"invalid value '$value' for $key\"\n}\n\nfun port(text: String): u16 throws ConfigError {\n    if (text.is_empty()) throw ConfigError.Missing(\"port\")\n    text.parse().map_err { ConfigError.Invalid(\"port\", text) }?\n}\n\nfun main() {\n    println(port(\"8080\").unwrap())\n    when (val r = port(\"eighty\")) {\n        Ok(p) -> println(\"port $p\")\n        Err(e) -> println(\"error: $e\")\n    }\n    val fallback = port(\"\") ?: 80\n    println(fallback)\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -157,17 +157,17 @@
   {
     "file": "docs/guide.md",
     "output": "1: apple\n2: pear\n",
-    "source": "class Inventory(var items: [String]) {\n    var count = 0\n\n    // fn note(item: &str, count: &mut i32) { *count += 1; ... }\n    fun note(item: &str) {\n        count += 1\n        println(\"$count: $item\")\n    }\n\n    // Self::note(&item, &mut self.count)\n    fun scan() {\n        for (item in items) { note(item) }\n    }\n}\n\nfun main() {\n    var inv = Inventory([\"apple\", \"pear\"])\n    inv.scan()\n}\n"
+    "source": "class Inventory(var items: [String]) {\n    var count = 0\n\n    // fn note(item: &str, count: &mut i32) { *count += 1; ... }\n    fun note(item: String) {\n        count += 1\n        println(\"$count: $item\")\n    }\n\n    // Self::note(&item, &mut self.count)\n    fun scan() {\n        for (item in items) { note(item) }\n    }\n}\n\nfun main() {\n    var inv = Inventory([\"apple\", \"pear\"])\n    inv.scan()\n}\n"
   },
   {
     "file": "docs/guide.md",
     "output": "2\n",
-    "source": "fun add(a: i32, b: i32) = a + b\n\ntest \"adds numbers\" {\n    assert_eq(add(2, 2), 4)\n}\n\ntest \"parsing fails on letters\" throws {\n    val r = \"x\".parse::<i32>()\n    assert(r.is_err())\n}\n\nfun main() = println(add(1, 1))\n"
+    "source": "fun add(a: i32, b: i32) = a + b\n\ntest \"adds numbers\" {\n    assert_eq(add(2, 2), 4)\n}\n\ntest \"parsing fails on letters\" throws {\n    val r = \"x\".parse<i32>()\n    assert(r.is_err())\n}\n\nfun main() = println(add(1, 1))\n"
   },
   {
     "file": "docs/guide.md",
     "output": "item 1, item 2\nitem 3\n",
-    "source": "// dep: tokio = { version = \"1\", features = [\"full\"] }\nimport std::time::Duration\n\nasync fun fetch(id: u32): String {\n    tokio.time.sleep(Duration.from_millis(10)).await\n    \"item $id\"\n}\n\n@tokio::main\nasync fun main() {\n    val a = fetch(1)\n    val b = fetch(2)\n    val (x, y) = tokio::join!(a, b)\n    println(\"$x, $y\")\n    println(await fetch(3))                       // TypeScript-style `await` works too\n}\n"
+    "source": "// dep: tokio = { version = \"1\", features = [\"full\"] }\nimport std.time.Duration\n\nasync fun fetch(id: u32): String {\n    tokio.time.sleep(Duration.from_millis(10)).await\n    \"item $id\"\n}\n\n@tokio::main\nasync fun main() {\n    val a = fetch(1)\n    val b = fetch(2)\n    val (x, y) = tokio::join!(a, b)\n    println(\"$x, $y\")\n    println(await fetch(3))                       // TypeScript-style `await` works too\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -177,7 +177,7 @@
   {
     "file": "docs/reference.md",
     "output": "added pen, 1 item\n",
-    "source": "class Log(var lines: [String] = []) {\n    fun add(line: String) = lines.push(line)\n}\n\n// every call passes the `log` where it is made\ncontext(log: &mut Log)\nfun record(line: &str) = log.add(line.to_string())\n\n// each method takes the contexts it uses\ncontext(log: &mut Log)\nclass Cart(var items: [String] = []) {\n    fun add(item: &str) {\n        items.push(item.to_string())\n        record(\"added $item\")              // passes its own `log`\n    }\n    fun count(): usize = items.len()       // takes none\n}\n\nfun main() {\n    var log = Log()\n    var cart = Cart()\n    cart.add(\"pen\")                        // cart.add(\"pen\", &mut log)\n    record(\"${cart.count()} item\")\n    println(log.lines.join(\", \"))\n}\n"
+    "source": "class Log(var lines: [String] = []) {\n    fun add(line: String) = lines.push(line)\n}\n\n// every call passes the `log` where it is made\ncontext(log: &mut Log)\nfun record(line: String) = log.add(line)\n\n// each method takes the contexts it uses\ncontext(log: &mut Log)\nclass Cart(var items: [String] = []) {\n    fun add(item: String) {\n        record(\"added $item\")              // passes its own `log`\n        items.push(item)\n    }\n    fun count(): usize = items.len()       // takes none\n}\n\nfun main() {\n    var log = Log()\n    var cart = Cart()\n    cart.add(\"pen\")                        // cart.add(\"pen\", &mut log)\n    record(\"${cart.count()} item\")\n    println(log.lines.join(\", \"))\n}\n"
   },
   {
     "file": "docs/reference.md",
@@ -192,12 +192,12 @@
   {
     "file": "docs/reference.md",
     "output": "Ada Lovelace, AdaLovelace, startLovelace, Ada Lovelace\n",
-    "source": "fun main() {\n    val first = \"Ada\".to_string()\n    val last = \"Lovelace\".to_string()\n    val full = first + \" \" + last      // format!(\"{} {}\", first, last)\n    val joined = first + last          // format!(\"{}{}\", first, last)\n    var log = \"start\".to_string()\n    log += last                        // log += &last\n    println(\"$full, $joined, $log, $first $last\")\n}\n"
+    "source": "fun main() {\n    val first: String = \"Ada\"\n    val last: String = \"Lovelace\"\n    val full = first + \" \" + last      // format!(\"{} {}\", first, last)\n    val joined = first + last          // format!(\"{}{}\", first, last)\n    var log: String = \"start\"\n    log += last                        // log += &last\n    println(\"$full, $joined, $log, $first $last\")\n}\n"
   },
   {
     "file": "docs/reference.md",
     "output": "hello ADA\na ?\n",
-    "source": "fun initial(name: String?): char {\n    if (name == null) return '?'\n    name.chars().next().unwrap_or('?')     // `name` is a String here\n}\n\nfun main() {\n    val nick: String? = \"ada\".to_string()\n    if (nick != null && nick.len() > 2) println(\"hello ${nick.to_uppercase()}\")\n    println(\"${initial(nick.clone())} ${initial(null)}\")\n}\n"
+    "source": "fun initial(name: String?): char {\n    if (name == null) return '?'\n    name.chars().next().unwrap_or('?')     // `name` is a String here\n}\n\nfun main() {\n    val nick: String? = \"ada\"\n    if (nick != null && nick.len() > 2) println(\"hello ${nick.to_uppercase()}\")\n    println(\"${initial(nick.clone())} ${initial(null)}\")\n}\n"
   },
   {
     "file": "docs/reference.md",
@@ -212,6 +212,6 @@
   {
     "file": "docs/rust-interop.md",
     "output": "api on 8080\n{\"name\":\"api\",\"port\":9090,\"debug\":true}\n",
-    "source": "// dep: serde = { version = \"1\", features = [\"derive\"] }\n// dep: serde_json = \"1\"\nimport serde::{Deserialize, Serialize}\n\n@derive(Serialize, Deserialize)\ndata class Config(name: String, port: u16, debug: bool = false)\n\nfun main() throws {\n    val c: Config = serde_json.from_str(\"\"\"{\"name\": \"api\", \"port\": 8080, \"debug\": true}\"\"\")?\n    println(\"${c.name} on ${c.port}\")\n    println(serde_json.to_string(&c.copy(port = 9090))?)\n}\n"
+    "source": "// dep: serde = { version = \"1\", features = [\"derive\"] }\n// dep: serde_json = \"1\"\nimport serde.{Deserialize, Serialize}\n\n@derive(Serialize, Deserialize)\ndata class Config(name: String, port: u16, debug: bool = false)\n\nfun main() throws {\n    val c: Config = serde_json.from_str(\"\"\"{\"name\": \"api\", \"port\": 8080, \"debug\": true}\"\"\")?\n    println(\"${c.name} on ${c.port}\")\n    println(serde_json.to_string(&c.copy(port = 9090))?)\n}\n"
   }
 ]
