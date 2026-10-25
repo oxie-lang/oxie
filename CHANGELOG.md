@@ -12,6 +12,9 @@
 * `val (x, y) = point` destructures a data class into its fields in constructor order, as
   Kotlin's `component1()`, `component2()` do (`let Point { x, y } = point;`). Before, rustc
   rejected the tuple pattern.
+* A `when` guard that compares an arm's binding with a literal reads its value
+  (`Click(x, y) if x < 0`), as predicates do, also when the subject is a reference. Before, it
+  needed `*x`.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.

@@ -4092,7 +4092,19 @@ impl<'a> Lowerer<'a> {
                         }
                         if let Some(g) = &arm.guard {
                             self.e.w(" if ");
+                            // the arm's bindings can be references (a subject behind `&`):
+                            // comparing one with a literal reads its value, as in a predicate
+                            let mut names = Vec::new();
+                            for c in &arm.conds {
+                                if let WhenCond::Pat(p) = c {
+                                    p.bindings(&mut names);
+                                }
+                            }
+                            let depth = self.scopes.len() - 1;
+                            let before = self.lambda_params.len();
+                            self.lambda_params.extend(names.into_iter().map(|n| (depth, n)));
                             self.expr(g, P_LOWEST);
+                            self.lambda_params.truncate(before);
                         }
                     }
                     self.e.w(" => ");
