@@ -1,0 +1,41 @@
+// Functions stored in fields and lists: lambdas and function parameters put there are boxed,
+// and a parameter stored that way is an `impl Fn(..) + 'static`.
+class Button(on_click: () -> String) {
+    fun click(): String = (on_click)()
+    fun click_again(): String = on_click()
+}
+
+class Emitter {
+    var transform: (i32) -> i32 = { it }
+    var listener: (String) -> Unit = { }
+    val listeners: Vec<(String) -> Unit> = vec[]
+    fun on(f: (String) -> Unit) { listener = Box.new(f) }
+    fun replace(f: (String) -> Unit) { listener = f }
+    fun add(f: (String) -> Unit) = listeners.push(f)
+    fun emit(s: String) {
+        (listener)(s.clone())
+        for (l in listeners) l(s.clone())
+    }
+}
+
+fun main() {
+    var rules: Vec<(i32) -> bool> = vec[]
+    rules.push { it > 0 }
+    rules.push({ x -> x < 10 })
+    rules.insert(0) { it != 3 }
+    println("${rules.len()} ${rules.iter().all { r -> r(5) }} ${rules.iter().all { r -> r(3) }}")
+
+    var e = Emitter()
+    e.emit("nobody")
+    println((e.transform)(2))
+    e.transform = { it * 3 }
+    println((e.transform)(2))
+    e.on { println("first $it") }
+    e.emit("a")
+    e.replace { println("second $it") }
+    e.add { println("all $it") }
+    e.add { println("all again $it") }
+    e.emit("b")
+
+    println("${Button({ "hi".to_string() }).click()} ${Button({ "ho".to_string() }).click_again()}")
+}

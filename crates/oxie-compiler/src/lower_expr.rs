@@ -953,6 +953,22 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+        // `&[a, b]` for a `&[Shape]` parameter: each element is boxed
+        if let (Type::Ref { inner, .. }, ExprKind::Unary(UnOp::Ref, lit)) = (ty, &e.kind) {
+            if let (Type::Slice(elem), ExprKind::Array(items) | ExprKind::VecLit(items)) = (&**inner, &lit.kind) {
+                if self.is_impl_type(elem) && !items.iter().any(|x| matches!(x.kind, ExprKind::ArrayRepeat(..))) {
+                    self.e.w(if matches!(lit.kind, ExprKind::Array(_)) { "&[" } else { "&vec![" });
+                    for (i, x) in items.iter().enumerate() {
+                        if i > 0 {
+                            self.e.w(", ");
+                        }
+                        self.coerce(x, elem, TyPos::Generic);
+                    }
+                    self.e.w("]");
+                    return;
+                }
+            }
+        }
         match ty {
             Type::Ref { mutable, inner, .. } if pos == TyPos::Param && (self.auto_borrow(e, *mutable) || !mutable && self.lend_to_slice(e, inner)) => {
                 self.e.mark(e.span);
@@ -1024,7 +1040,7 @@ impl<'a> Lowerer<'a> {
                     if boxed {
                         self.e.w(")");
                     }
-                } else if boxed && matches!(e.kind, ExprKind::Path { .. }) && !self.is_place(e) {
+                } else if boxed && matches!(e.kind, ExprKind::Path { .. }) && (!self.is_place(e) || e.ident().is_some_and(|n| self.is_impl_param(n))) {
                     self.e.w("Box::new(");
                     self.expr(e, P_LOWEST);
                     self.e.w(")");
@@ -1052,7 +1068,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Type::Path { segs, .. }
-                if segs.len() == 1 && matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local) && self.is_trait_name(&segs[0].name) && self.is_constructed_value(e) =>
+                if segs.len() == 1 && matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local) && self.is_trait_name(&segs[0].name) && self.boxes_into(e, &segs[0].name) =>
             {
                 self.e.w("Box::new(");
                 self.expr(e, P_LOWEST);
@@ -1247,6 +1263,70 @@ impl<'a> Lowerer<'a> {
 
     /// Constructor calls: `Point(1, 2)`, `Shape.Circle(1.0)`, `Point { .. }`, and variants and
     /// classes without fields: `Status.Done`, `Marker`.
+    /// Does `e` become a `Box<dyn I>` where one is expected: a newly built value, a value of an
+    /// Oxie class or enum that implements `iface`, or an `impl I` parameter?
+    fn boxes_into(&self, e: &Expr, iface: &str) -> bool {
+        if self.is_constructed_value(e) || e.ident().is_some_and(|n| self.is_impl_param(n)) {
+            return true;
+        }
+        let Some(owner) = self.infer_type(e).filter(|t| matches!(t, Type::Path { .. })).and_then(|t| self.type_owner(&t)) else { return false };
+        let interfaces = self.class_at(&owner).map(|c| &c.interfaces).or_else(|| self.enum_at(&owner).map(|e| &e.interfaces));
+        interfaces.is_some_and(|is| is.iter().any(|i| i == iface))
+    }
+
+    /// The interface method `name` of a value: of its interface (`Shape`, `&Shape`, `Box<Shape>`)
+    /// or of one its class or enum implements.
+    fn iface_method(&self, recv: &Expr, name: &str) -> Option<crate::sema::MethodInfo> {
+        let mut t = self.infer_type(recv)?;
+        loop {
+            t = match &t {
+                Type::Ref { inner, .. } => (**inner).clone(),
+                Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Box" => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(inner)]) => inner.clone(),
+                    _ => return None,
+                },
+                _ => break,
+            };
+        }
+        let mut ifaces: Vec<String> = match t.single_name() {
+            Some(n) if self.is_oxie_iface(&t) => vec![n.to_string()],
+            _ => {
+                let owner = self.type_owner(&t)?;
+                self.class_at(&owner).map(|c| c.interfaces.clone()).or_else(|| self.enum_at(&owner).map(|e| e.interfaces.clone()))?
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        while let Some(i) = ifaces.pop() {
+            if !seen.insert(i.clone()) {
+                continue;
+            }
+            let Some(ti) = self.k.traits.get(&i) else { continue };
+            if let Some(m) = ti.methods.get(name) {
+                return Some(m.clone());
+            }
+        }
+        None
+    }
+
+    /// For a call that puts a value into a collection of interface values or functions
+    /// (`shapes.push(s)`, `rules.insert(0, f)`, `by_name.insert(k, s)`): the index of that
+    /// argument and the element type, which boxes it.
+    fn stored_elem(&self, recv: &Expr, name: &str, n_args: usize) -> Option<(usize, Type)> {
+        let mut t = self.infer_type(recv)?;
+        while let Type::Ref { inner, .. } = t {
+            t = *inner;
+        }
+        let Type::Path { segs, .. } = &t else { return None };
+        let [seg] = segs.as_slice() else { return None };
+        let (i, elem) = match (seg.name.as_str(), seg.generics.as_deref(), name, n_args) {
+            ("Vec" | "VecDeque", Some([GenericArg::Type(t)]), "push" | "push_back" | "push_front", 1) => (0, t),
+            ("Vec" | "VecDeque", Some([GenericArg::Type(t)]), "insert", 2) => (1, t),
+            ("HashMap" | "BTreeMap", Some([_, GenericArg::Type(t)]), "insert", 2) => (1, t),
+            _ => return None,
+        };
+        self.is_impl_type(elem).then(|| (i, elem.clone()))
+    }
+
     fn is_constructed_value(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::StructLit { .. } => true,
@@ -1273,6 +1353,10 @@ impl<'a> Lowerer<'a> {
         let Some(Type::Path { segs, .. }) = &f.ret else { return None };
         if segs.len() != 1 || segs[0].generics.is_some() || segs[0].fn_sugar.is_some() || !self.is_trait_name(&segs[0].name) {
             return None;
+        }
+        // an interface method returns its interface boxed, like each implementation
+        if self.iface_sig && self.is_oxie_iface(f.ret.as_ref()?) {
+            return Some(true);
         }
         let Some(body) = f.body.as_ref().filter(|_| !f.mods.is_override) else { return Some(false) };
         let mut classes: Vec<String> = Vec::new();
@@ -2293,7 +2377,7 @@ impl<'a> Lowerer<'a> {
                 self.class.as_ref().and_then(|c| if c.is_static { None } else { c.fields.get(n).cloned() })
             }
             ExprKind::Field { recv, name, .. } if matches!(recv.kind, ExprKind::SelfValue) => self.class.as_ref().and_then(|c| c.fields.get(name).cloned()),
-            // a field of a value of a known class (`p.age = 5`)
+            // a field of another value of an Oxie class (`p.age = 5`, `h.other = Square(3.0)`)
             ExprKind::Field { safe: false, .. } => self.infer_type(target),
             _ => None,
         }
@@ -2950,7 +3034,7 @@ impl<'a> Lowerer<'a> {
         // `(self.on_click)(x)` calls the function stored in a field; without the parentheses
         // Rust would look for a method
         if let ExprKind::Paren(inner) = &callee.kind {
-            if matches!(inner.kind, ExprKind::Field { .. }) {
+            if !matches!(inner.kind, ExprKind::Lambda { .. }) {
                 self.e.w("(");
                 self.expr(inner, P_LOWEST);
                 self.e.w(")");
@@ -3160,12 +3244,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             VariantShape::Tuple(types) => {
-                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
+                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false }).collect();
                 self.e.w(path);
                 self.arg_list(args, Some(&params), TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
-                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
+                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false }).collect();
                 let slots = self.fill_args(args, &params, span);
                 self.e.w(&format!("{} {{ ", path));
                 for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
@@ -3275,7 +3359,7 @@ impl<'a> Lowerer<'a> {
             if self.this_recv.is_none() {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
-            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new() });
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false });
             args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span) });
         }
         (args, params)
@@ -3297,7 +3381,7 @@ impl<'a> Lowerer<'a> {
                         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
                             self.expr(a, P_LOWEST);
                         } else {
-                            self.coerce(a, &p.ty, pos);
+                            self.coerce(a, &p.ty, if p.boxed { TyPos::Generic } else { pos });
                         }
                     }
                 }
@@ -3611,6 +3695,20 @@ impl<'a> Lowerer<'a> {
                 return;
             }
         }
+        // an interface's method with interface parameters, which take boxes, on an interface
+        // value or a value whose class inherits it
+        if !matches!(recv.kind, ExprKind::SelfValue) {
+            if let Some(m) = self.iface_method(recv, name).filter(|m| m.params.iter().any(|p| p.boxed)) {
+                self.expr(recv, P_POSTFIX);
+                self.e.w(&format!(".{}", esc(name)));
+                if let Some(g) = generics {
+                    let gt = self.generic_args_text(g);
+                    self.e.w(&format!("::{}", gt));
+                }
+                self.arg_list(args, Some(&m.params), TyPos::Param, span);
+                return;
+            }
+        }
         // self.method(...) with known parameters / calling a function-typed field
         if matches!(recv.kind, ExprKind::SelfValue) {
             if let Some(c) = self.class.as_ref().cloned() {
@@ -3629,6 +3727,25 @@ impl<'a> Lowerer<'a> {
                     return;
                 }
             }
+        }
+        // a value put into a `Vec<Shape>` or `Vec<(i32) -> bool>` is boxed
+        if let Some((idx, elem)) = self.stored_elem(recv, name, args.len()).filter(|_| generics.is_none() && args.iter().all(|a| a.name.is_none())) {
+            self.expr(recv, P_POSTFIX);
+            self.e.w(&format!(".{}(", member(name)));
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    self.e.w(", ");
+                }
+                if i == idx {
+                    self.coerce(&a.value, &elem, TyPos::Generic);
+                } else if self.is_shared_place(&a.value) {
+                    self.shared_copy(&a.value);
+                } else {
+                    self.expr(&a.value, P_LOWEST);
+                }
+            }
+            self.e.w(")");
+            return;
         }
         let args = self.fix_lambda_arity(recv, name, args);
         self.expr(recv, P_POSTFIX);
@@ -4928,6 +5045,11 @@ impl<'a> Lowerer<'a> {
                 self.untyped_params.push((depth, "it".into()));
             }
             self.bind_name("it", ty);
+        } else if *braces && params.is_empty() {
+            // `{ println("hi") }` for a `(String) -> Unit`: the closure takes the argument anyway
+            for t in param_tys.unwrap_or_default() {
+                ps.push(format!("_: {}", self.ty(t, TyPos::Local)));
+            }
         }
         for (i, p) in params.iter().enumerate() {
             let pt = self.pat(&p.pat);

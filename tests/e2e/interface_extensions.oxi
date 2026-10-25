@@ -1,0 +1,26 @@
+// An extension function on an interface applies to every type that implements it
+// (`impl<T: Shape + ?Sized> Ext for T`), boxed values included; inside, the interface's
+// methods are called without `this.`.
+import std.fmt.Display
+
+interface Named { fun name(): String }
+interface Shape : Named { fun area(): f64 }
+class Sq(s: f64) : Shape, Named {
+    override fun area() = s * s
+    override fun name() = "square"
+}
+
+fun Shape.describe(): String = "${name()} of area ${area()}"
+fun Shape.double_area(): f64 = this.area() * 2.0
+fun <T: Clone> Shape.tagged(tag: T): (T, f64) = (tag.clone(), area())
+fun Display.shout(): String = self.to_string().to_uppercase()
+
+fun main() {
+    println(Sq(2.0).describe())
+    println(Sq(2.0).double_area())
+    val shapes: Vec<Shape> = vec[Sq(1.0), Sq(3.0)]
+    for (s in shapes) println(s.describe())
+    println("${Sq(1.5).tagged("t"):?}")
+    println("hi".shout())
+    println(42.shout())
+}

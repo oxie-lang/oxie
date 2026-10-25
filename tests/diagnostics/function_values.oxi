@@ -1,0 +1,21 @@
+import std.collections.HashMap
+
+class Button(on_click: () -> String) {
+    fun click(): String = on_click()
+}
+
+fun main() {
+    // a lambda where Oxie doesn't know a boxed function is expected: the fix puts `Box.new(`
+    // and `)` around all of it, and a trailing lambda in parentheses
+    var m: HashMap<String, Vec<(i32) -> bool>> = HashMap.new()
+    m.entry("a".to_string()).or_default().push { it > 0 }
+    // error: 11: fix: store this in the heap by calling `Box.new`: `m.entry("a".to_string()).or_default().push(Box.new({ it > 0 }))`
+    m.entry("b".to_string()).or_default().push({ x -> x > 0 })
+    // error: 13: fix: store this in the heap by calling `Box.new`: `m.entry("b".to_string()).or_default().push(Box.new({ x -> x > 0 }))`
+    // a field that holds a function is called in parentheses; a method with a similar name is no fix
+    val b = Button({ "hi".to_string() })
+    println(b.on_click())
+    // error: 17: fix: to call the function stored in `on_click`, surround the field access with parentheses: `println((b.on_click)())`
+    // not: 17: use `click`
+    println("${m.len()} ${b.click()}")
+}
