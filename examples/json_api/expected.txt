@@ -1,4 +1,4 @@
 3 users, admins: Ada, Grace
-Linus reports to Some(1)
+Linus reports to 1
 {"id":4,"displayName":"Guest","role":"Guest","tags":[]}
 rejected bad input: Data

@@ -101,5 +101,5 @@ fun main() {
     for (acc in bank.accounts.values_mut()) acc.end_of_month()
     println("after one month:")
     bank.report()
-    println("log: ${bank.log:?}")
+    println("log: ${bank.log}")
 }

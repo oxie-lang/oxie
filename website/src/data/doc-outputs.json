@@ -12,7 +12,7 @@
   {
     "file": "docs/cheatsheet.md",
     "output": "1 names\n[\"ada\", \"bob\"] [\"ada\", \"bob\"]\n",
-    "source": "fun show(names: [String]) = println(\"${names.len()} names\")\n\nfun main() {\n    var names: [String] = [\"ada\"]\n    show(names)               // lends it: show(&names)\n    names.push(\"bob\".to_string())\n    val copy = names.clone()  // explicit copy\n    val moved = names         // `names` is moved\n    println(\"${copy:?} ${moved:?}\")\n}\n"
+    "source": "fun show(names: [String]) = println(\"${names.len()} names\")\n\nfun main() {\n    var names: [String] = [\"ada\"]\n    show(names)               // lends it: show(&names)\n    names.push(\"bob\".to_string())\n    val copy = names.clone()  // explicit copy\n    val moved = names         // `names` is moved\n    println(\"$copy $moved\")\n}\n"
   },
   {
     "file": "docs/cheatsheet.md",
@@ -81,8 +81,8 @@
   },
   {
     "file": "docs/guide.md",
-    "output": "Oxie 1.2\nnext: 2\ndebug: [1, 2]\nHello, Oxie!\nRoses are red,\n  Oxie is new.\na dollar: $5\n",
-    "source": "fun main() {\n    val name = \"Oxie\"\n    val version = 1.25\n    println(\"$name ${version:.1}\")       // format spec after `:` (Rust format syntax)\n    println(\"next: ${version + 0.75}\")\n    println(\"debug: ${listOf(1, 2):?}\")  // `:?` is Debug formatting\n\n    val greeting = \"Hello, \" + name + \"!\"  // `+` with strings builds a String\n    println(greeting)\n\n    val poem = \"\"\"\n        Roses are red,\n          $name is new.\n        \"\"\"                                // indentation is trimmed automatically\n    println(poem)\n    println(\"a dollar: \\$5\")\n}\n"
+    "output": "Oxie 1.2\nnext: 2\nlist: [1, 2]\ndebug: \"hi\"\nHello, Oxie!\nRoses are red,\n  Oxie is new.\na dollar: $5\n",
+    "source": "fun main() {\n    val name = \"Oxie\"\n    val version = 1.25\n    println(\"$name ${version:.1}\")       // format spec after `:` (Rust format syntax)\n    println(\"next: ${version + 0.75}\")\n    println(\"list: ${listOf(1, 2)}\")     // lists and maps print as [1, 2], optionals as the value or null\n    println(\"debug: ${\"hi\":?}\")          // `:?` is Rust's debug form: \"hi\"\n\n    val greeting = \"Hello, \" + name + \"!\"  // `+` with strings builds a String\n    println(greeting)\n\n    val poem = \"\"\"\n        Roses are red,\n          $name is new.\n        \"\"\"                                // indentation is trimmed automatically\n    println(poem)\n    println(\"a dollar: \\$5\")\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -92,7 +92,7 @@
   {
     "file": "docs/guide.md",
     "output": "[10, 6, 16, 2] 2 17 [1, 3, 5, 8]\nada is 36\na: 3\n5 8\n",
-    "source": "fun main() {\n    val nums: [i32] = [5, 3, 8, 1]             // a list (Rust's Vec<i32>)\n    val doubled = nums.map { it * 2 }          // a new list: [10, 6, 16, 2]\n    val big = nums.count { it > 3 }\n    val sum = nums.iter().fold(0) { acc, x -> acc + x }\n    println(\"${doubled:?} $big $sum ${nums.sorted():?}\")\n\n    val ages: [String: i32] = [\"ada\": 36, \"bob\": 25]   // a map (Rust's HashMap<String, i32>)\n    println(\"ada is ${ages[\"ada\"]}\")\n\n    var counts = [:]\n    for (word in \"a b a c a\".split(' ')) {\n        *counts.entry(word).or_insert(0) += 1\n    }\n    println(\"a: ${counts[\"a\"]}\")\n\n    val add = (a: i32, b: i32) => a + b        // TypeScript-style arrow function\n    val twice = { x: i32 -> x * 2 }            // Kotlin-style lambda\n    println(\"${add(2, 3)} ${twice(4)}\")\n}\n"
+    "source": "fun main() {\n    val nums: [i32] = [5, 3, 8, 1]             // a list (Rust's Vec<i32>)\n    val doubled = nums.map { it * 2 }          // a new list: [10, 6, 16, 2]\n    val big = nums.count { it > 3 }\n    val sum = nums.iter().fold(0) { acc, x -> acc + x }\n    println(\"$doubled $big $sum ${nums.sorted()}\")\n\n    val ages: [String: i32] = [\"ada\": 36, \"bob\": 25]   // a map (Rust's HashMap<String, i32>)\n    println(\"ada is ${ages[\"ada\"]}\")\n\n    var counts = [:]\n    for (word in \"a b a c a\".split(' ')) {\n        *counts.entry(word).or_insert(0) += 1\n    }\n    println(\"a: ${counts[\"a\"]}\")\n\n    val add = (a: i32, b: i32) => a + b        // TypeScript-style arrow function\n    val twice = { x: i32 -> x * 2 }            // Kotlin-style lambda\n    println(\"${add(2, 3)} ${twice(4)}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -101,18 +101,18 @@
   },
   {
     "file": "docs/guide.md",
-    "output": "Some(\"London\")\n0\nfound Bob\nhello Ada\ntrue\n6\n",
-    "source": "data class Address(city: String)\ndata class Person(name: String, address: Address?)\n\nfun find(people: [Person], name: String): &Person? = people.find { it.name == name }\n\nfun main() {\n    val people = listOf(Person(\"Ada\", Address(\"London\")), Person(\"Bob\", null))\n\n    val city = find(people, \"Ada\")?.address?.city   // safe navigation\n    println(\"${city:?}\")\n\n    val len = find(people, \"Zed\")?.name?.len() ?: 0  // elvis: default when null\n    println(len)\n\n    if (val p = find(&people, \"Bob\")) {             // unwraps (Rust `if let Some(p)`)\n        println(\"found ${p.name}\")\n    }\n    find(&people, \"Ada\")?.let { println(\"hello ${it.name}\") }\n\n    var x: i32? = null\n    println(x.is_none())\n    x = 5                                           // wrapped in Some automatically\n    println(\"${x!! + 1}\")                           // `!!` unwraps (panics on null)\n}\n"
+    "output": "London\n0\nfound Bob\nhello Ada\nx = null\n6\n",
+    "source": "data class Address(city: String)\ndata class Person(name: String, address: Address?)\n\nfun find(people: [Person], name: String): &Person? = people.find { it.name == name }\n\nfun main() {\n    val people = listOf(Person(\"Ada\", Address(\"London\")), Person(\"Bob\", null))\n\n    val city = find(people, \"Ada\")?.address?.city   // safe navigation\n    println(city)                                   // London, or null when one is missing\n\n    val len = find(people, \"Zed\")?.name?.len() ?: 0  // elvis: default when null\n    println(len)\n\n    if (val p = find(people, \"Bob\")) {              // unwraps (Rust `if let Some(p)`)\n        println(\"found ${p.name}\")\n    }\n    find(people, \"Ada\")?.let { println(\"hello ${it.name}\") }\n\n    var x: i32? = null\n    println(\"x = $x\")                               // an optional prints its value or null\n    x = 5                                           // wrapped in Some automatically\n    println(\"${x!! + 1}\")                           // `!!` unwraps (panics on null)\n}\n"
   },
   {
     "file": "docs/guide.md",
     "output": "10 [5, 10]\n10\nPoint { x: 3.0, y: 4.0 } 5 true\n",
-    "source": "class Counter(var count: i32 = 0, step: i32 = 1) {\n    var history: [i32] = []\n\n    fun increment() {              // changes fields, so it takes `&mut self` automatically\n        count += step\n        history.push(count)\n    }\n\n    fun current(): i32 = count     // only reads: `&self`\n\n    companion object {\n        fun starting_at(n: i32): Counter = Counter(n)   // static\n    }\n}\n\ndata class Point(x: f64, y: f64) {\n    fun distance_to(other: Point): f64 = ((x - other.x).powi(2) + (y - other.y).powi(2)).sqrt()\n}\n\nfun main() {\n    var c = Counter(step = 5)\n    c.increment()\n    c.increment()\n    println(\"${c.current()} ${c.history:?}\")\n    println(Counter.starting_at(10).current())\n\n    val p = Point(0.0, 0.0)\n    val q = p.copy(x = 3.0, y = 4.0)\n    println(\"${q:?} ${p.distance_to(q)} ${p == Point(0.0, 0.0)}\")\n}\n"
+    "source": "class Counter(var count: i32 = 0, step: i32 = 1) {\n    var history: [i32] = []\n\n    fun increment() {              // changes fields, so it takes `&mut self` automatically\n        count += step\n        history.push(count)\n    }\n\n    fun current(): i32 = count     // only reads: `&self`\n\n    companion object {\n        fun starting_at(n: i32): Counter = Counter(n)   // static\n    }\n}\n\ndata class Point(x: f64, y: f64) {\n    fun distance_to(other: Point): f64 = ((x - other.x).powi(2) + (y - other.y).powi(2)).sqrt()\n}\n\nfun main() {\n    var c = Counter(step = 5)\n    c.increment()\n    c.increment()\n    println(\"${c.current()} ${c.history}\")\n    println(Counter.starting_at(10).current())\n\n    val p = Point(0.0, 0.0)\n    val q = p.copy(x = 3.0, y = 4.0)\n    println(\"${q:?} ${p.distance_to(q)} ${p == Point(0.0, 0.0)}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
     "output": "55 [50, 5] true\n",
-    "source": "shared class Account(var owner: String, var balance: i64 = 0) {\n    var history: [i64] = []\n\n    fun deposit(amount: i64) {\n        balance += amount\n        history.push(amount)\n    }\n}\n\nfun main() {\n    val a = Account(\"Ada\")\n    val b = a                  // the same account\n    b.deposit(50)\n    a.balance += 5             // fields can be read and changed through any handle\n    a.history.push(5)\n    println(\"${a.balance} ${b.history:?} ${a == b}\")\n}\n"
+    "source": "shared class Account(var owner: String, var balance: i64 = 0) {\n    var history: [i64] = []\n\n    fun deposit(amount: i64) {\n        balance += amount\n        history.push(amount)\n    }\n}\n\nfun main() {\n    val a = Account(\"Ada\")\n    val b = a                  // the same account\n    b.deposit(50)\n    a.balance += 5             // fields can be read and changed through any handle\n    a.history.push(5)\n    println(\"${a.balance} ${b.history} ${a == b}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -142,7 +142,7 @@
   {
     "file": "docs/guide.md",
     "output": "7\n[1, 2, 3, 1] [1, 2, 3, 1]\n",
-    "source": "fun total(xs: &[i32]): i32 = xs.iter().sum()\nfun add_one(xs: &mut [i32]) = xs.push(1)\n\nfun main() {\n    var v: [i32] = [1, 2, 3]\n    add_one(v)            // the parameter is `&mut`, so `v` is lent mutably: add_one(&mut v)\n    println(total(v))     // ... and here lent for reading: total(&v)\n    val w = v.clone()     // explicit copy\n    val moved = v         // `v` can't be used after this\n    println(\"${w:?} ${moved:?}\")\n}\n"
+    "source": "fun total(xs: &[i32]): i32 = xs.iter().sum()\nfun add_one(xs: &mut [i32]) = xs.push(1)\n\nfun main() {\n    var v: [i32] = [1, 2, 3]\n    add_one(v)            // the parameter is `&mut`, so `v` is lent mutably: add_one(&mut v)\n    println(total(v))     // ... and here lent for reading: total(&v)\n    val w = v.clone()     // explicit copy\n    val moved = v         // `v` can't be used after this\n    println(\"$w $moved\")\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -152,7 +152,7 @@
   {
     "file": "docs/guide.md",
     "output": "[1, 2]\n",
-    "source": "class Ids {\n    var items: [usize] = []\n    var next: usize = 0\n\n    fun next_id(): usize {\n        next += 1\n        return next\n    }\n\n    // let next_id = self.next_id(); self.items.push(next_id);\n    fun add() = items.push(next_id())\n}\n\nfun main() {\n    var ids = Ids()\n    ids.add()\n    ids.add()\n    println(\"${ids.items:?}\")\n}\n"
+    "source": "class Ids {\n    var items: [usize] = []\n    var next: usize = 0\n\n    fun next_id(): usize {\n        next += 1\n        return next\n    }\n\n    // let next_id = self.next_id(); self.items.push(next_id);\n    fun add() = items.push(next_id())\n}\n\nfun main() {\n    var ids = Ids()\n    ids.add()\n    ids.add()\n    println(ids.items)\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -202,12 +202,12 @@
   {
     "file": "docs/reference.md",
     "output": "[Item { name: \"pen\", qty: 11 }, Item { name: \"ink\", qty: 12 }]\n",
-    "source": "data class Item(name: String, var qty: i32)\n\nfun main() {\n    var items = vec[Item(\"pen\", 1), Item(\"ink\", 2)]\n    for (item in items) item.qty += 10      // for item in &mut items\n    println(\"${items:?}\")\n}\n"
+    "source": "data class Item(name: String, var qty: i32)\n\nfun main() {\n    var items = vec[Item(\"pen\", 1), Item(\"ink\", 2)]\n    for (item in items) item.qty += 10      // for item in &mut items\n    println(items)\n}\n"
   },
   {
     "file": "docs/reference.md",
     "output": "5 1\n[\"Dune\"] [1, 2, 3] [\"b\", \"a\"]\n",
-    "source": "fun main() {\n    var stock: [String: i32] = [:]\n    stock[\"pen\"] = 3                          // stock.insert(String::from(\"pen\"), 3)\n    for (item in [\"pen\", \"ink\", \"pen\"]) *stock.entry(item.to_string()).or_default() += 1\n    println(\"${stock[\"pen\"]} ${stock[\"ink\"]}\")\n\n    val shelves: [String: [String]] = [\"new\": [\"Dune\"], \"old\": []]\n    var seen = [1, 2]\n    seen.push(3)                              // a list: `vec![1, 2]`\n    val words = \"b a\".split(' ').to_list()    // [T] of the iterator's items\n    println(\"${shelves[\"new\"]:?} ${seen:?} ${words:?}\")\n}\n"
+    "source": "fun main() {\n    var stock: [String: i32] = [:]\n    stock[\"pen\"] = 3                          // stock.insert(String::from(\"pen\"), 3)\n    for (item in [\"pen\", \"ink\", \"pen\"]) *stock.entry(item.to_string()).or_default() += 1\n    println(\"${stock[\"pen\"]} ${stock[\"ink\"]}\")\n\n    val shelves: [String: [String]] = [\"new\": [\"Dune\"], \"old\": []]\n    var seen = [1, 2]\n    seen.push(3)                              // a list: `vec![1, 2]`\n    val words = \"b a\".split(' ').to_list()    // [T] of the iterator's items\n    println(\"${shelves[\"new\"]} $seen $words\")\n}\n"
   },
   {
     "file": "docs/rust-interop.md",

@@ -93,7 +93,7 @@ fun short(x: i32) = x * 2
   | `a + b`, `a * b`, ... with both `T` | `Add<Output = T> + Copy`, ... |
   | `a += b` | `AddAssign`, ... |
   | `x.clone()`, `xs.clone()`, `this.copy(...)` | `Clone` |
-  | `"${xs:?}"` on a `Vec<T>` | `Debug` |
+  | `"$xs"`, `"${xs:?}"` on a `Vec<T>` | `Debug` |
   | `xs.contains(x)` / `xs.iter().max()`, `xs.sort()` on a `Vec<T>` | `PartialEq` / `Ord` |
   | a key of a `HashSet`/`HashMap` variable or field | `Eq + Hash` |
 
@@ -537,7 +537,8 @@ the declared type of a variable, field, parameter or return value:
 ```oxie
 "Hello, $name!"            // format!("Hello, {name}!")
 "sum: ${a + b}"            // format!("sum: {}", a + b)
-"${value:.2} ${list:?}"    // format specs after `:` (Rust's format syntax)
+"${value:.2} ${point:?}"   // format specs after `:` (Rust's format syntax); `:?` is Debug
+"$list $map $nick"         // format!("{list:?} {map:?} {}", or_null(&nick)): [1, 2] {"a": 1} ada
 "cost: $5, \$price"       // `$` before a digit is text; `\$` before a name too
 """
     multi-line
@@ -555,7 +556,13 @@ the declared type of a variable, field, parameter or return value:
 * A string literal passed to these with extra arguments is a Rust format string:
   `println("{} items", n)`.
 * `println(a, b)` prints both separated by a space (also `println("total:", n)`, a literal without
-  `{}`); `println(x)` prints any `Display` value.
+  `{}`); `println(x)` prints `x` as `"$x"` does.
+* `"$x"` prints a list, array, map, set or tuple in its debug form (`{x:?}`: `[1, 2]`), and an
+  optional as its value or `null` (`crate::__oxie::or_null(&x)`, which keeps the format spec:
+  `"${price:.2}"`). Other values need `Display`; print them with `"${x:?}"`. Oxie decides this
+  from the type it knows: a local, field or parameter of a declared or inferred type, a list
+  operation, `?.`, and `first()`, `get()`, `find { }`, ... on a list or iterator. A value whose
+  type comes from a Rust function needs `:?`.
 * A `var` holding a text literal that is later appended to (`var acc = ""`, `acc += x`) starts
   as a `String`.
 
@@ -681,7 +688,7 @@ data class Item(name: String, var qty: i32)
 fun main() {
     var items = vec[Item("pen", 1), Item("ink", 2)]
     for (item in items) item.qty += 10      // for item in &mut items
-    println("${items:?}")
+    println(items)
 }
 ```
 
@@ -765,7 +772,7 @@ fun main() {
     var seen = [1, 2]
     seen.push(3)                              // a list: `vec![1, 2]`
     val words = "b a".split(' ').to_list()    // [T] of the iterator's items
-    println("${shelves["new"]:?} ${seen:?} ${words:?}")
+    println("${shelves["new"]} $seen $words")
 }
 ```
 

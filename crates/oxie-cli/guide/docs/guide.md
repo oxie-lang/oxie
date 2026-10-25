@@ -104,7 +104,8 @@ fun main() {
     val version = 1.25
     println("$name ${version:.1}")       // format spec after `:` (Rust format syntax)
     println("next: ${version + 0.75}")
-    println("debug: ${listOf(1, 2):?}")  // `:?` is Debug formatting
+    println("list: ${listOf(1, 2)}")     // lists and maps print as [1, 2], optionals as the value or null
+    println("debug: ${"hi":?}")          // `:?` is Rust's debug form: "hi"
 
     val greeting = "Hello, " + name + "!"  // `+` with strings builds a String
     println(greeting)
@@ -178,7 +179,7 @@ fun main() {
     val doubled = nums.map { it * 2 }          // a new list: [10, 6, 16, 2]
     val big = nums.count { it > 3 }
     val sum = nums.iter().fold(0) { acc, x -> acc + x }
-    println("${doubled:?} $big $sum ${nums.sorted():?}")
+    println("$doubled $big $sum ${nums.sorted()}")
 
     val ages: [String: i32] = ["ada": 36, "bob": 25]   // a map (Rust's HashMap<String, i32>)
     println("ada is ${ages["ada"]}")
@@ -243,18 +244,18 @@ fun main() {
     val people = listOf(Person("Ada", Address("London")), Person("Bob", null))
 
     val city = find(people, "Ada")?.address?.city   // safe navigation
-    println("${city:?}")
+    println(city)                                   // London, or null when one is missing
 
     val len = find(people, "Zed")?.name?.len() ?: 0  // elvis: default when null
     println(len)
 
-    if (val p = find(&people, "Bob")) {             // unwraps (Rust `if let Some(p)`)
+    if (val p = find(people, "Bob")) {              // unwraps (Rust `if let Some(p)`)
         println("found ${p.name}")
     }
-    find(&people, "Ada")?.let { println("hello ${it.name}") }
+    find(people, "Ada")?.let { println("hello ${it.name}") }
 
     var x: i32? = null
-    println(x.is_none())
+    println("x = $x")                               // an optional prints its value or null
     x = 5                                           // wrapped in Some automatically
     println("${x!! + 1}")                           // `!!` unwraps (panics on null)
 }
@@ -289,7 +290,7 @@ fun main() {
     var c = Counter(step = 5)
     c.increment()
     c.increment()
-    println("${c.current()} ${c.history:?}")
+    println("${c.current()} ${c.history}")
     println(Counter.starting_at(10).current())
 
     val p = Point(0.0, 0.0)
@@ -331,7 +332,7 @@ fun main() {
     b.deposit(50)
     a.balance += 5             // fields can be read and changed through any handle
     a.history.push(5)
-    println("${a.balance} ${b.history:?} ${a == b}")
+    println("${a.balance} ${b.history} ${a == b}")
 }
 ```
 
@@ -500,7 +501,7 @@ fun main() {
     println(total(v))     // ... and here lent for reading: total(&v)
     val w = v.clone()     // explicit copy
     val moved = v         // `v` can't be used after this
-    println("${w:?} ${moved:?}")
+    println("$w $moved")
 }
 ```
 
@@ -569,7 +570,7 @@ fun main() {
     var ids = Ids()
     ids.add()
     ids.add()
-    println("${ids.items:?}")
+    println(ids.items)
 }
 ```
 

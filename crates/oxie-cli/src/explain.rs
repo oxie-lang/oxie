@@ -1682,11 +1682,17 @@ fn trait_missing(d: &mut MappedDiag, sources: &Sources, lines: &[&str], names: &
         bound_fix(d, lines);
         return;
     }
-    // a name read inline maps to its `$`: underline the whole `$low` / `${low}`
-    if let Some(len) = placeholder_len(lines.get(d.line as usize).copied().unwrap_or(""), d.col) {
+    // a name read inline maps to its `$` (the `{` of `${low}`): underline the whole `$low` / `${low}`
+    let line = lines.get(d.line as usize).copied().unwrap_or("");
+    if d.col > 0 && line.chars().nth(d.col as usize) == Some('{') && line.chars().nth(d.col as usize - 1) == Some('$') {
+        d.col -= 1;
+    }
+    if let Some(len) = placeholder_len(line, d.col) {
         (d.end_line, d.end_col) = (d.line, d.col + len);
     }
     let base = ty.split('<').next().unwrap_or(ty).trim_start_matches('&').to_string();
+    // `std::option::Option`: std's types by their names
+    let base = base.strip_prefix("std::").and_then(|p| p.rsplit_once("::")).map_or(base.clone(), |(_, n)| n.to_string());
     let user_kind = sources.declaring(&d.file, |ls| user_type_kind(ls, &base).is_some()).and_then(|f| user_type_kind(&f.lines(), &base));
     // a short name like `T` is a type parameter, unless the project declares it (`class P`)
     if user_kind.is_none() && is_type_param(ty) {
@@ -1694,7 +1700,8 @@ fn trait_missing(d: &mut MappedDiag, sources: &Sources, lines: &[&str], names: &
         return;
     }
     let is_std_collection = matches!(base.as_str(), "Vec" | "Option" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "Result") || base.starts_with('(') || base.starts_with('[');
-    d.notes.retain(|n| !n.contains("in format strings you may be able to use") && !n.contains("is not implemented for"));
+    // `"$x"` of an optional prints through `crate::__oxie::OrNull`, which the notes needn't name
+    d.notes.retain(|n| !n.contains("in format strings you may be able to use") && !n.contains("is not implemented for") && !n.contains("OrNull"));
     if display {
         let line = lines.get(d.line as usize).copied().unwrap_or("");
         let before: String = line.chars().take(d.col as usize).collect();

@@ -16,6 +16,42 @@ const INFERENCE_DEPENDENT: &[&str] = &[
     "get", "first", "last", "find", "max", "min", "pop", "next", "cloned", "copied", "as_ref", "as_deref", "take", "filter",
 ];
 
+/// How a template prints a value (`template_form`).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Form {
+    Display,
+    Debug,
+    /// An optional: its value with `Display`, or `null`.
+    OrNull,
+    /// An optional list, map, ...: its value with `Debug`, or `null`.
+    OrNullDebug,
+}
+
+/// The form of a value of type `t` in a template: collections and tuples have no `Display`.
+fn form_of(t: &Type) -> Form {
+    const COLLECTIONS: &[&str] = &["Vec", "VecDeque", "LinkedList", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "BinaryHeap"];
+    match t {
+        Type::Ref { inner, .. } => form_of(inner),
+        Type::Slice(_) | Type::Array(..) => Form::Debug,
+        Type::Tuple(v) if !v.is_empty() => Form::Debug,
+        Type::Option(inner) => match form_of(inner) {
+            Form::Debug => Form::OrNullDebug,
+            Form::Display => Form::OrNull,
+            // `T??` has neither form
+            _ => Form::Display,
+        },
+        Type::Path { segs, .. } => match segs.last() {
+            Some(s) if COLLECTIONS.contains(&s.name.as_str()) => Form::Debug,
+            Some(s) if s.name == "Option" => match s.generics.as_deref() {
+                Some([GenericArg::Type(inner)]) => form_of(&Type::Option(Box::new(inner.clone()))),
+                _ => Form::Display,
+            },
+            _ => Form::Display,
+        },
+        _ => Form::Display,
+    }
+}
+
 /// Rust string literal text for a format string: braces doubled, except those of `\u{..}`.
 fn escape_braces(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -509,7 +545,11 @@ impl<'a> Lowerer<'a> {
         }
         self.e.w(";");
         let known = ty.cloned().or_else(|| init.and_then(|e| self.infer_type(e))).or_else(|| init.and_then(|e| self.generic_ctor_type(e)));
+        let from_safe_call = known.is_none() && init.is_some_and(|e| matches!(e.kind, ExprKind::Field { safe: true, .. } | ExprKind::MethodCall { safe: true, .. }));
         self.bind_pat(pat, known);
+        if let (true, Pat::Ident { name, sub: None, .. }) = (from_safe_call, pat) {
+            self.optional_locals.push((self.scopes.len() - 1, name.clone()));
+        }
     }
 
     /// Does a lambda's body change a variable it captures (one in scope where the lambda is
@@ -4056,6 +4096,18 @@ impl<'a> Lowerer<'a> {
                         self.expr(&a.value, P_LOWEST);
                     }
                 }
+                // `println(xs)`: a list prints like `"$xs"`
+                _ if rest.iter().any(|a| self.template_form(&a.value) != Form::Display) => {
+                    let sep = if matches!(name, "println" | "print" | "eprintln" | "eprint") { " " } else { "" };
+                    let mut parts = Vec::new();
+                    for (i, a) in rest.iter().enumerate() {
+                        if i > 0 && !sep.is_empty() {
+                            parts.push(TemplatePart::Lit(sep.into()));
+                        }
+                        parts.push(TemplatePart::Expr(a.value.clone(), None));
+                    }
+                    self.format_parts(&parts, false);
+                }
                 _ => {
                     let sep = if matches!(name, "println" | "print" | "eprintln" | "eprint") { " " } else { "" };
                     let fmt = vec!["{}"; rest.len()].join(sep);
@@ -4073,23 +4125,38 @@ impl<'a> Lowerer<'a> {
 
     /// `"text {} {name}", args` for a template.
     pub(crate) fn format_args(&mut self, parts: &[TemplatePart]) {
+        self.format_parts(parts, true)
+    }
+
+    /// `"text {} {name}", args`; `in_template` when the values come from `$` placeholders, whose
+    /// `$` errors about a value point at (otherwise at the value: `println(x)`).
+    fn format_parts(&mut self, parts: &[TemplatePart], in_template: bool) {
         // the format string in pieces, each name read inline (`{low}`) with the span of its
         // name: rustc points inside the string for errors about it (`low` has no `Display`)
         let mut pieces: Vec<(String, Option<Span>)> = Vec::new();
-        let mut args: Vec<&Expr> = Vec::new();
+        // each argument, and whether it is an optional printed as its value or `null`
+        let mut args: Vec<(&Expr, bool)> = Vec::new();
         for p in parts {
             match p {
                 TemplatePart::Lit(s) => pieces.push((escape_braces(s), None)),
                 TemplatePart::Expr(e, spec) => {
-                    let spec_s = spec.as_ref().map(|s| format!(":{}", s)).unwrap_or_default();
-                    if let Some(n) = e.ident() {
+                    let form = match spec {
+                        Some(s) if s.contains('?') => Form::Display,
+                        _ => self.template_form(e),
+                    };
+                    let spec_s = match (spec, form) {
+                        (None, Form::Debug | Form::OrNullDebug) => ":?".to_string(),
+                        _ => spec.as_ref().map(|s| format!(":{}", s)).unwrap_or_default(),
+                    };
+                    let or_null = matches!(form, Form::OrNull | Form::OrNullDebug);
+                    if let Some(n) = e.ident().filter(|_| !or_null) {
                         if self.is_local(n) && !n.starts_with("r#") && esc(n) == n {
                             pieces.push((format!("{{{}{}}}", n, spec_s), Some(e.span)));
                             continue;
                         }
                     }
                     pieces.push((format!("{{{}}}", spec_s), None));
-                    args.push(e);
+                    args.push((e, or_null));
                 }
             }
         }
@@ -4097,15 +4164,59 @@ impl<'a> Lowerer<'a> {
         for (text, span) in pieces {
             if let Some(s) = span {
                 // the `{` maps to the `$` of `$low` (the `{` of `${low}`), right before the name
-                self.e.mark(Span::empty_at(s.start.saturating_sub(1)));
+                self.e.mark(if in_template { Span::empty_at(s.start.saturating_sub(1)) } else { s });
             }
             self.e.w(&text);
         }
         self.e.w("\"");
-        for a in args {
+        for (a, or_null) in args {
             self.e.w(", ");
-            self.expr(a, P_LOWEST);
+            if or_null {
+                // errors about the value (no text form) point at its `$`, as for a name read inline
+                self.e.mark(if in_template { Span::empty_at(a.span.start.saturating_sub(1)) } else { a.span });
+                self.e.w("crate::__oxie::or_null(&");
+                self.expr(a, P_UNARY);
+                self.e.w(")");
+            } else {
+                self.expr(a, P_LOWEST);
+            }
         }
+    }
+
+    /// How `"$x"` prints `x`: lists, maps, sets and tuples in their debug form (`[1, 2]`), and an
+    /// optional as its value or `null`. Other values, and ones of unknown type, need `Display`.
+    pub(crate) fn template_form(&mut self, e: &Expr) -> Form {
+        // `a?.b`, `a?.f()`: optional, whatever `b` is (`?.` chains flatten)
+        if matches!(e.kind, ExprKind::Field { safe: true, .. } | ExprKind::MethodCall { safe: true, .. }) {
+            return Form::OrNull;
+        }
+        if let Some(t) = self.infer_type(e) {
+            return form_of(&t);
+        }
+        // `val city = user?.city`
+        if let Some(n) = e.ident() {
+            let depth = self.scopes.iter().rposition(|s| s.contains_key(n));
+            if depth.is_some_and(|d| self.optional_locals.iter().any(|(od, on)| (*od, on.as_str()) == (d, n))) {
+                return Form::OrNull;
+            }
+        }
+        // `xs.first()`, `map.get(k)`, `names.iter().find { .. }`: std methods that give an
+        // optional, on a known collection or an iterator; `xs.sorted()`, `xs.filter { .. }`: list
+        // operations that give a list
+        const OPTIONAL: &[&str] = &["first", "last", "get", "find", "find_map", "max", "min", "max_by_key", "min_by_key", "max_of", "min_of", "pop", "next", "nth", "position"];
+        const LISTS: &[&str] = &["filter", "filter_not", "map", "map_indexed", "flat_map", "filter_map", "sorted", "sorted_descending", "sorted_by", "sorted_by_descending", "reversed", "distinct", "chunked", "to_vec"];
+        const ITERATORS: &[&str] = &["iter", "iter_mut", "into_iter", "chars", "bytes", "keys", "values", "lines", "split", "split_whitespace"];
+        let ExprKind::MethodCall { recv, name, .. } = &e.kind else { return Form::Display };
+        let on_list = || self.infer_type(recv).is_some_and(|t| form_of(&t) == Form::Debug);
+        if OPTIONAL.contains(&name.as_str()) {
+            let on_iterator = matches!(&recv.kind, ExprKind::MethodCall { name, .. } if ITERATORS.contains(&name.as_str()));
+            if on_iterator || on_list() {
+                return Form::OrNull;
+            }
+        } else if LISTS.contains(&name.as_str()) && (on_list() || self.template_form(recv) == Form::Debug) {
+            return Form::Debug;
+        }
+        Form::Display
     }
 
     fn method_call(&mut self, recv: &Expr, name: &str, generics: Option<&Vec<GenericArg>>, args: &[Arg], span: Span) {

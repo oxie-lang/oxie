@@ -18,6 +18,19 @@ fn static_str() -> Type {
 }
 
 /// `Name<_, ..>` with `n` inferred arguments.
+/// The element type of a list, array or slice (`Type::Infer` when it isn't known).
+fn list_elem(t: &Type) -> Option<Type> {
+    match t {
+        Type::Ref { inner, .. } => list_elem(inner),
+        Type::Slice(inner) | Type::Array(inner, _) => Some((**inner).clone()),
+        Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Vec" => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(inner)]) => Some(inner.clone()),
+            _ => Some(Type::Infer),
+        },
+        _ => None,
+    }
+}
+
 fn generic(name: &str, n: usize) -> Type {
     Type::Path { global: false, segs: vec![PathSeg { name: name.into(), generics: Some(vec![GenericArg::Type(Type::Infer); n]), fn_sugar: None }], span: Default::default() }
 }
@@ -112,7 +125,8 @@ impl<'a> Lowerer<'a> {
             Binary(op, l, r) => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or => Some(ty("bool")),
                 BinOp::Add if matches!(l.kind, Str(_) | Template(_)) || matches!(r.kind, Str(_) | Template(_)) => Some(ty("String")),
-                _ => self.infer_type(l).filter(|t| !matches!(t, Type::Ref { .. })).or_else(|| self.infer_type(r)),
+                // arithmetic on a null-checked `x` reads its value: never an optional
+                _ => self.infer_type(l).filter(|t| !matches!(t, Type::Ref { .. } | Type::Option(_))).or_else(|| self.infer_type(r).filter(|t| !matches!(t, Type::Option(_)))),
             },
             Unary(UnOp::Neg, x) | Unary(UnOp::Not, x) => self.infer_type(x),
             Unary(UnOp::Ref, x) => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(self.infer_type(x).unwrap_or(Type::Infer)) }),
@@ -123,6 +137,11 @@ impl<'a> Lowerer<'a> {
             },
             Cast(_, t) => Some(t.clone()),
             Paren(x) => self.infer_type(x),
+            // `a ?: return`: `a`'s value
+            Elvis(l, r) if r.diverges() => match self.infer_type(l)? {
+                Type::Option(t) => Some(*t).filter(|t| *t != Type::Infer),
+                _ => None,
+            },
             Elvis(_, r) => self.infer_type(r).map(|t| if t == static_str() { ty("String") } else { t }),
             Call { callee, args } => {
                 // `HashMap<String, i32>()`, `mutableListOf<i32>()`, `Stack<i32>()`: type arguments given
@@ -275,6 +294,19 @@ impl<'a> Lowerer<'a> {
                     "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "join" | "concat" | "replace" | "trim_string" => Some(ty("String")),
                     "is_empty" | "contains" | "contains_key" | "starts_with" | "ends_with" | "is_some" | "is_none" | "is_ok" | "is_err" | "any" | "all"
                     | "is_alphabetic" | "is_numeric" | "is_alphanumeric" | "is_whitespace" | "is_digit" | "eq" | "ne" | "is_nan" => Some(ty("bool")),
+                    // Oxie's list operations on a list give a new list; those that keep the
+                    // elements keep their type
+                    "filter" | "filter_not" | "sorted" | "sorted_descending" | "sorted_by" | "sorted_by_descending" | "reversed" | "distinct" => {
+                        self.infer_type(recv).as_ref().and_then(list_elem).map(|t| with_args("Vec", Some(&vec![GenericArg::Type(t)]), 1))
+                    }
+                    "map" | "map_indexed" | "flat_map" | "filter_map" | "chunked" => self.infer_type(recv).as_ref().and_then(list_elem).map(|_| generic("Vec", 1)),
+                    // an element of a list, if there is one
+                    "find" | "first" | "last" | "get" | "max_by_key" | "min_by_key" => self
+                        .infer_type(recv)
+                        .as_ref()
+                        .and_then(list_elem)
+                        .filter(|t| *t != Type::Infer)
+                        .map(|t| Type::Option(Box::new(Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) }))),
                     "clone" | "abs" | "sqrt" | "sin" | "cos" | "tan" | "powi" | "powf" | "floor" | "ceil" | "round" | "min" | "max" | "exp" | "ln"
                     | "log10" | "signum" | "pow" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "saturating_sub" | "saturating_add" | "clamp" => {
                         self.infer_type(recv).filter(|t| !matches!(t, Type::Ref { .. }))
@@ -298,7 +330,19 @@ impl<'a> Lowerer<'a> {
                 let c = self.class_info(&tn)?;
                 c.fields.iter().find(|f| f.name == *name).map(|f| f.ty.clone())
             }
-            If { then, else_, .. } => self.infer_block(then).or_else(|| else_.as_ref().and_then(|e| self.infer_type(e))),
+            // the branch that `if (val x = opt)` or `if (x != null)` unwraps `x` in reads it as the
+            // value, which this doesn't see: there the other branch tells the type
+            If { cond, then, else_ } => {
+                let other = || else_.as_ref().and_then(|e| self.infer_type(e));
+                let binds = |c: &Cond| matches!(c, Cond::Let { .. }) || matches!(c, Cond::Chain(cs) if cs.iter().any(|c| matches!(c, Cond::Let { .. })));
+                if binds(cond) {
+                    return other().or_else(|| self.infer_block(then));
+                }
+                match self.infer_block(then) {
+                    Some(Type::Option(_)) => other().filter(|t| !matches!(t, Type::Option(_))).or_else(|| self.infer_block(then)),
+                    t => t.or_else(other),
+                }
+            }
             When { arms, .. } => arms.iter().find_map(|a| if a.body.diverges() { None } else { self.infer_type(&a.body) }),
             Block(b) => self.infer_block(b),
             StructLit { path, generics: None, .. } => {
@@ -320,6 +364,11 @@ impl<'a> Lowerer<'a> {
                     Type::Slice(inner) | Type::Array(inner, _) => Some(*inner),
                     Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "Vec" | "VecDeque") => match segs[0].generics.as_deref() {
                         Some([GenericArg::Type(inner)]) => Some(inner.clone()),
+                        _ => None,
+                    },
+                    // `m[key]` of a map: its value
+                    Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "HashMap" | "BTreeMap") => match segs[0].generics.as_deref() {
+                        Some([_, GenericArg::Type(value)]) => Some(value.clone()).filter(|t| *t != Type::Infer),
                         _ => None,
                     },
                     _ => None,

@@ -296,6 +296,32 @@ pub fn val<V: Val>(v: V) -> V::Out {
     v.val()
 }
 
+/// `"$x"` of an optional value: the value, or `null` when there is none.
+pub struct OrNull<'a, T>(&'a Option<T>);
+
+#[inline(always)]
+pub fn or_null<T>(o: &Option<T>) -> OrNull<'_, T> {
+    OrNull(o)
+}
+
+impl<T: fmt::Display> fmt::Display for OrNull<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(v) => v.fmt(f),
+            None => f.pad("null"),
+        }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for OrNull<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(v) => v.fmt(f),
+            None => f.pad("null"),
+        }
+    }
+}
+
 /// Kotlin-style operations on lists, arrays and slices. Each one is the iterator chain you
 /// would write by hand; operations that return a new list of the same elements copy them
 /// (`T: Clone`), like `iter().filter(..).cloned().collect()`.

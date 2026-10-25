@@ -15,7 +15,7 @@
 //! | `a += b`                              | `AddAssign`, ...               |
 //! | `x.clone()`                           | `Clone`                        |
 //! | key of a `HashSet`/`HashMap` local    | `Eq + Hash`                    |
-//! | `xs.clone()`, `"${xs:?}"`, `xs.contains(x)`, `xs.iter().max()` of a `Vec<T>` | `Clone`, `Debug`, `PartialEq`, `Ord` |
+//! | `xs.clone()`, `"$xs"`, `xs.contains(x)`, `xs.iter().max()` of a `Vec<T>` | `Clone`, `Debug`, `PartialEq`, `Ord` |
 //! | `this.copy(..)` of a generic data class | `Clone`                      |
 //!
 //! Bounds the declaration already states (or implies, like `Ord` for `PartialOrd`) are not
@@ -276,7 +276,8 @@ fn scan(e: &Expr, names: &Names, cx: &Cx, found: &mut Found) {
                             } else {
                                 display(found, &t);
                             }
-                        } else if let Some(t) = coll(v, names).filter(|_| debug) {
+                        // `"$xs"` prints a list in its debug form too
+                        } else if let Some(t) = coll(v, names).filter(|_| debug || spec.is_none()) {
                             add(found, &t, "Debug", path(&["std", "fmt", "Debug"]));
                         }
                     }
@@ -495,6 +496,7 @@ mod tests {
         assert_eq!(bounds_of("fun has<T>(xs: &[T], x: &T): bool = x in xs"), "T: PartialEq");
         assert_eq!(bounds_of("fun f<T>(xs: Vec<T>): Vec<T> = xs.clone()"), "T: Clone");
         assert_eq!(bounds_of("fun f<T>(xs: &[T]): String = \"${xs:?}\""), "T: Debug");
+        assert_eq!(bounds_of("fun f<T>(xs: &[T]): String = \"items: $xs\""), "T: Debug");
         assert_eq!(bounds_of("fun f<T>(xs: &[T], x: &T): bool = xs.contains(x)"), "T: PartialEq");
         assert_eq!(bounds_of("fun f<T>(xs: &[T]): Option<&T> = xs.iter().max()"), "T: Ord");
         assert_eq!(bounds_of("fun f<K, V>(m: &mut HashMap<K, V>, k: K, v: V) { m.insert(k, v) }"), "K: Eq + Hash");

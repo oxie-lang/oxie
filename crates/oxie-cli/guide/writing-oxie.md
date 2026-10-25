@@ -57,7 +57,7 @@ fun main() {
 
     var counts = HashMap()
     for (word in "a b a".split(' ')) *counts.entry(word).or_insert(0) += 1
-    println("a appears ${counts["a"]} times, ${counts:?} has ${counts.len()} keys")
+    println("a appears ${counts["a"]} times, $counts has ${counts.len()} keys")
 
     for (i in 0 until 3) print("$i ")                       // 0 1 2
     for (i in 1..=3) print("$i ")                           // 1 2 3: `..` excludes the end
@@ -70,7 +70,7 @@ fun main() {
 | `val x = 1`, `var y = 2`, `val z: i64 = 3` | `let`, `let mut`, typed `let` |
 | `fun f(a: i32, b: i32 = 0): i32 { }`, `fun g(x: i32) = x * 2` | functions; defaults, named arguments `f(1, b = 2)` |
 | `context(log: &mut Log) fun f()`, `context(cx: &mut Ctx) class C { }` | context parameters: each call passes the caller's variable named `log`; a class's methods take the ones they use |
-| `"$name is ${age + 1}"`, `"${x:.2}"`, `"${list:?}"` | templates, format specs, Debug |
+| `"$name is ${age + 1}"`, `"${x:.2}"`, `"$list"`, `"${point:?}"` | templates, format specs, lists and optionals, Debug |
 | `if (c) a else b`, `when (x) { 1, 2 -> a; in 3..=9 -> b; else -> c }`, `when { c -> a; else -> b }` | expressions; `when` is `match` (or an if chain without a subject) |
 | `for (x in xs)`, `for ((i, x) in xs.iter().enumerate())`, `while`, `do { } while ()`, `loop`, `repeat(n) { }` | loops |
 | `0 until n`, `1..=n`, `a..b`, `10 downTo 0 step 2` | ranges: `a..b` excludes `b` |
@@ -185,9 +185,12 @@ fun main() {
 * **Destructuring.** `val (x, y) = point` takes a data class's fields in constructor order, and
   `if (val (k, v) = pair_or_null)` unwraps an optional pair. `val (tx, var rx) = ...` lets only
   `rx` change (write `var`, not Rust's `mut`).
-* **Printing.** `"$x"` needs `Display`: numbers, text and types with `toString()`. Lists,
-  maps, options and other values print with `"${x:?}"`. A whole `f64` prints without
-  decimals (`43`); write `"${x:.1}"` for a fixed number of decimals.
+* **Printing.** `"$x"` and `println(x)` print numbers, text and types with `toString()`; lists,
+  maps, sets and tuples print in their debug form (`[1, 2]`), and an optional prints its value
+  or `null`. Other values (a `data class` without `toString()`, an enum) print with `"${x:?}"`,
+  Rust's debug form, which also shows an optional as `Some(..)`. When Oxie can't tell that a
+  value is a list or optional (a Rust function's result), write `:?` too. A whole `f64` prints
+  without decimals (`43`); write `"${x:.1}"` for a fixed number of decimals.
 
 ## What works differently from Rust
 
@@ -251,7 +254,7 @@ fun main() {
     }
     println(total)
     val fallback = parse_all("") ?: vec[]        // a default when it fails
-    println("${fallback:?}")
+    println(fallback)
 }
 ```
 

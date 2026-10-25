@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+* `"$xs"` and `println(xs)` print lists, arrays, maps, sets and tuples in their debug form
+  (`[1, 2]`), and an optional as its value or `null` (format specs apply: `"${price:.2}"`).
+  `"${x:?}"` still prints Rust's debug form. Before, they were errors that asked for `:?`, and
+  an optional printed as `Some(..)`. A `?.` chain, and a local set from one, prints as an
+  optional; Oxie now also knows the types of list operations' results (`nums.map { }`,
+  `xs.first()`), of `map[key]`, of `a ?: return`, and of an `if` that unwraps a value.
 * The generated Rust reads more like hand-written Rust. Std items are named the way people write
   them (`Rc<RefCell<..>>`, `impl fmt::Display`, `Result<T, E>`) with `use` lines at the top of
   the file, unless something in the file could shadow the name. A shared class gets only the

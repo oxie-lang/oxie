@@ -1,0 +1,9 @@
+xs [1, 2, 3] names ["ada", "bob"] ages {"ada": 36} set {7} pair (1, "a")
+nick ada none null price 2.50 list [4]
+[  null]
+email null first 1 found bob missing null
+debug Some("ada") [1, 2, 3]
+doubled [2, 4, 6] sorted [3, 2, 1] kept [2, 3] shelf ["Dune"] city bob@example.org
+stack [1], items: ["ada", "bob"]
+[1, 2, 3]
+values: [1, 2, 3] ada

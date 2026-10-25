@@ -31,7 +31,7 @@ async fun main() {
         }
     }
     println("sum of results: $ok")
-    println("failures: ${failed:?}")
+    println("failures: $failed")
 
     // producer / consumer over a channel
     val (tx, mut rx) = mpsc.channel<String>(4)
@@ -43,7 +43,7 @@ async fun main() {
     var received = []
     while (val Some(msg) = rx.recv().await) received.push(msg)
     producer.await.unwrap()
-    println("received: ${received:?}")
+    println("received: $received")
 
     val elapsed = started.elapsed()
     println("concurrent: ${elapsed < Duration.from_millis(300)}")

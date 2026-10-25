@@ -334,6 +334,9 @@ pub struct Lowerer<'a> {
     /// Parameters whose type is an interface or a function (`impl Shape`, `impl FnMut(..)`),
     /// as (scope depth, name): a value Oxie boxes where a `Box<dyn ..>` is expected.
     pub(crate) impl_params: Vec<(usize, String)>,
+    /// Locals of no known type set from a `?.` chain (`val city = user?.city`), as (scope depth,
+    /// name): `"$city"` prints them as optionals.
+    pub(crate) optional_locals: Vec<(usize, String)>,
     /// Lowering the items of an interface or of an `impl Interface for` block.
     pub(crate) in_trait_items: bool,
     /// Lowering an interface's method or an implementation of one: parameters and results
@@ -490,6 +493,7 @@ impl<'a> Lowerer<'a> {
             fn_aliases: HashMap::new(),
             local_imports: Vec::new(),
             impl_params: Vec::new(),
+            optional_locals: Vec::new(),
             in_trait_items: false,
             iface_sig: false,
             unresolved: HashSet::new(),
@@ -565,8 +569,11 @@ impl<'a> Lowerer<'a> {
         self.scopes.pop();
         let depth = self.scopes.len();
         self.impl_params.retain(|(d, _)| *d < depth);
+        self.optional_locals.retain(|(d, _)| *d < depth);
     }
     pub(crate) fn bind_name(&mut self, name: &str, ty: Option<Type>) {
+        let depth = self.scopes.len() - 1;
+        self.optional_locals.retain(|(d, n)| (*d, n.as_str()) != (depth, name));
         self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
     }
     pub(crate) fn bind_pat(&mut self, p: &Pat, ty: Option<Type>) {

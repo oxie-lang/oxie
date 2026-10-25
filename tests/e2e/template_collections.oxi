@@ -1,0 +1,45 @@
+// `"$x"` prints lists, maps, sets and tuples in their debug form, and an optional as its value
+// or `null`; `${x:?}` still prints the debug form. `println(x)` prints the same way.
+
+import std.collections.{BTreeMap, HashSet}
+
+data class User(name: String, email: String?)
+
+class Stack<T>(var items: [T] = []) {
+    fun push(x: T) = items.push(x)
+    override fun toString() = "stack $items"
+}
+
+fun show<T>(xs: [T]): String = "items: $xs"
+
+fun main() {
+    val xs: [i32] = [1, 2, 3]
+    val names: [String] = ["ada", "bob"]
+    var ages = BTreeMap()
+    ages.insert("ada", 36)
+    val set: HashSet<i32> = setOf(7)
+    val pair = (1, "a")
+    println("xs $xs names $names ages $ages set $set pair $pair")
+
+    val nick: String? = "ada"
+    val none: String? = null
+    val price: f64? = 2.5
+    val list: [i32]? = vec[4]
+    println("nick $nick none $none price ${price:.2} list $list")
+    println("[${none:>6}]")
+
+    val u = User("ada", null)
+    println("email ${u.email} first ${xs.first()} found ${names.iter().find { it == "bob" }} missing ${xs.get(9)}")
+    println("debug ${nick:?} ${xs:?}")
+    val doubled = xs.map { it * 2 }
+    val shelves: [String: [String]] = ["new": ["Dune"]]
+    val found: User? = User("bob", "bob@example.org")
+    val city = found?.email
+    println("doubled $doubled sorted ${xs.sorted_descending()} kept ${xs.filter { it > 1 }} shelf ${shelves["new"]} city $city")
+
+    var s = Stack<i32>()
+    s.push(1)
+    println("$s, ${show(names)}")
+    println(xs)
+    println("values:", xs, nick)
+}

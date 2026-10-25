@@ -60,7 +60,7 @@ fun main() {
     names.push("bob".to_string())
     val copy = names.clone()  // explicit copy
     val moved = names         // `names` is moved
-    println("${copy:?} ${moved:?}")
+    println("$copy $moved")
 }
 ```
 

@@ -1,8 +1,11 @@
-// Printing a value without a text form offers to print its debug form.
+// Printing a value without a text form offers to print its debug form. (Lists, maps and
+// optionals print without one.)
+
+data class Point(x: i32, y: i32)
 
 fun main() {
-    val xs = vec[1, 2]
-    println(xs) // error: 5: fix: print the debug form (`:?`): `println("${xs:?}")`
-    val ys = vec["a"]
-    print(ys.clone()) // error: 7: fix: print the debug form (`:?`): `print("${ys.clone():?}")`
+    val p = Point(1, 2)
+    println(p) // error: 8: fix: print the debug form (`:?`): `println("${p:?}")`
+    print(p.clone()) // error: 9: fix: print the debug form (`:?`): `print("${p.clone():?}")`
+    println(vec[1, 2])
 }
