@@ -373,38 +373,63 @@ fn collect_oxie(path: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn cmd_fmt(args: &[String]) -> R {
+    if let Some(bad) = args.iter().find(|a| a.starts_with('-') && *a != "--check") {
+        return Err(format!("unknown option `{}` for `oxie fmt` (usage: oxie fmt [--check] [paths])", bad));
+    }
     let check = args.iter().any(|a| a == "--check");
-    let paths: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
+    let paths: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with('-')).map(PathBuf::from).collect();
     let mut files = Vec::new();
     if paths.is_empty() {
-        let root = Project::find(&cwd()).map(|p| p.src_dir()).unwrap_or_else(cwd);
-        collect_oxie(&root, &mut files);
+        // only a project's sources: outside one, formatting everything below the current
+        // directory could reach unrelated files
+        let p = Project::find(&cwd()).ok_or("not in an Oxie project (no Cargo.toml found): name the files or directories to format, like `oxie fmt .`")?;
+        collect_oxie(&p.src_dir(), &mut files);
     } else {
         for p in &paths {
+            if !p.exists() {
+                return Err(format!("{}: no such file or directory", p.display()));
+            }
+            if p.is_file() && p.extension().is_none_or(|e| e != "oxi") {
+                return Err(format!("{}: not an .oxi file", p.display()));
+            }
             collect_oxie(p, &mut files);
         }
     }
-    let mut changed = 0;
+    let color = cargo::color();
+    let (mut changed, mut unchanged, mut failed) = (0, 0, 0);
     for f in &files {
-        let text = std::fs::read_to_string(f).map_err(|e| e.to_string())?;
-        let formatted = oxie_compiler::format::format_source(&text);
-        if formatted != text {
-            changed += 1;
-            if check {
-                println!("would reformat {}", f.display());
-            } else {
-                std::fs::write(f, formatted).map_err(|e| e.to_string())?;
-                println!("formatted {}", f.display());
+        let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {}", f.display(), e))?;
+        let formatted = match oxie_compiler::format::format_checked(&text) {
+            Ok(formatted) => formatted,
+            Err(errors) => {
+                failed += 1;
+                for d in &errors {
+                    eprintln!("{}", diag::render(d, &f.display().to_string(), &text, color));
+                }
+                continue;
             }
+        };
+        if formatted == text {
+            unchanged += 1;
+            continue;
+        }
+        changed += 1;
+        if check {
+            println!("would reformat {}", f.display());
+        } else {
+            std::fs::write(f, formatted).map_err(|e| format!("{}: {}", f.display(), e))?;
+            println!("formatted {}", f.display());
         }
     }
-    if check && changed > 0 {
-        return Ok(ExitCode::FAILURE);
+    if failed > 0 {
+        eprintln!("error: {} file(s) not formatted because of syntax errors", failed);
     }
-    if !check && changed == 0 {
-        println!("{} file(s) already formatted", files.len());
+    if !check && changed == 0 && unchanged > 0 {
+        println!("{} file(s) already formatted", unchanged);
+    } else if files.is_empty() {
+        println!("no .oxi files found");
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(if failed > 0 || (check && changed > 0) { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
 fn cmd_emit(args: &[String]) -> R {

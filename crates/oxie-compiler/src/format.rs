@@ -367,18 +367,21 @@ fn repetition_op(after: &[String]) -> bool {
         && after.get(1).is_none_or(|s| is_space(s) || matches!(s.as_str(), ")" | "]" | "}" | "=>" | ";"))
 }
 
+/// The formatted source; a file with syntax errors is returned unchanged.
 pub fn format_source(src: &str) -> String {
-    // like rustfmt, leave files with syntax errors alone
+    format_checked(src).unwrap_or_else(|_| src.to_string())
+}
+
+/// The formatted source, or the syntax errors that keep it from being formatted
+/// (like rustfmt, files with syntax errors are left alone).
+pub fn format_checked(src: &str) -> Result<String, Vec<crate::diag::Diag>> {
     let (_, diags) = crate::parser::parse_file(src);
-    if diags.iter().any(|d| d.severity == crate::diag::Severity::Error) {
-        return src.to_string();
+    let errors: Vec<_> = diags.into_iter().filter(|d| d.severity == crate::diag::Severity::Error).collect();
+    if !errors.is_empty() {
+        return Err(errors);
     }
     let out = format_inner(src);
-    if same_tokens(src, &out) {
-        out
-    } else {
-        src.to_string()
-    }
+    Ok(if same_tokens(src, &out) { out } else { src.to_string() })
 }
 
 fn same_tokens(a: &str, b: &str) -> bool {
