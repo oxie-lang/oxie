@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+* `oxie` keeps cargo's output plain when it doesn't color its own (`NO_COLOR`, or output to a
+  pipe), even with `CARGO_TERM_COLOR=always` in the environment. Before, that variable colored
+  `oxie test`'s output inside pipes and broke matching on it.
+* On Rust before 1.84, rustc's "use parentheses to call this closure" suggestion for a lambda
+  passed where a value is expected is no longer offered as a fix: mapped onto Oxie's braces, it
+  broke the line.
+
 ## 0.4.0 - 2026-10-26
 
 Oxie 0.4.0 removes most of the Rust still visible in everyday code. Optionals are matched and

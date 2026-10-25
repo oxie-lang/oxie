@@ -2384,6 +2384,11 @@ fn rustc_fixes(d: &mut MappedDiag, lines: &[&str]) {
             }
             continue;
         }
+        // rustc (before 1.84) offers to call a lambda written where a value is expected: its
+        // parentheses land around and inside Oxie's braces, and calling it is never the intent
+        if m.message.contains("call this closure") {
+            continue;
+        }
         let edits: Option<Vec<Edit>> = m.parts.iter().map(|p| Some(Edit { file: None, line: p.line, col: p.col, end_line: p.end_line, end_col: p.end_col, text: oxie_code(&p.replacement)? })).collect();
         let Some(edits) = edits else { continue };
         if same_place(d, &edits) {

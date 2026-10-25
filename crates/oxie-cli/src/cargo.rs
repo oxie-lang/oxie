@@ -649,9 +649,8 @@ pub fn cargo_json(root: &Path, args: &[String], quiet: bool, shown_name: Option<
     if quiet {
         cmd.arg("--quiet");
     }
-    if color() {
-        cmd.arg("--color=always");
-    }
+    // `never` too: a `CARGO_TERM_COLOR=always` in the environment would color piped output
+    cmd.arg(if color() { "--color=always" } else { "--color=never" });
     // cargo's error output passes through, apart from its summary lines, which are rewritten at
     // the end. A terminal keeps cargo's progress bar, which needs the terminal's width.
     let pipe_stderr = quiet || !std::io::stderr().is_terminal() || match terminal_width() {
@@ -879,7 +878,7 @@ fn is_unused_mut(v: &Value) -> bool {
 /// Collects mapped diagnostics without printing (used by the language server).
 pub fn check_collect(root: &Path, target_dir: Option<&Path>) -> std::io::Result<Vec<MappedDiag>> {
     let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    cmd.args(["check", "--message-format=json", "--quiet"]).current_dir(root).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(["check", "--message-format=json", "--quiet", "--color=never"]).current_dir(root).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Some(dir) = target_dir {
         cmd.env("CARGO_TARGET_DIR", dir);
     }

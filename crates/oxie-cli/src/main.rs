@@ -475,9 +475,9 @@ fn cmd_test(args: &[String]) -> R {
     // the output goes through the location rewriter (failed tests print panics on stdout), so
     // ask for the colors a terminal would get
     let mut harness: Vec<String> = filter.into_iter().chain(a.rest).collect();
-    if cargo::color() {
-        cmd.arg("--color=always");
-    }
+    // `never` too, or a `CARGO_TERM_COLOR=always` in the environment colors what `NO_COLOR` or a
+    // pipe asked to keep plain
+    cmd.arg(if cargo::color() { "--color=always" } else { "--color=never" });
     if std::io::stdout().is_terminal() && std::env::var("NO_COLOR").is_err() && !harness.iter().any(|a| a.starts_with("--color")) {
         harness.push("--color=always".into());
     }
