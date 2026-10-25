@@ -162,7 +162,7 @@ Oxie, and what they have seen may describe an older version, so Oxie doesn't rel
 remember: the installed `oxie` teaches the language and explains mistakes.
 
 ```bash
-oxie new hello                   # a new project with an AGENTS.md for agents
+oxie new hello                   # a new project with AGENTS.md and CLAUDE.md for agents
 oxie guide                       # the guide to writing the installed version of Oxie
 oxie check                       # errors at .oxi lines, in Oxie terms, each with its fix
 oxie emit src/main.oxi --annotate   # the Rust a file becomes, and why
@@ -173,8 +173,8 @@ oxie emit src/main.oxi --annotate   # the Rust a file becomes, and why
   Kotlin and from Rust, and the patterns to use. `oxie guide topics` lists the reference pages it
   also carries, and it warns when a project builds with another `oxie-build`.
 * **`oxie new` and `oxie init`** write an `AGENTS.md`, read by Codex, Cursor, GitHub Copilot, and
-  other agents. It holds no language rules, only commands, so updating Oxie updates what agents
-  learn.
+  other agents, and a `CLAUDE.md` that imports it for Claude Code. Neither holds language rules,
+  only commands, so updating Oxie updates what agents learn.
 * **`oxie check`** turns rustc's errors into Oxie's terms at `.oxi` lines (where a value moved,
   why a `val` can't change) and ends most with a `= fix:` line giving the corrected code; the
   language server offers the same fixes as quick fixes.
@@ -242,7 +242,7 @@ oxie run dice.oxi
 
 | Command | What it does |
 |---|---|
-| `oxie new <name> [--lib]` | Create a project (`Cargo.toml`, `build.rs`, `src/main.oxi`, `AGENTS.md`) |
+| `oxie new <name> [--lib]` | Create a project (`Cargo.toml`, `build.rs`, `src/main.oxi`, `AGENTS.md`, `CLAUDE.md`) |
 | `oxie run [file.oxi] [-- args]` | Build and run the project or a script |
 | `oxie build` / `oxie check` | Build / type-check |
 | `oxie test [name]` | Run `test "name" { }` blocks |

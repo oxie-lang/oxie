@@ -59,9 +59,9 @@ it to the checkout it runs in.
 
 | Command | Description |
 |---|---|
-| `oxie new <name>` | New program: `Cargo.toml`, `build.rs`, `src/main.rs`, `src/main.oxi`, and an `AGENTS.md` for AI coding agents |
+| `oxie new <name>` | New program: `Cargo.toml`, `build.rs`, `src/main.rs`, `src/main.oxi`, and an `AGENTS.md` and a `CLAUDE.md` for AI coding agents |
 | `oxie new <name> --lib` | New library (`src/lib.oxi`) |
-| `oxie init [--lib]` | Make the current directory an Oxie project; in an existing Rust crate, add Oxie support (`build.rs` + build-dependency, and an `AGENTS.md` if there is none) |
+| `oxie init [--lib]` | Make the current directory an Oxie project; in an existing Rust crate, add Oxie support (`build.rs` + build-dependency, and an `AGENTS.md` and a `CLAUDE.md` where there are none) |
 | `oxie run [--release] [-- args]` | Build and run the project |
 | `oxie run file.oxi [-- args]` | Run a single file. Inside a project's `src/` this runs the project |
 | `oxie build [--release]` | Build |
@@ -384,6 +384,7 @@ src/main.rs         include!(concat!(env!("OUT_DIR"), "/oxie/main.rs"));
 src/main.oxi        crate root (src/lib.oxi for libraries)
 src/*.oxi           modules; directories are nested modules
 AGENTS.md           tells AI coding agents to read `oxie guide`
+CLAUDE.md           `@AGENTS.md`: Claude Code reads CLAUDE.md, and this one imports AGENTS.md
 ```
 
 `oxie_build::compile()` compiles `src/`; `oxie_build::compile_dir("other")` compiles another
@@ -405,7 +406,8 @@ may be from an older version. Oxie gives them the rules of the version you use:
   into the `oxie` binary, so they describe exactly the Oxie it compiles, and they warn when the
   project builds with another `oxie-build`.
 * `oxie new` and `oxie init` write an `AGENTS.md` that tells agents to run `oxie guide` before
-  they change Oxie code. It states no language rules, so it stays right when you update Oxie.
+  they change Oxie code, and a `CLAUDE.md` that imports it for Claude Code. They state no
+  language rules, so they stay right when you update Oxie.
 * The [Claude Code skill](../skills/oxie/SKILL.md) does the same for any work on Oxie code,
   also in projects without an `AGENTS.md`. Install it with
   `claude plugin install oxie --marketplace oxie-lang/oxie`, or copy `skills/oxie` to

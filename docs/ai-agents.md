@@ -11,8 +11,9 @@ to look, and the compiler explains what the model gets wrong:
   compiler that runs the code, because it is part of it, and it warns when the project builds
   with another version of `oxie-build`.
 * **Every project points its agent at the guide.** `oxie new` and `oxie init` write an
-  `AGENTS.md` telling agents to read `oxie guide` and to check their work with `oxie check`.
-  There is also a Claude Code plugin that does the same for any Oxie work.
+  `AGENTS.md` telling agents to read `oxie guide` and to check their work with `oxie check`, and
+  a `CLAUDE.md` that imports it, for Claude Code. There is also a Claude Code plugin that does
+  the same for any Oxie work.
 * **The compiler explains mistakes in Oxie terms, with the edit.** Errors point at `.oxi` lines,
   including rustc's, which Oxie rewrites: a moved value says where it moved and why, and most
   errors end with a `= fix:` line giving the corrected code.
@@ -31,15 +32,19 @@ oxie new hello
 cd hello
 ```
 
-It writes `Cargo.toml`, `build.rs`, `src/main.rs`, a `src/main.oxi` to start from, and
-`AGENTS.md`. Then ask your agent for what you want built.
+It writes `Cargo.toml`, `build.rs`, `src/main.rs`, a `src/main.oxi` to start from, `AGENTS.md`,
+and `CLAUDE.md` (one line, `@AGENTS.md`). Then ask your agent for what you want built.
 
 **An existing project.** Run `oxie init` in the project's directory. In an existing Rust crate it
-adds Oxie support (`build.rs` and the build-dependency) and an `AGENTS.md` if there is none, and
-leaves the rest alone, so the agent can write new code in Oxie next to the Rust.
+adds Oxie support (`build.rs` and the build-dependency), and `AGENTS.md` and `CLAUDE.md` where the
+crate has none, and leaves the rest alone, so the agent can write new code in Oxie next to the
+Rust. A `CLAUDE.md` the crate already has is kept; add the line `@AGENTS.md` to it so Claude Code
+reads the notes too.
 
-**Claude Code.** Install the Oxie plugin once, and Claude Code loads its skill for any work on
-`.oxi` files, in every project:
+**Claude Code.** Claude Code reads `CLAUDE.md`, and the one Oxie writes imports `AGENTS.md`, so a
+project made by `oxie new` or `oxie init` needs nothing more. Install the Oxie plugin as well,
+and Claude Code loads its skill for any work on `.oxi` files, in every project, also in ones
+without these files:
 
 ```bash
 claude plugin install oxie --marketplace oxie-lang/oxie
@@ -47,8 +52,7 @@ claude plugin install oxie --marketplace oxie-lang/oxie
 
 Inside Claude Code, the same is `/plugin marketplace add oxie-lang/oxie` followed by
 `/plugin install oxie@oxie`. Without the plugin, copy `skills/oxie` to
-`~/.claude/skills/oxie`. Claude Code reads `CLAUDE.md`; to have it read a project's
-`AGENTS.md` as well, add a `CLAUDE.md` with the single line `@AGENTS.md`.
+`~/.claude/skills/oxie`.
 
 **Other agents.** `AGENTS.md` is the convention that Codex, Cursor, GitHub Copilot, and many
 other coding agents read from the project's root. For an agent that reads another file, add the
@@ -142,9 +146,9 @@ The errors Oxie explains, and their fixes, are listed under
 
 Oxie's syntax changes between releases. Three things keep agents current:
 
-* `AGENTS.md` and the Claude Code skill hold no language rules, only commands, so they never go
-  stale. Updating `oxie` updates what every agent learns; the test suite keeps Oxie code out of
-  both.
+* `AGENTS.md`, `CLAUDE.md`, and the Claude Code skill hold no language rules, only commands, so
+  they never go stale. Updating `oxie` updates what every agent learns; the test suite keeps Oxie
+  code out of them.
 * `oxie guide` names the version that printed it, and when a project's `Cargo.lock` has another
   `oxie-build`, it says so first, with the command that makes the two match.
 * When a release changes syntax, the guide shows the old form and what to write instead, so an
@@ -155,7 +159,7 @@ Oxie's syntax changes between releases. Three things keep agents current:
 [`evals/`](../evals) measures how well models write Oxie: it gives 16 programming tasks to
 Claude Code, from error enums and generics to shared objects, porting Rust, and fixing a build,
 and grades the programs it writes. It compares four conditions: with the Claude Code skill, with
-the `AGENTS.md` that `oxie new` writes, with only `oxie --help`, and with no help at all, and
+the `AGENTS.md` and `CLAUDE.md` that `oxie new` writes, with only `oxie --help`, and with no help at all, and
 reports passed tasks, first builds that succeed, builds and turns per run, and the Rust written
 where Oxie has its own form. To run it:
 

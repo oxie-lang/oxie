@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+* `oxie new` and `oxie init` also write a `CLAUDE.md` with the line `@AGENTS.md`, so Claude Code
+  reads the notes for agents that the other agents read in `AGENTS.md`. A crate's own `CLAUDE.md`
+  is kept. The documentation has a page on [AI coding agents](docs/ai-agents.md): setting up
+  Claude Code, Codex, Cursor and other agents, the commands they use, and what the compiler tells
+  them.
 * Context parameters: `context(log: &mut Log) fun record(line: &str)` takes `log` without its
   callers writing it. Each call passes the variable named `log` where it is made, or one given by
   name (`record("x", log = &mut other)`). Before a class,

@@ -172,8 +172,11 @@ fn cmd_init(args: &[String]) -> R {
         if !dir.join("build.rs").exists() {
             std::fs::write(dir.join("build.rs"), project::BUILD_RS).map_err(|e| e.to_string())?;
         }
-        if !dir.join("AGENTS.md").exists() {
-            std::fs::write(dir.join("AGENTS.md"), project::AGENTS_MD).map_err(|e| e.to_string())?;
+        // notes for AI coding agents; a crate's own CLAUDE.md or AGENTS.md is kept
+        for (name, text) in [("AGENTS.md", project::AGENTS_MD), ("CLAUDE.md", project::CLAUDE_MD)] {
+            if !dir.join(name).exists() {
+                std::fs::write(dir.join(name), text).map_err(|e| e.to_string())?;
+            }
         }
         println!("Added Oxie to the existing crate. Write modules as src/<name>.oxi and add this to src/main.rs or src/lib.rs:\n\n    include!(concat!(env!(\"OUT_DIR\"), \"/oxie/mod.rs\"));\n");
         return Ok(ExitCode::SUCCESS);
