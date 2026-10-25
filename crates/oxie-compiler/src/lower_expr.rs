@@ -29,6 +29,11 @@ fn unboxed(t: Type) -> Type {
     }
 }
 
+/// Std types that are never a type parameter's name.
+fn is_std_value(n: &str) -> bool {
+    matches!(n, "String" | "str" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64" | "Vec" | "HashMap" | "HashSet" | "Option")
+}
+
 /// Is `t` a box (`Box<T>`, behind any references)?
 fn is_box(t: &Type) -> bool {
     match t {
@@ -331,15 +336,20 @@ fn replace_moved(e: &mut Expr, moved: &[(Span, String)]) {
     }
 }
 
-/// `var acc = ""` that a later statement appends to (`acc += x`) starts as `String::from("")`:
-/// a `&str` can't grow, so the variable could never compile as one.
+/// `var acc = ""` that a later statement appends to (`acc += x`, `acc.push(c)`,
+/// `acc.push_str(s)`, ...) starts as `String::from("")`: a `&str` can't grow, so the variable
+/// could never compile as one.
 fn appended_text_var(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
     let Stmt::Let { pat: pat @ Pat::Ident { name, mutable: true, sub: None, .. }, ty: None, init: Some(init @ Expr { kind: ExprKind::Str(_), .. }), else_: None, span, .. } = s else { return None };
     let mut appended = false;
     for s in rest {
         visit::walk_stmt(s, &mut |e| {
-            if let ExprKind::Assign(Some(BinOp::Add), lhs, _) = &e.kind {
-                appended |= lhs.ident() == Some(name.as_str());
+            match &e.kind {
+                ExprKind::Assign(Some(BinOp::Add), lhs, _) => appended |= lhs.ident() == Some(name.as_str()),
+                ExprKind::MethodCall { recv, name: m, .. } if matches!(m.as_str(), "push" | "push_str" | "insert" | "insert_str" | "clear" | "truncate" | "extend") => {
+                    appended |= recv.ident() == Some(name.as_str());
+                }
+                _ => {}
             }
             !appended
         });
@@ -1186,6 +1196,10 @@ impl<'a> Lowerer<'a> {
                 if let Some(w) = &wrap {
                     self.e.w(&format!("{}(", w));
                 }
+                // a lambda the function returns outlives it: `move`
+                if t.fn_result && matches!(e.kind, ExprKind::Lambda { .. }) && self.fns.last().is_some_and(|f| !f.is_lambda) && t.ty.as_ref().is_some_and(|ty| self.is_fn_type(ty)) {
+                    self.next_lambda_moves = true;
+                }
                 if auto_try {
                     self.propagate(e);
                 } else {
@@ -1257,6 +1271,12 @@ impl<'a> Lowerer<'a> {
             }
         }
         match ty {
+            // a borrowed number, `char` or `bool` (a `when` arm's binding) where the value is
+            // expected: `*n`
+            Type::Path { segs, .. } if segs.len() == 1 && self.is_scalar_ref_local(e) && matches!(e.ident().and_then(|n| self.local(n)), Some(Some(Type::Ref { inner, .. })) if inner.single_name() == Some(segs[0].name.as_str())) => {
+                self.e.w("*");
+                self.expr(e, P_UNARY);
+            }
             // an owned box (a recursive field bound by a `when` arm) where its value is expected: `*x`
             Type::Path { segs, .. }
                 if ty.auto_boxed().is_none()
@@ -1374,6 +1394,10 @@ impl<'a> Lowerer<'a> {
                 if matches!(e.kind, ExprKind::Lambda { .. }) {
                     if boxed {
                         self.e.w("Box::new(");
+                    }
+                    // a lambda stored in a field outlives the scope that made it
+                    if pos == TyPos::Field {
+                        self.next_lambda_moves = true;
                     }
                     self.lambda(e, Some(params), Some(ret));
                     if boxed {
@@ -2338,7 +2362,8 @@ impl<'a> Lowerer<'a> {
                 self.block_value(b, &Target::none());
             }
             Async { is_move, block } => {
-                self.e.w(if *is_move { "async move " } else { "async " });
+                let moves = std::mem::take(&mut self.next_lambda_moves);
+                self.e.w(if *is_move || moves { "async move " } else { "async " });
                 self.fns.push(FnCtx { throws: false, ret: None, is_lambda: true, tries: Vec::new(), text_break: None, unboxed_ret: false });
                 let saved = std::mem::take(&mut self.loops);
                 self.block_value(block, &Target::none());
@@ -2651,6 +2676,10 @@ impl<'a> Lowerer<'a> {
         let text = |x: &Expr| cmp && matches!(x.kind, ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Template(_));
         if by_value && is_scalar_literal(r) && self.is_ref_lambda_param(l) {
             self.read_value(l);
+        } else if cmp && is_scalar_literal(r) && self.is_scalar_ref_local(l) {
+            // `op == '+'` with `op` a `&char` (a `when` arm's binding): its value
+            self.e.w("*");
+            self.expr(l, P_UNARY);
         } else if text(r) && self.is_ref_lambda_param(l) {
             self.read_text(l);
         } else {
@@ -2659,11 +2688,105 @@ impl<'a> Lowerer<'a> {
         self.e.w(&format!(" {} ", op.as_str()));
         if by_value && is_scalar_literal(l) && self.is_ref_lambda_param(r) {
             self.read_value(r);
+        } else if cmp && is_scalar_literal(l) && self.is_scalar_ref_local(r) {
+            self.e.w("*");
+            self.expr(r, P_UNARY);
         } else if text(l) && self.is_ref_lambda_param(r) {
             self.read_text(r);
         } else {
             self.operand(r, p + 1, before_lt);
         }
+    }
+
+    /// For `push`, `insert`, `push_back` and `push_front` on a std list, set or map of `String`s
+    /// with text arguments that need converting (`"bob"`, a `&str` variable): the type each
+    /// argument takes (`None` for an index). `None` when nothing needs converting.
+    fn element_args(&mut self, recv: &Expr, name: &str, args: &[Arg]) -> Option<Vec<Option<Type>>> {
+        if !matches!(name, "push" | "insert" | "push_back" | "push_front") || args.iter().any(|a| a.name.is_some()) {
+            return None;
+        }
+        let mut t = self.infer_type(recv)?;
+        while let Type::Ref { inner, .. } = t {
+            t = *inner;
+        }
+        let Type::Path { segs, .. } = &t else { return None };
+        let seg = segs.last()?;
+        let gen: Vec<Type> = seg.generics.as_deref()?.iter().filter_map(|g| if let GenericArg::Type(t) = g { Some(t.clone()) } else { None }).collect();
+        let types: Vec<Option<Type>> = match (seg.name.as_str(), name, gen.as_slice(), args.len()) {
+            ("Vec" | "VecDeque", "push" | "push_back" | "push_front", [t], 1) => vec![Some(t.clone())],
+            ("Vec" | "VecDeque", "insert", [t], 2) => vec![None, Some(t.clone())],
+            ("HashSet" | "BTreeSet", "insert", [t], 1) => vec![Some(t.clone())],
+            ("HashMap" | "BTreeMap", "insert", [k, v], 2) => vec![Some(k.clone()), Some(v.clone())],
+            _ => return None,
+        };
+        let converts = |me: &Self, a: &Arg, t: &Option<Type>| {
+            t.as_ref().is_some_and(|t| t.is_string()) && (matches!(a.value.kind, ExprKind::Str(_) | ExprKind::RawStr(_)) || me.is_str_var(&a.value))
+        };
+        args.iter().zip(&types).any(|(a, t)| converts(self, a, t)).then_some(types)
+    }
+
+    /// `xs.sorted_by { it.word }` on a list: Oxie's key operations let the key borrow from the
+    /// element, so a field key is lent (`&it.word`) instead of moved out of the borrowed element.
+    /// The arguments with the key borrowed, or `None` to keep them.
+    fn borrowed_key(&mut self, recv: &Expr, name: &str, args: &[Arg]) -> Option<Vec<Arg>> {
+        if !matches!(name, "sorted_by" | "sorted_by_descending" | "max_by_key" | "min_by_key") || args.len() != 1 {
+            return None;
+        }
+        let ExprKind::Lambda { params, body, .. } = &args[0].value.kind else { return None };
+        let param = match params.as_slice() {
+            [] => "it".to_string(),
+            [p] => match &p.pat {
+                Pat::Ident { name, .. } => name.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let key = match &body.kind {
+            ExprKind::Block(b) => match b.stmts.as_slice() {
+                [Stmt::Expr { expr, semi: false }] => expr,
+                _ => return None,
+            },
+            _ => &**body,
+        };
+        fn field_of(e: &Expr, param: &str) -> bool {
+            match &e.kind {
+                ExprKind::Field { recv, safe: false, .. } => recv.ident() == Some(param) || field_of(recv, param),
+                _ => false,
+            }
+        }
+        if !field_of(key, &param) || self.template_form(recv) != Form::Debug {
+            return None;
+        }
+        let lent = Expr::new(ExprKind::Unary(UnOp::Ref, Box::new(key.clone())), key.span);
+        let mut arg = args[0].clone();
+        if let ExprKind::Lambda { body, .. } = &mut arg.value.kind {
+            **body = lent;
+        }
+        Some(vec![arg])
+    }
+
+    /// `thread.spawn { .. }`, `tokio.spawn(async { .. })`: the lambda or `async` block runs on
+    /// another thread or task, after this scope may be gone, so it owns what it captures.
+    fn spawned_lambda(&mut self, segs: &[String], args: &[Arg]) {
+        let spawn = segs.last().is_some_and(|n| n == "spawn") && segs.iter().any(|s| matches!(s.as_str(), "thread" | "tokio" | "task" | "rayon"));
+        if spawn && args.first().is_some_and(|a| matches!(a.value.kind, ExprKind::Lambda { .. } | ExprKind::Async { .. })) {
+            self.next_lambda_moves = true;
+        }
+    }
+
+    /// Is `t` a function type (`(i32) -> i32`, or an alias of one)?
+    fn is_fn_type(&self, t: &Type) -> bool {
+        match t {
+            Type::Fn { .. } => true,
+            Type::Path { segs, .. } => segs.len() == 1 && segs[0].generics.is_none() && self.fn_aliases.contains_key(&segs[0].name),
+            _ => false,
+        }
+    }
+
+    /// Is `e` a local whose type is a reference to a number, `char` or `bool` (`&char`)?
+    fn is_scalar_ref_local(&self, e: &Expr) -> bool {
+        let Some(n) = e.ident() else { return false };
+        matches!(self.local(n), Some(Some(Type::Ref { inner, .. })) if inner.single_name().is_some_and(|t| is_std_value(t) && !matches!(t, "String" | "str" | "Vec" | "HashMap" | "HashSet" | "Option")))
     }
 
     /// `expr(e, min)`. With `before_lt` a `<` or `<<` follows, and a cast at the end of `e` gets
@@ -2900,7 +3023,8 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&p);
                 }
                 self.bind_pat(pat, None);
-                for (name, t) in self.boxed_bindings(pat, Some(expr)) {
+                let field_by_ref = self.match_field_by_ref(expr, &[pat]);
+                for (name, t) in self.case_bindings(pat, Some(expr), field_by_ref) {
                     self.bind_name(&name, Some(t));
                 }
                 // a variable a null check unwrapped keeps its type (`narrow_cond`)
@@ -3136,7 +3260,18 @@ impl<'a> Lowerer<'a> {
                 if parens {
                     self.e.w("(");
                 }
-                self.expr(e, P_LOWEST);
+                // `if (b)`, `if (!b)` with `b` a `&bool` (a `when` arm's binding): its value
+                match &e.kind {
+                    _ if self.is_scalar_ref_local(e) => {
+                        self.e.w("*");
+                        self.expr(e, P_UNARY);
+                    }
+                    ExprKind::Unary(UnOp::Not, x) if self.is_scalar_ref_local(x) => {
+                        self.e.w("!*");
+                        self.expr(x, P_UNARY);
+                    }
+                    _ => self.expr(e, P_LOWEST),
+                }
                 if parens {
                     self.e.w(")");
                 }
@@ -3150,7 +3285,8 @@ impl<'a> Lowerer<'a> {
                 }
                 self.let_subject(pat, expr, *implicit_some);
                 self.bind_pat(pat, None);
-                for (name, t) in self.boxed_bindings(pat, Some(expr)) {
+                let field_by_ref = self.match_field_by_ref(expr, &[pat]);
+                for (name, t) in self.case_bindings(pat, Some(expr), field_by_ref) {
                     self.bind_name(&name, Some(t));
                 }
             }
@@ -3623,6 +3759,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn call(&mut self, callee: &Expr, args: &[Arg], span: Span) {
+        if let ExprKind::Path { segs, .. } = &callee.kind {
+            self.spawned_lambda(segs, args);
+        }
         // `(self.on_click)(x)` calls the function stored in a field; without the parentheses
         // Rust would look for a method
         if let ExprKind::Paren(inner) = &callee.kind {
@@ -3751,6 +3890,7 @@ impl<'a> Lowerer<'a> {
 
     /// Call through a path: `Shape::Circle(1.0)`, `Point.origin()`, `std.mem.swap(a, b)`.
     fn path_call(&mut self, segs: &[String], generics: Option<&Vec<GenericArg>>, args: &[Arg], span: Span) {
+        self.spawned_lambda(segs, args);
         // `Outer.Inner(...)`: a type declared inside a class (hoisted next to it)
         if segs.len() > 1 && self.k.nested.get(&segs[0]).is_some_and(|inner| inner.contains(&segs[1])) {
             let rest = segs[1..].to_vec();
@@ -4319,16 +4459,15 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// The names `p` binds to boxed fields of an enum case (`Neg(x)` of `Neg(Box<Expr>)`), with
-    /// their types: `Box<T>`, or `&Box<T>` when `subject` is matched through a reference.
-    fn boxed_bindings(&mut self, p: &Pat, subject: Option<&Expr>) -> Vec<(String, Type)> {
+    /// The names `p` binds to fields of an enum case (`Call(name, arg)`), with the fields' types:
+    /// `T`, or `&T` when `subject` is matched through a reference (`Box<T>` for a recursive field
+    /// Oxie boxed).
+    /// `field_by_ref`: the subject is a field of `this` that the match borrows
+    /// (`match_field_by_ref`).
+    fn case_bindings(&mut self, p: &Pat, subject: Option<&Expr>, field_by_ref: bool) -> Vec<(String, Type)> {
         let Some(s) = subject else { return Vec::new() };
         let Some(subject_ty) = self.infer_type(s) else { return Vec::new() };
-        let by_ref = matches!(subject_ty, Type::Ref { .. }) || {
-            let field = matches!(&strip_paren(s).kind, ExprKind::Field { recv, safe: false, .. } if matches!(recv.kind, ExprKind::SelfValue))
-                || s.ident().is_some_and(|n| self.implicit_field(n).is_some());
-            field && !self.self_by_value
-        };
+        let by_ref = matches!(subject_ty, Type::Ref { .. }) || field_by_ref;
         let (path, elems): (&[String], Vec<(Option<&str>, &Pat)>) = match p {
             Pat::TupleStruct { path, elems, .. } => (path, elems.iter().map(|e| (None, e)).collect()),
             Pat::Struct { path, fields, .. } => (path, fields.iter().filter_map(|(n, p)| p.as_ref().map(|p| (Some(n.as_str()), p))).collect()),
@@ -4364,11 +4503,13 @@ impl<'a> Lowerer<'a> {
                 Some(f) => types.iter().find(|(n, _)| *n == Some(*f)).map(|(_, t)| *t),
                 None => types.get(i).map(|(_, t)| *t),
             };
-            if let (Some(t), Pat::Ident { name, sub: None, .. }) = (t, p) {
-                if t.auto_boxed().is_some() {
-                    let t = if by_ref { Type::Ref { lifetime: None, mutable: false, inner: Box::new(t.clone()) } } else { t.clone() };
-                    out.push((name.clone(), t));
+            if let (Some(t), Pat::Ident { name, sub: None, by_ref: false, .. }) = (t, p) {
+                // a type parameter of a generic enum isn't known here
+                if en.is_some_and(|e| e.has_type_params) && !matches!(t, Type::Path { segs, .. } if segs.len() == 1 && (segs[0].name == "Box" || self.k.is_user_type(&segs[0].name) || is_std_value(&segs[0].name))) {
+                    continue;
                 }
+                let t = if by_ref { Type::Ref { lifetime: None, mutable: false, inner: Box::new(t.clone()) } } else { t.clone() };
+                out.push((name.clone(), t));
             }
         }
         out
@@ -4471,7 +4612,26 @@ impl<'a> Lowerer<'a> {
     }
 
     fn method_call(&mut self, recv: &Expr, name: &str, generics: Option<&Vec<GenericArg>>, args: &[Arg], span: Span) {
+        if let Some(args) = self.borrowed_key(recv, name, args) {
+            return self.method_call(recv, name, generics, &args, span);
+        }
         self.record_member(recv, name);
+        // `names.push("bob")` on a `[String]`: the text becomes a `String`
+        if let Some(types) = self.element_args(recv, name, args) {
+            self.expr(recv, P_POSTFIX);
+            self.e.w(&format!(".{}(", esc(name)));
+            for (i, (a, t)) in args.iter().zip(types).enumerate() {
+                if i > 0 {
+                    self.e.w(", ");
+                }
+                match t {
+                    Some(t) => self.coerce(&a.value, &t, TyPos::Generic),
+                    None => self.expr(&a.value, P_LOWEST),
+                }
+            }
+            self.e.w(")");
+            return;
+        }
         // Kotlin scope function: x.let { ... }
         if name == "let" && args.len() == 1 {
             if let ExprKind::Lambda { params, body, .. } = &args[0].value.kind {
@@ -5405,6 +5565,9 @@ impl<'a> Lowerer<'a> {
                         if wrap {
                             self.e.w("Ok(");
                         }
+                        if matches!(x.kind, ExprKind::Lambda { .. }) && f.ret.as_ref().is_some_and(|t| self.is_fn_type(t)) {
+                            self.next_lambda_moves = true;
+                        }
                         match &f.ret {
                             Some(_) if f.unboxed_ret => self.expr(x, P_LOWEST),
                             Some(t) => self.coerce(x, t, TyPos::Local),
@@ -5648,6 +5811,8 @@ impl<'a> Lowerer<'a> {
                 }
                 self.e.w(" {");
                 self.e.indent();
+                let all_pats: Vec<&Pat> = arms.iter().flat_map(|a| a.conds.iter()).filter_map(|c| if let WhenCond::Pat(p) = c { Some(p) } else { None }).collect();
+                let field_by_ref = text_kind.is_none() && self.match_field_by_ref(s, &all_pats);
                 let mut has_catch_all = false;
                 let mut has_literal = false;
                 for arm in arms {
@@ -5771,7 +5936,7 @@ impl<'a> Lowerer<'a> {
                         for c in &arm.conds {
                             if let WhenCond::Pat(p) = c {
                                 self.bind_pat(p, catch_all.clone());
-                                for (name, t) in self.boxed_bindings(p, subject) {
+                                for (name, t) in self.case_bindings(p, subject, field_by_ref) {
                                     self.bind_name(&name, Some(t));
                                 }
                             }
@@ -6010,7 +6175,8 @@ impl<'a> Lowerer<'a> {
         if *is_async {
             self.e.w("async ");
         }
-        if *is_move {
+        let escapes = std::mem::take(&mut self.next_lambda_moves);
+        if *is_move || escapes {
             self.e.w("move ");
         }
         // predicates of `filter`, `find`, ... receive references to the elements

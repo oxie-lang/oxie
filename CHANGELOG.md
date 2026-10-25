@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+* Everyday forms that needed Rust's help now read as written:
+  * a `when` arm's names have the types of the case's fields, so a text field matches text arms
+    (`when (name) { "sqrt" -> ... }`), and a borrowed number, `char` or `bool` is read where its
+    value is needed (`Num(n) -> n`, `op == '+'`, `if (on)`) without `*`;
+  * `sorted_by`, `sorted_by_descending`, `max_by_key` and `min_by_key` on a list borrow a field
+    key: `sorted_by { it.name }`;
+  * text put into a list, set or map of `String`s is converted: `names.push("bob")`;
+  * `var s = ""` grown with `s.push(c)` or `s.push_str(t)` is a `String`, as with `s += t`;
+  * a lambda that a function returns, that is stored in a field, or that runs on another thread
+    (`thread.spawn { }`, `tokio.spawn(async { })`) is `move` without writing it.
 * Recursive types need no `Box`: a field that holds its own type, directly (`Neg(Expr)`), as an
   optional (`next: Node?`) or through another type of the crate, is boxed, values going into it
   are boxed (`Expr.Neg(x)`), and `when` arms, calls and fields read through the box. Before,

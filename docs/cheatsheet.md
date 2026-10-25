@@ -57,7 +57,7 @@ fun show(names: [String]) = println("${names.len()} names")
 fun main() {
     var names: [String] = ["ada"]
     show(names)               // lends it: show(&names)
-    names.push("bob".to_string())
+    names.push("bob")
     val copy = names.clone()  // explicit copy
     val moved = names         // `names` is moved
     println("$copy $moved")

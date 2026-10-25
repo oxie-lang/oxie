@@ -1,0 +1,64 @@
+// Forms that read as written: a `when` arm's bindings have their fields' types (text arms on a
+// `String` field, `op == '+'` and `n` on a borrowed number); a list's key operations borrow a
+// field key; text goes into lists, sets and maps of `String`; `var s = ""` grows with `push`;
+// and a lambda that outlives its scope (returned, stored in a field, spawned) owns what it uses.
+
+import std.collections.HashSet
+import std.thread
+
+data class Word(text: String, count: i32)
+
+enum Token { Name(text: String), Op(c: char), Num(n: f64), Flag(on: bool) }
+
+fun describe(t: &Token): String = when (t) {
+    Token.Name(text) -> when (text) {
+        "sqrt" -> "a function"
+        else -> "the name $text"
+    }
+    Token.Op(c) -> if (c == '+' || c == '-') "a sign" else "an operator"
+    Token.Num(n) -> if (n > 9.0) "a big number" else "a number"
+    Token.Flag(on) -> if (on) "on" else "off"
+}
+
+fun value(t: &Token): f64 = when (t) {
+    Token.Num(n) -> n
+    else -> 0.0
+}
+
+fun adder(n: i32): (i32) -> i32 = { it + n }
+
+class Button(label: String, on_click: () -> String)
+
+fun button(name: String): Button = Button(name.clone(), { "clicked $name" })
+
+fun main() {
+    for (t in [Token.Name("sqrt".to_string()), Token.Name("x".to_string()), Token.Op('+'), Token.Op('*'), Token.Num(12.0), Token.Flag(true)]) {
+        println(describe(&t))
+    }
+    println(value(&Token.Num(2.5)))
+
+    val words: [Word] = [Word("pear", 2), Word("apple", 5), Word("fig", 2)]
+    println(words.sorted_by { it.text }.map { it.text.clone() })
+    println("${words.max_by_key { it.text }?.text} ${words.min_by_key { it.count }?.text}")
+
+    var names: [String] = []
+    names.push("bob")
+    names.insert(0, "ann")
+    var seen: HashSet<String> = HashSet()
+    seen.insert("x")
+    var ages: [String: String] = [:]
+    ages.insert("ann", "36")
+    println("$names ${seen.len()} $ages")
+
+    var out = ""
+    for (c in "abc".chars()) out.push(c.to_ascii_uppercase())
+    out.push_str("!")
+    println(out)
+
+    println(adder(2)(3))
+    val b = button("ok")
+    println("${b.label}: ${(b.on_click)()}")
+    val who = "worker".to_string()
+    val h = thread.spawn { "hello from $who" }
+    println(h.join().unwrap())
+}

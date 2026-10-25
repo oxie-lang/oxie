@@ -401,6 +401,10 @@ enum Shape : Display {
 * Variants are separated by newlines or commas; methods follow in the same body.
 * `Shape.Circle(1.0)` or `Circle(1.0)` (when the name is unique, or declared in the same file)
   constructs; named-field variants accept positional or named arguments.
+* An arm's names have the types of the case's fields, or references to them when the `when`
+  matches a borrowed value (`when (e)` with `e: &Token`). A borrowed number, `char` or `bool` is
+  read where its value is needed (`Num(n) -> n` for an `f64` result, `op == '+'`, `if (on)`),
+  and a borrowed `String` matches text arms (`when (name) { "sqrt" -> ... }`).
 * In patterns, `Circle(r)` matches named-field variants positionally (→ `Circle { radius: r }`),
   and a bare `Circle` matches any `Circle`. A bare case name is a case of the matched value's
   enum when Oxie knows its type, even if another enum or a class has that name. A capitalized
@@ -534,7 +538,8 @@ fun main() {
 the declared type of a variable, field, parameter or return value:
 
 * a string literal to `String` (`String::from("...")`), a `&str` value to a `String`
-  parameter (`.into()`);
+  parameter (`.into()`), and either one to the element, key or value of a list, set or map of
+  `String`s in `push`, `insert`, `push_back` and `push_front` (`names.push("bob")`);
 * a value to `T?` (`Some(...)`, or `.into()` for variables), `null` to `None`;
 * a lambda or function parameter to a function-typed field or list (`Box::new(...)`), a value of
   an implementing class or enum (or an interface-typed parameter) to an interface-typed field or
@@ -573,8 +578,8 @@ the declared type of a variable, field, parameter or return value:
   from the type it knows: a local, field or parameter of a declared or inferred type, a list
   operation, `?.`, and `first()`, `get()`, `find { }`, ... on a list or iterator. A value whose
   type comes from a Rust function needs `:?`.
-* A `var` holding a text literal that is later appended to (`var acc = ""`, `acc += x`) starts
-  as a `String`.
+* A `var` holding a text literal that is later appended to (`var acc = ""`, then `acc += x`,
+  `acc.push(c)` or `acc.push_str(s)`) starts as a `String`.
 
 ## Null safety
 
@@ -740,12 +745,16 @@ fun main() {
 (a, b) => a + b                 // TypeScript style
 x => x * 2
 |a, b| a + b                    // Rust style
-move { ... }                    // capture by value
+move { ... }                    // capture by value (added for you where the lambda escapes)
 { [counter, tx] -> ... }        // capture list: moves in clones of `counter` and `tx`
 { [n = items.len()] x -> ... }  // a computed capture, then parameters
 f(x) { trailing lambda }        // the last parameter, outside the parentheses
 ```
 
+* A lambda that outlives the scope that made it is `move` without writing it: one a function
+  returns (`fun adder(n: i32): (i32) -> i32 = { it + n }`), one stored in a function-typed field,
+  and one passed to `thread.spawn`, `tokio.spawn` (an `async { }` block too) or another
+  `spawn` of `thread`, `task` or `rayon`.
 * A brace lambda without `->` has no parameters, or `it` if it uses `it`. Closures with an
   explicit empty list (`|| it + 1`, `() => it`) take no parameter and use an outer `it`. When a
   standard method always passes a value (`map`, `filter`, `map_err`, `unwrap_or_else` on

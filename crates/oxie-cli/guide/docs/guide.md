@@ -402,7 +402,7 @@ enum Expr {
 }
 
 fun eval(e: &Expr): f64 = when (e) {
-    Num(n) -> *n
+    Num(n) -> n
     Neg(x) -> -eval(x)
     Add(l, r) -> eval(l) + eval(r)
 }

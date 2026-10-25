@@ -288,6 +288,9 @@ pub struct Lowerer<'a> {
     pub(crate) typed_by_body: bool,
     /// The next lambda lowered is a predicate whose parameters are element references.
     pub(crate) next_lambda_refs: bool,
+    /// The next lambda (or `async` block) lowered outlives its scope: returned, stored in a field
+    /// or run on another thread, so it owns what it captures (`move`).
+    pub(crate) next_lambda_moves: bool,
     /// Span starts of `for` iterables that are used again after the loop, with the start of
     /// that use (none when a loop around it runs again; see `visit::reused_loop_iters`).
     pub(crate) reused_iters: HashMap<u32, Option<u32>>,
@@ -475,6 +478,7 @@ impl<'a> Lowerer<'a> {
             untyped_params: Vec::new(),
             typed_by_body: false,
             next_lambda_refs: false,
+            next_lambda_moves: false,
             reused_iters: HashMap::new(),
             narrowed_types: Vec::new(),
             unused_after_check: Vec::new(),

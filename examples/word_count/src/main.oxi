@@ -15,7 +15,7 @@ fun count_words(text: String): [String: usize] {
 
 fun top(counts: [String: usize], n: usize): [WordStat] {
     var stats = counts.iter().map { (w, c) -> WordStat(w.clone(), *c) }.to_list()
-        .sorted_by { &it.word }
+        .sorted_by { it.word }
         .sorted_by_descending { it.count }      // stable: equal counts stay in word order
     stats.truncate(n)
     stats

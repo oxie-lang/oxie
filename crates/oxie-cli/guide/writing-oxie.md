@@ -185,6 +185,8 @@ fun main() {
   `{ c: char -> !c.is_alphanumeric() }`.
 * **Text.** `a + b` joins text into a new `String` without moving either side, and
   `s += t` appends; a `when` on a `String` matches its text arms (`"go" -> ...`).
+  `var s = ""` followed by `s += t`, `s.push(c)` or `s.push_str(t)` is a `String`, and text put
+  into a `[String]`, set or map (`names.push("bob")`, `m.insert("k", "v")`) is converted.
 * **Destructuring.** `val (x, y) = point` takes a data class's fields in constructor order, and
   `if (val (k, v) = pair_or_null)` unwraps an optional pair. `val (tx, var rx) = ...` lets only
   `rx` change (write `var`, not Rust's `mut`).
@@ -366,7 +368,7 @@ the compiler error suggests.
 ```oxie
 class Step(name: String, run: (i32) -> i32)
 
-fun make_adder(n: i32): (i32) -> i32 = move { it + n }     // `move`: it outlives `n`
+fun make_adder(n: i32): (i32) -> i32 = { it + n }          // returned: Oxie makes it `move`
 
 fun apply_twice(x: i32, f: (i32) -> i32): i32 {
     val once = f(x)                                        // `f(f(x))` borrows `f` twice
@@ -387,9 +389,10 @@ fun main() {
 * A function-typed parameter is an `impl FnMut`; a function-typed field or list element is a
   boxed `Fn`, and lambdas and function parameters stored there (`handlers.push(f)`,
   `on_click = f`) are boxed for you. Other function values need `Box.new(f)`.
-* A lambda returned from a function, stored in a field, or run on another thread must own what
-  it captures: `move { ... }`, or a capture list `{ [handle] -> ... }` that clones a shared
-  handle or channel sender into it.
+* A lambda returned from a function, stored in a field, or run on another thread
+  (`thread.spawn { }`, `tokio.spawn(async { })`) owns what it captures: Oxie makes it `move`.
+  Elsewhere write `move { ... }` yourself, or a capture list `{ [handle] -> ... }` that clones
+  a shared handle or channel sender into it, so the original stays usable.
 
 **Values every function passes on** (GPUI's `window` and `cx`, a logger, a configuration).
 

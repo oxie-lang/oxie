@@ -12,7 +12,7 @@
   {
     "file": "docs/cheatsheet.md",
     "output": "1 names\n[\"ada\", \"bob\"] [\"ada\", \"bob\"]\n",
-    "source": "fun show(names: [String]) = println(\"${names.len()} names\")\n\nfun main() {\n    var names: [String] = [\"ada\"]\n    show(names)               // lends it: show(&names)\n    names.push(\"bob\".to_string())\n    val copy = names.clone()  // explicit copy\n    val moved = names         // `names` is moved\n    println(\"$copy $moved\")\n}\n"
+    "source": "fun show(names: [String]) = println(\"${names.len()} names\")\n\nfun main() {\n    var names: [String] = [\"ada\"]\n    show(names)               // lends it: show(&names)\n    names.push(\"bob\")\n    val copy = names.clone()  // explicit copy\n    val moved = names         // `names` is moved\n    println(\"$copy $moved\")\n}\n"
   },
   {
     "file": "docs/cheatsheet.md",
@@ -127,7 +127,7 @@
   {
     "file": "docs/guide.md",
     "output": "-2\n2\n",
-    "source": "enum Expr {\n    Num(f64)\n    Neg(Expr)                             // Box<Expr> in the generated Rust\n    Add(left: Expr, right: Expr)\n}\n\nfun eval(e: &Expr): f64 = when (e) {\n    Num(n) -> *n\n    Neg(x) -> -eval(x)\n    Add(l, r) -> eval(l) + eval(r)\n}\n\nclass Node(value: i32, next: Node? = null)   // a linked list: Option<Box<Node>>\n\nfun main() {\n    println(eval(Expr.Add(Expr.Num(1.0), Expr.Neg(Expr.Num(3.0)))))\n    val list = Node(1, Node(2))\n    println(list.next?.value)\n}\n"
+    "source": "enum Expr {\n    Num(f64)\n    Neg(Expr)                             // Box<Expr> in the generated Rust\n    Add(left: Expr, right: Expr)\n}\n\nfun eval(e: &Expr): f64 = when (e) {\n    Num(n) -> n\n    Neg(x) -> -eval(x)\n    Add(l, r) -> eval(l) + eval(r)\n}\n\nclass Node(value: i32, next: Node? = null)   // a linked list: Option<Box<Node>>\n\nfun main() {\n    println(eval(Expr.Add(Expr.Num(1.0), Expr.Neg(Expr.Num(3.0)))))\n    val list = Node(1, Node(2))\n    println(list.next?.value)\n}\n"
   },
   {
     "file": "docs/guide.md",

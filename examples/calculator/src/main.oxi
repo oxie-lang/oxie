@@ -9,7 +9,7 @@ error enum EvalError {
 
 /// Evaluates an expression with the given variables.
 fun eval(e: &Expr, vars: [String: f64]): f64 throws EvalError = when (e) {
-    Expr.Num(n) -> *n
+    Expr.Num(n) -> n
     Expr.Var(name) -> vars.get(name).copied() ?: throw EvalError.UnknownVariable(name.clone())
     Expr.Neg(inner) -> -eval(inner, vars)?
     Expr.Bin(op, l, r) -> {
@@ -26,7 +26,7 @@ fun eval(e: &Expr, vars: [String: f64]): f64 throws EvalError = when (e) {
     }
     Expr.Call(name, arg) -> {
         val x = eval(arg, vars)?
-        when (name.as_str()) {
+        when (name) {
             "sqrt" -> x.sqrt()
             "abs" -> x.abs()
             "sin" -> x.sin()
