@@ -176,6 +176,32 @@
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.
 
+* `oxie new` checks the package name as cargo does and rejects `.` (use `oxie init`); before,
+  `oxie new .` panicked and `oxie new 123` made a package cargo rejects. Unknown options are
+  errors that name them (`oxie run --relase`: did you mean `--release`?), and extra arguments
+  are reported; before, they were ignored. `oxie test` takes `-r`.
+* A path dependency that doesn't compile shows its errors; before, only cargo's "could not
+  compile" was printed.
+* `oxie test` shows each warning once, checks a script for Oxie errors first as `oxie run` does,
+  matches a test name in any case (`oxie test Client`), and no longer prints cargo's hint with
+  the internal name of a script's crate. Warnings about an item point at its name instead of its
+  doc comment, and `oxie new --lib` writes a `pub fun`.
+* Errors point at the part of the line they are about (the field in `p.nmae`, `.collect()` in a
+  multi-line chain, the type in `catch (e: Problem)`, the interface after a class name, an
+  unused import's name), errors inside `rust { }` blocks at their line in the block, and a
+  missing `}` names the `{` it leaves open. A `rust { }` statement no longer gets a second `;`.
+* A module file or directory name that isn't an identifier (`my-util.oxi`) and a script without
+  `fun main` are Oxie errors that say what to do, instead of rustc errors in generated files.
+* Printing a value without a text form is explained for `println(x)` too and for classes with
+  short names; `write!` into a `String` offers to import `std::fmt::Write`; cargo's summary
+  counts only the warnings shown; a hand-written `.rs` module's errors use relative paths; and a
+  virtual workspace's root says to run `oxie` in a member.
+* The language server keeps running after a message it can't read, publishes diagnostics of
+  unsaved (`untitled:`) documents, and completes and hovers locals by the type of their value
+  (`val c = Counter()`: `c.` lists `Counter`'s members).
+* `oxie from-rust` on a directory drops the `mod` lines of modules it translated in the same run,
+  reports its TODOs on stderr, and explains input that doesn't divide into tokens.
+
 ## 0.3.0 - 2026-10-25
 
 Oxie 0.3.0 makes code look less like Rust. Lists and maps have short types, `[T]` and `[K: V]`,

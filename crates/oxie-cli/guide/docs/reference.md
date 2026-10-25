@@ -800,6 +800,8 @@ methods are always available: `xs.iter().filter { .. }.map { .. }.collect()`.
 
 * Each `.oxi` file under `src/` is a module: `src/util.oxi` → `util`, `src/net/http.oxi` →
   `net::http`, `src/net/mod.oxi` → `net`. `src/main.oxi` (or `src/lib.oxi`) is the crate root.
+  File and directory names are module names, so they must be identifiers (`my_util.oxi`, not
+  `my-util.oxi`).
 * `import a::b::C`, `import a.b.C`, `import a::b::{C, D as E}`, `import a::b::*`,
   `import { C, D } from a::b` (TypeScript), `use ...` (Rust). Paths that start with one of
   your modules are resolved from the crate root, so `import util::helper` works in every file.

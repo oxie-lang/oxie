@@ -66,7 +66,7 @@ it to the checkout it runs in.
 | `oxie run file.oxi [-- args]` | Run a single file. Inside a project's `src/` this runs the project |
 | `oxie build [--release]` | Build |
 | `oxie check` | Type-check without producing binaries (fast) |
-| `oxie test [file.oxi] [name] [--release]` | Run `test` blocks of the project, or of a script; `name` may be the test's description (`oxie test "adds numbers"`) or part of it |
+| `oxie test [file.oxi] [name] [--release] [-- test options]` | Run `test` blocks of the project, or of a script; `name` may be the test's description (`oxie test "adds numbers"`) or part of it, in any case |
 | `oxie fmt [--check] [paths]` | Format `.oxi` files (the project's `src/` by default; outside a project, name the files or directories) |
 | `oxie emit file.oxi [--annotate]` | Print the Rust generated for a file; `--annotate` puts a `// file.oxi:line` comment above each statement and says why at each choice Oxie made (see [What Oxie decided](#what-oxie-decided)) |
 | `oxie from-rust file.rs [-o out.oxi]` | Translate Rust to Oxie (`-` reads stdin); see [Translating Rust](#translating-rust) |
@@ -76,7 +76,9 @@ it to the checkout it runs in.
 | `oxie clean` | `cargo clean` |
 | `oxie version` | Print the version |
 
-Arguments after `--` go to the program (`run`) or to cargo (`build`, `check`, `test`).
+Arguments after `--` go to the program (`run`), to cargo (`build`, `check`), or to the test
+runner (`test`, such as `oxie test -- --nocapture`). `-r` is short for `--release`. Unknown
+options are errors.
 `oxie <command> --help` (or `-h`) describes a command and runs nothing.
 
 ### Diagnostics
@@ -438,8 +440,8 @@ exits with status 1 if a file would change (useful in CI).
 |---|---|
 | Diagnostics | Oxie errors on every keystroke; rustc errors and warnings (mapped to `.oxi`, explained in Oxie terms, with related locations) after `cargo check` on open and save |
 | Quick fixes | code actions for the fixes listed under [Diagnostics](#diagnostics) (`var` instead of `val`, `.clone()`, `&mut` parameters, imports, `move` lambdas, `throws`, ...) |
-| Completion | locals, members after `.` (using declared types), project declarations, keywords, snippets, std types, builtins; module names in `import` lines |
-| Hover | Oxie signature, doc comment, the generated Rust signature, and for a function or method what Oxie decided about it (an inferred `&mut self`, a lent parameter, a lifetime) and why |
+| Completion | locals, members after `.` (using declared types, and the types of locals inferred from their value), project declarations, keywords, snippets, std types, builtins; module names in `import` lines |
+| Hover | Oxie signature (a local's type inferred from its value), doc comment, the generated Rust signature, and for a function or method what Oxie decided about it (an inferred `&mut self`, a lent parameter, a lifetime) and why |
 | Go to definition / declaration | functions, classes, enums, variants, fields, methods, locals and parameters, across files |
 | References, document highlight | whole-word occurrences in the project (locals: within their function) |
 | Rename | project-wide for declarations; function-local for locals |
