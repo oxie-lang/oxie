@@ -2756,6 +2756,7 @@ impl<'a> Lowerer<'a> {
             trait_methods: None,
         });
         let saved_items = std::mem::replace(&mut self.in_trait_items, true);
+        let mut methods: Vec<(&FunDecl, Recv)> = Vec::new();
         for m in &t.members {
             self.e.nl();
             match &m.kind {
@@ -2772,6 +2773,7 @@ impl<'a> Lowerer<'a> {
                     } else {
                         recv
                     };
+                    methods.push((f, recv));
                     self.method(m, f, recv, false, None);
                 }
                 _ => self.assoc_item(m, false),
@@ -2782,6 +2784,68 @@ impl<'a> Lowerer<'a> {
         self.e.dedent();
         self.e.w("}");
         self.e.nl();
+        self.forwarding_impls(t, &methods);
+    }
+
+    /// `impl<T: Shape + ?Sized> Shape for Box<T>`, and `for &T` when every method takes `&self`,
+    /// forwarding each method to the value inside: a boxed interface value (an element of a
+    /// `Vec<Shape>`) can then be passed where the interface or a reference to it is expected.
+    /// Only for interfaces that allow it (see `TraitInfo::forward`), as do their supertraits.
+    fn forwarding_impls(&mut self, t: &TraitDecl, methods: &[(&FunDecl, Recv)]) {
+        let Some((true, by_ref)) = self.forwardable(&t.name, &mut HashSet::new()) else { return };
+        let by_ref = by_ref && methods.iter().all(|(_, r)| *r == Recv::Ref);
+        let tv = if self.k.is_user_type("T") || self.k.traits.contains_key("T") { "Inner" } else { "T" };
+        let mut bodies = Vec::new();
+        let saved_sig = std::mem::replace(&mut self.iface_sig, true);
+        for (f, recv) in methods {
+            let f = &auto_lifetimes(&self.with_inferred_ret(f, None), true, &|n| self.k.type_lifetimes_in(n, &self.module));
+            let recv_text = if *recv == Recv::RefMut { "&mut self" } else { "&self" };
+            self.push_scope();
+            let params = self.params_parts(f, Some(recv_text.to_string()));
+            let ret = self.ret_type(f, TyPos::Ret);
+            self.pop_scope();
+            let g = self.generics_decl(&f.generics);
+            let args: Vec<String> = f.params.iter().filter_map(|p| p.name().map(esc)).collect();
+            let ret = ret.map(|r| format!(" -> {}", r)).unwrap_or_default();
+            bodies.push(format!("    fn {}{}({}){} {{\n        (**self).{}({})\n    }}\n", esc(&f.name), g, params.join(", "), ret, esc(&f.name), args.join(", ")));
+        }
+        self.iface_sig = saved_sig;
+        let name = esc(&t.name);
+        let targets = if by_ref { vec![format!("Box<{}>", tv), format!("&{}", tv)] } else { vec![format!("Box<{}>", tv)] };
+        for target in targets {
+            self.e.nl();
+            self.e.w(&format!("impl<{tv}: {name} + ?Sized> {name} for {target} {{\n{}}}", bodies.join("\n")));
+            self.e.nl();
+        }
+    }
+
+    /// Whether the interface `name` can be implemented for `Box<T>` and for `&T` by forwarding
+    /// its methods (see `forwarding_impls`), with its supertraits. `None` for other traits.
+    fn forwardable(&self, name: &str, seen: &mut HashSet<String>) -> Option<(bool, bool)> {
+        if !seen.insert(name.to_string()) {
+            return Some((true, true));
+        }
+        let info = self.k.traits.get(name)?;
+        if self.k.ambiguous.contains(name) {
+            return None;
+        }
+        let Some(own_by_ref) = info.forward else { return Some((false, false)) };
+        // receivers are inferred across the crate: `fun grow()` is `&mut self` when an
+        // implementation changes its object
+        let (mut boxed, mut by_ref) = (true, own_by_ref && info.methods.values().all(|m| m.recv == Recv::Ref));
+        for s in &info.supertraits {
+            match s.as_str() {
+                "Display" | "Debug" | "Sync" => {}
+                // `&T` is `'static` or `Send` only for some `T`
+                "'static" | "Send" => by_ref = false,
+                n => {
+                    let (b, r) = self.forwardable(n, seen).unwrap_or((false, false));
+                    boxed &= b;
+                    by_ref &= r;
+                }
+            }
+        }
+        Some((boxed, by_ref))
     }
 
     fn impl_decl(&mut self, it: &Item, imp: &ImplDecl) {

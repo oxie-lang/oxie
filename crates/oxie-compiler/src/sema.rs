@@ -126,6 +126,13 @@ pub struct TraitInfo {
     pub module: Vec<String>,
     pub methods: HashMap<String, MethodInfo>,
     pub assoc_types: Vec<String>,
+    /// The last names of its supertraits (`'static` for a lifetime bound).
+    pub supertraits: Vec<String>,
+    /// Its own methods can be forwarded to the value inside a `Box<T>` (`(**self).m(..)`): it
+    /// has no generics, associated items or generic methods, and every method takes `&self`
+    /// or `&mut self` and doesn't mention `Self`. `Some(true)` when they all take `&self`, so
+    /// they can be forwarded from a `&T` too.
+    pub forward: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -752,7 +759,16 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
                         _ => {}
                     }
                 }
-                insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc });
+                let supertraits = t
+                    .supertraits
+                    .iter()
+                    .filter_map(|s| match s {
+                        Type::Lifetime(l) => Some(format!("'{}", l)),
+                        s => s.last_name().map(String::from),
+                    })
+                    .collect();
+                let forward = forwardable(t);
+                insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc, supertraits, forward });
             }
             ItemKind::Mod { name, items } => {
                 let mut m = module.to_vec();
@@ -762,6 +778,36 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
             _ => {}
         }
     }
+}
+
+/// See `TraitInfo::forward`.
+fn forwardable(t: &TraitDecl) -> Option<bool> {
+    if t.is_unsafe || !t.generics.params.is_empty() {
+        return None;
+    }
+    let mentions_self = |ty: &Type| crate::symbols::type_text(ty).split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == "Self");
+    let mut all_ref = true;
+    for m in &t.members {
+        let ItemKind::Fun(f) = &m.kind else { return None };
+        let simple = f.contexts.is_empty()
+            && !(f.mods.is_async || f.mods.is_unsafe || f.mods.is_const || f.mods.abi.is_some())
+            && f.generics.params.iter().all(|g| matches!(g, GenericParam::Lifetime { .. }))
+            && f.params.iter().all(|p| matches!(p.pat, Pat::Ident { sub: None, .. }) && !mentions_self(&p.ty) && !matches!(p.ty, Type::Fn { .. } | Type::Impl(_)))
+            && !f.ret.as_ref().is_some_and(mentions_self)
+            && f.receiver.is_none();
+        if !simple {
+            return None;
+        }
+        let mutable = match &f.self_param {
+            Some(SelfParam::Ref) => false,
+            Some(SelfParam::RefMut) => true,
+            None if f.mods.is_static || STATIC_METHOD_NAMES.contains(&f.name.as_str()) || f.mods.is_operator => return None,
+            None => f.mods.is_mut || f.body.is_some() && analyze_fun(f, &HashSet::new(), &HashMap::new()).mutates_self,
+            Some(_) => return None,
+        };
+        all_ref &= !mutable;
+    }
+    Some(all_ref)
 }
 
 /// Does the method implement a method of one of the interfaces `supertypes` names (`override`,
@@ -1178,6 +1224,17 @@ fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
             ItemKind::Impl(imp) => {
                 let Some(owner) = impl_owner(k, imp, module) else { continue };
                 let trait_info = imp.trait_.as_ref().and_then(|t| t.last_name()).and_then(|n| k.traits.get(n)).cloned();
+                // an implementation for every `T`, or for boxes or references, leaves no room for
+                // the forwarding ones Oxie would add
+                let blanket = match &imp.self_ty {
+                    Type::Ref { .. } => true,
+                    t => t.last_name().is_some_and(|n| n == "Box" || imp.generics.params.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if name == n))),
+                };
+                if let (true, Some(t)) = (blanket, imp.trait_.as_ref().and_then(|t| t.last_name())) {
+                    if let Some(ti) = k.traits.get_mut(t) {
+                        ti.forward = None;
+                    }
+                }
                 if let Some(t) = imp.trait_.as_ref().and_then(|t| t.last_name()) {
                     if let Some(c) = k.classes.get_mut(&owner) {
                         c.interfaces.push(t.to_string());

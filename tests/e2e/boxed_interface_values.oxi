@@ -1,0 +1,39 @@
+// A boxed interface value (an element of a `Vec<Shape>` or `HashMap<K, Shape>`, a `Box<Shape>`)
+// is itself a `Shape`, and a reference to one an `&Shape`, however it is reached: Oxie adds
+// implementations for `Box<T>` and `&T` that call the value inside.
+import std.collections.HashMap
+
+interface Shape { fun area(): f64 }
+class Sq(side: f64) : Shape { override fun area() = side * side }
+
+interface Counter {
+    fun bump()
+    fun count(): i32
+}
+class Clicks(var n: i32 = 0) : Counter {
+    override fun bump() { n += 1 }
+    override fun count(): i32 = n
+}
+
+fun describe(s: &Shape) = println("area ${s.area()}")
+fun total(s: Shape): f64 = s.area()
+fun sum_all<T: Shape>(items: &[T]): f64 = items.iter().map { it.area() }.sum()
+fun bump_all(c: &mut Counter) { c.bump() }
+
+fun main() {
+    val shapes: Vec<Shape> = vec[Sq(1.0), Sq(2.0)]
+    describe(shapes[0])
+    shapes.iter().for_each { describe(it) }
+    if (val f = shapes.first()) describe(f)
+    var named: HashMap<String, Shape> = HashMap.new()
+    named.insert("a".to_string(), Sq(3.0))
+    if (val g = named.get("a")) describe(g)
+    describe(named["a"])
+    val b: Box<Shape> = Box.new(Sq(4.0))
+    println(total(b))
+    println(sum_all(&shapes))
+
+    var counters: Vec<Box<Counter>> = vec[Box.new(Clicks()), Box.new(Clicks(5))]
+    for (c in counters.iter_mut()) bump_all(c)
+    println(counters.iter().map { it.count() }.sum::<i32>())
+}
