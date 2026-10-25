@@ -1,0 +1,16 @@
+// An interface's supertypes may include a lifetime bound, as a Rust trait's do.
+interface Named : Clone + 'static {
+    fun name(): String
+
+    fun boxed(): Box<dyn std::any::Any> = Box.new(self.clone())
+}
+
+@derive(Clone)
+class Tab(title: String) : Named {
+    override fun name(): String = title.clone()
+}
+
+fun main() {
+    val t = Tab("main.rs".into())
+    println("${t.name()} ${t.boxed().is::<Tab>()}")
+}

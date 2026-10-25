@@ -1256,6 +1256,15 @@ impl<'a> Parser<'a> {
         if self.eat_punct(":") {
             loop {
                 self.skip_nl_only();
+                // `interface Ext : IntoElement + 'static`, a lifetime bound as in Rust
+                if let Tok::Lifetime(l) = self.tok().clone() {
+                    self.bump();
+                    out.push(Type::Lifetime(l));
+                    if !(self.eat_punct(",") || self.eat_punct("+")) {
+                        break;
+                    }
+                    continue;
+                }
                 let t = self.ty_path()?;
                 // Kotlin `Base()` super constructor call: ignore the parens
                 if self.is_punct("(") {
