@@ -1,4 +1,3 @@
-import std::collections::HashMap
 import std::fmt
 
 error enum BankError {
@@ -53,17 +52,17 @@ impl fmt::Display for Account {
 }
 
 class Bank {
-    var accounts: HashMap<String, Account> = HashMap()
-    var log: Vec<String> = vec[]
+    var accounts: [String: Account] = [:]
+    var log: [String] = []
 
-    fun open(id: &str, owner: &str, policy: Box<MonthlyPolicy>) {
-        accounts.insert(id.to_string(), Account(id.to_string(), owner.to_string(), policy = policy))
+    fun open(id: String, owner: String, policy: Box<MonthlyPolicy>) {
+        accounts[id.clone()] = Account(id, owner, policy = policy)
     }
 
     fun account(id: &str): &mut Account throws BankError =
         accounts.get_mut(id) ?: throw BankError.AccountNotFound(id.to_string())
 
-    fun transfer(from: &str, to: &str, amount: u64) throws BankError {
+    fun transfer(from: String, to: String, amount: u64) throws BankError {
         // check the destination first so a failed transfer changes nothing
         account(to)?.check_active()?
         account(from)?.withdraw(amount)?
@@ -72,7 +71,7 @@ class Bank {
     }
 
     fun report() {
-        var ids: Vec<&String> = accounts.keys().collect()
+        var ids = accounts.keys().to_list()
         ids.sort()
         for (id in ids) println("  ${accounts[id]}")
     }
@@ -83,7 +82,7 @@ fun main() {
     bank.open("A-1", "alice", Box.new(SavingsPolicy(2)))
     bank.open("B-2", "bob", Box.new(CheckingPolicy(5)))
 
-    val steps: Vec<(&str, &str, u64)> = vec[("A-1", "B-2", 0), ("B-2", "A-1", 10), ("A-1", "C-3", 5)]
+    val steps = [("A-1", "B-2", 0), ("B-2", "A-1", 10), ("A-1", "C-3", 5)]
     try {
         bank.account("A-1")?.deposit(500)?
         bank.account("B-2")?.deposit(100)?

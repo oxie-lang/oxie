@@ -1,4 +1,3 @@
-import std::collections::HashMap
 import lexer::tokenize
 import parser::{Expr, Parser}
 
@@ -9,7 +8,7 @@ error enum EvalError {
 }
 
 /// Evaluates an expression with the given variables.
-fun eval(e: &Expr, vars: &HashMap<String, f64>): f64 throws EvalError = when (e) {
+fun eval(e: &Expr, vars: [String: f64]): f64 throws EvalError = when (e) {
     Expr.Num(n) -> *n
     Expr.Var(name) -> vars.get(name).copied() ?: throw EvalError.UnknownVariable(name.clone())
     Expr.Neg(inner) -> -eval(inner, vars)?
@@ -36,18 +35,18 @@ fun eval(e: &Expr, vars: &HashMap<String, f64>): f64 throws EvalError = when (e)
     }
 }
 
-fun calculate(input: &str, vars: &HashMap<String, f64>): f64 throws {
+fun calculate(input: String, vars: [String: f64]): f64 throws {
     val tokens = tokenize(input)?
     val ast = Parser(tokens).parse()?
     eval(&ast, vars)?
 }
 
 fun main() {
-    val vars = mapOf("pi".to_string() to 3.14159, "x".to_string() to 4.0)
+    val vars: [String: f64] = ["pi": 3.14159, "x": 4.0]
     val inputs = listOf("1 + 2 * 3", "(1 + 2) * 3", "2 ^ 3 ^ 2", "-x + sqrt(16)", "pi * x ^ 2", "10 / (5 - 5)", "y + 1", "2 $ 3", "(1 + 2")
     for (input in inputs) {
         try {
-            val v = calculate(input, &vars)?
+            val v = calculate(input, vars)?
             println("$input = $v")
         } catch (e) {
             println("$input -> error: $e")

@@ -44,6 +44,11 @@ pub struct Parser<'a> {
     /// An error message template, where `$0` is the case's first positional field; elsewhere
     /// it is text (`"cost $5"`).
     positional: bool,
+    /// The next type is one Rust may leave unsized (after `&`, in `Box<..>`, a trait's
+    /// arguments, ...): `[T]` there is a slice, elsewhere a list (`Vec<T>`).
+    slice: bool,
+    /// The next path is a trait (in bounds and supertypes), whose type arguments may be slices.
+    trait_path: bool,
     /// Type names this file declares that don't look like types (`class DB`, `enum HTTP`).
     caps_types: std::collections::HashSet<String>,
 }
@@ -68,7 +73,7 @@ fn caps_type_names(toks: &[Token]) -> std::collections::HashSet<String> {
 pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
     let caps_types = caps_type_names(&toks);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types };
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types };
     let file = p.file();
     diags.append(&mut p.diags);
     (file, diags)
@@ -78,7 +83,7 @@ pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
 pub fn parse_expr_str(src: &str) -> (Expr, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
     let caps_types = caps_type_names(&toks);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types };
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types };
     let e = p.expr().unwrap_or(Expr::new(ExprKind::Error, Span::default()));
     diags.append(&mut p.diags);
     (e, diags)
@@ -648,7 +653,7 @@ impl<'a> Parser<'a> {
                 self.diags.push(Diag::error(span, format!("`{}` is already a context here", name)));
             }
             let pat = Pat::Ident { name, by_ref: false, mutable: false, sub: None, span };
-            out.push(Param { pat, ty, default: None, context: true, span: span.to(self.prev_span()) });
+            out.push(Param { pat, ty, default: None, context: true, lent: false, span: span.to(self.prev_span()) });
             if !self.eat_punct(",") {
                 self.expect_punct(")")?;
                 break;
@@ -828,7 +833,7 @@ impl<'a> Parser<'a> {
             self.expect_punct(":")?;
             let ty = self.ty()?;
             let default = if self.eat_punct("=") { Some(self.expr()?) } else { None };
-            params.push(Param { pat, ty, default, context: false, span: pstart.to(self.prev_span()) });
+            params.push(Param { pat, ty, default, context: false, lent: false, span: pstart.to(self.prev_span()) });
             if !self.eat_punct(",") {
                 self.expect_punct(")")?;
                 break;
@@ -999,6 +1004,8 @@ impl<'a> Parser<'a> {
                 }
                 g.where_clause.push(WherePred::Lifetime { name: l, bounds });
             } else {
+                // `where [T]: Ord`
+                self.slice = true;
                 let ty = self.ty()?;
                 self.expect_punct(":")?;
                 let bounds = self.bounds()?;
@@ -1035,6 +1042,7 @@ impl<'a> Parser<'a> {
                 self.ty_path()?;
                 out.push(Type::Raw(self.src[s..self.prev_span().end as usize].to_string()));
             } else {
+                self.trait_path = true;
                 out.push(self.ty_path()?);
             }
             if !self.eat_punct("+") {
@@ -1065,6 +1073,7 @@ impl<'a> Parser<'a> {
     }
 
     fn ty_base(&mut self, dots: bool) -> PResult<Type> {
+        let slice = std::mem::take(&mut self.slice);
         match self.tok().clone() {
             Tok::Punct("&") | Tok::Punct("&&") => {
                 let double = self.is_punct("&&");
@@ -1076,6 +1085,7 @@ impl<'a> Parser<'a> {
                     None
                 };
                 let mutable = self.eat_kw("mut");
+                self.slice = true;
                 let inner = self.ty_base(dots)?;
                 let inner = if self.is_punct("?") && !self.is_punct_at(1, ".") {
                     // `&T?` means Option<&T>: handled by caller; keep &T here
@@ -1094,6 +1104,7 @@ impl<'a> Parser<'a> {
                     self.eat_kw("const");
                     false
                 };
+                self.slice = true;
                 Ok(Type::Ptr { mutable, inner: Box::new(self.ty_base(dots)?) })
             }
             Tok::Punct("(") => {
@@ -1126,8 +1137,15 @@ impl<'a> Parser<'a> {
                 Ok(Type::Tuple(elems))
             }
             Tok::Punct("[") => {
+                let start = self.span();
                 self.bump();
                 let inner = self.ty()?;
+                // `[K: V]`, a map
+                if self.eat_punct(":") {
+                    let value = self.ty()?;
+                    self.expect_punct("]")?;
+                    return Ok(Type::map(inner, value, start.to(self.prev_span())));
+                }
                 if self.eat_punct(";") {
                     let s = self.toks[self.pos].span.start as usize;
                     let mut depth = 0;
@@ -1145,7 +1163,8 @@ impl<'a> Parser<'a> {
                     return Ok(Type::Array(Box::new(inner), len));
                 }
                 self.expect_punct("]")?;
-                Ok(Type::Slice(Box::new(inner)))
+                // a slice where Rust can take one, a list elsewhere
+                Ok(if slice { Type::Slice(Box::new(inner)) } else { Type::list(inner, start.to(self.prev_span())) })
             }
             Tok::Punct("!") => {
                 self.bump();
@@ -1153,12 +1172,18 @@ impl<'a> Parser<'a> {
             }
             Tok::Punct("<") => {
                 self.bump();
+                self.slice = true;
                 let ty = self.ty()?;
-                let trait_ = if self.eat_kw("as") { Some(Box::new(self.ty_path()?)) } else { None };
+                let trait_ = if self.eat_kw("as") {
+                    self.trait_path = true;
+                    Some(Box::new(self.ty_path()?))
+                } else {
+                    None
+                };
                 self.expect_punct(">")?;
                 let mut rest = Vec::new();
                 while self.eat_punct("::") {
-                    rest.push(self.path_seg(true, false)?);
+                    rest.push(self.path_seg(true, false, false)?);
                 }
                 Ok(Type::Qualified { ty: Box::new(ty), trait_, rest })
             }
@@ -1201,13 +1226,14 @@ impl<'a> Parser<'a> {
     fn ty_path_dots(&mut self, dots: bool) -> PResult<Type> {
         let start = self.span();
         let cast = std::mem::take(&mut self.cast_ty);
+        let is_trait = std::mem::take(&mut self.trait_path);
         let global = self.eat_punct("::");
-        let mut segs = vec![self.path_seg(false, cast)?];
+        let mut segs = vec![self.path_seg(false, cast, is_trait)?];
         loop {
             let dot_path = dots && self.is_punct(".") && matches!(self.tok_at(1), Tok::Ident(_)) && !self.is_punct_at(2, "(");
             if self.is_punct("::") || dot_path {
                 self.bump();
-                segs.push(self.path_seg(true, cast)?);
+                segs.push(self.path_seg(true, cast, is_trait)?);
             } else {
                 break;
             }
@@ -1215,9 +1241,12 @@ impl<'a> Parser<'a> {
         Ok(Type::Path { global, segs, span: start.to(self.prev_span()) })
     }
 
-    /// `cast`: a segment of the path after `as` (see `cast_ty`).
-    fn path_seg(&mut self, _after_sep: bool, cast: bool) -> PResult<PathSeg> {
+    /// `cast`: a segment of the path after `as` (see `cast_ty`). `is_trait`: the path is a trait,
+    /// whose type arguments may be unsized (`AsRef<[u8]>`).
+    fn path_seg(&mut self, _after_sep: bool, cast: bool, is_trait: bool) -> PResult<PathSeg> {
         let name = self.member_name()?;
+        // the pointers that hold slices: `Box<[T]>`, `Rc<[T]>`
+        let unsized_args = is_trait || matches!(name.as_str(), "Box" | "Rc" | "Arc" | "Cow" | "Weak");
         let mut seg = PathSeg::plain(name);
         if cast && self.is_punct("<") {
             let save = self.pos;
@@ -1233,7 +1262,7 @@ impl<'a> Parser<'a> {
             if self.is_punct("::") {
                 self.bump();
             }
-            seg.generics = Some(self.generic_args()?);
+            seg.generics = Some(self.generic_args_of(unsized_args)?);
         } else if self.is_punct("(") && matches!(seg.name.as_str(), "Fn" | "FnMut" | "FnOnce") {
             self.bump();
             let mut params = Vec::new();
@@ -1256,13 +1285,18 @@ impl<'a> Parser<'a> {
     }
 
     fn generic_args(&mut self) -> PResult<Vec<GenericArg>> {
+        self.generic_args_of(false)
+    }
+
+    /// `unsized_args`: the type's (or trait's) arguments may be slices.
+    fn generic_args_of(&mut self, unsized_args: bool) -> PResult<Vec<GenericArg>> {
         let fn_ret = std::mem::replace(&mut self.fn_ret, true);
-        let r = self.generic_args_inner();
+        let r = self.generic_args_inner(unsized_args);
         self.fn_ret = fn_ret;
         r
     }
 
-    fn generic_args_inner(&mut self) -> PResult<Vec<GenericArg>> {
+    fn generic_args_inner(&mut self, unsized_args: bool) -> PResult<Vec<GenericArg>> {
         self.expect_punct("<")?;
         let mut args = Vec::new();
         loop {
@@ -1277,6 +1311,8 @@ impl<'a> Parser<'a> {
                 Tok::Ident(n) if self.is_punct_at(1, "=") && !self.is_punct_at(1, "==") => {
                     self.bump();
                     self.bump();
+                    // `Deref<Target = [T]>`
+                    self.slice = unsized_args && n == "Target";
                     args.push(GenericArg::Binding(n, self.ty()?));
                 }
                 Tok::Int(n) => {
@@ -1292,7 +1328,10 @@ impl<'a> Parser<'a> {
                     let t = self.bump();
                     args.push(GenericArg::Const(format!("-{}", &self.src[t.span.start as usize..t.span.end as usize])));
                 }
-                _ => args.push(GenericArg::Type(self.ty()?)),
+                _ => {
+                    self.slice = unsized_args;
+                    args.push(GenericArg::Type(self.ty()?));
+                }
             }
             if !self.eat_punct(",") {
                 self.expect_punct(">")?;
@@ -1319,6 +1358,7 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 let start = self.span();
+                self.trait_path = true;
                 let t = self.ty_path()?;
                 // Kotlin's `Base(name)` super constructor call (reported, and the supertype left out)
                 if self.is_punct("(") {
@@ -1731,7 +1771,10 @@ impl<'a> Parser<'a> {
                     if self.is_kw("where") {
                         self.where_clause(&mut generics)?;
                     }
+                    // an associated type may be unsized: `type Target = [T]`
+                    self.slice = true;
                     let ty = if self.eat_punct("=") { self.ty()? } else { Type::Bounds(bounds) };
+                    self.slice = false;
                     if self.is_kw("where") {
                         self.where_clause(&mut generics)?;
                     }
@@ -1788,8 +1831,16 @@ impl<'a> Parser<'a> {
         self.bump(); // impl
         let mut generics = self.generics_opt()?;
         let negative = self.eat_punct("!");
+        // `impl AsRef<[u8]> for X`, `impl Display for [T]`: Rust's own types there
+        self.trait_path = true;
         let first = self.ty()?;
-        let (trait_, self_ty) = if self.eat_kw("for") { (Some(first), self.ty()?) } else { (None, first) };
+        self.trait_path = false;
+        let (trait_, self_ty) = if self.eat_kw("for") {
+            self.slice = true;
+            (Some(first), self.ty()?)
+        } else {
+            (None, first)
+        };
         if self.peek_past_newlines_kw("where") {
             self.where_clause(&mut generics)?;
         }
@@ -2754,9 +2805,16 @@ impl<'a> Parser<'a> {
             Tok::Punct("(") => self.paren_or_lambda(),
             Tok::Punct("[") => {
                 self.bump();
+                // `[:]`, the empty map
+                if self.is_punct(":") && self.is_punct_at(1, "]") {
+                    self.bump();
+                    self.bump();
+                    return Ok(Expr::new(ExprKind::MapLit(Vec::new()), start.to(self.prev_span())));
+                }
                 let saved = self.no_struct;
                 self.no_struct = false;
                 let mut elems = Vec::new();
+                let mut map = false;
                 loop {
                     if self.eat_punct("]") {
                         break;
@@ -2768,6 +2826,18 @@ impl<'a> Parser<'a> {
                         self.no_struct = saved;
                         return Ok(Expr::new(ExprKind::ArrayRepeat(Box::new(e), Box::new(n)), start.to(self.prev_span())));
                     }
+                    // `["a": 1, "b": 2]`, a map of the pairs
+                    if elems.is_empty() && self.is_punct(":") {
+                        map = true;
+                    }
+                    let e = if map {
+                        self.expect_punct(":")?;
+                        let value = self.expr()?;
+                        let span = e.span.to(value.span);
+                        Expr::new(ExprKind::Pair(Box::new(e), Box::new(value)), span)
+                    } else {
+                        e
+                    };
                     elems.push(e);
                     if !self.eat_punct(",") {
                         self.expect_punct("]")?;
@@ -2775,7 +2845,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.no_struct = saved;
-                Ok(Expr::new(ExprKind::Array(elems), start.to(self.prev_span())))
+                let kind = if map { ExprKind::MapLit(elems) } else { ExprKind::Array(elems) };
+                Ok(Expr::new(kind, start.to(self.prev_span())))
             }
             Tok::Punct("{") => self.lambda_braces(),
             Tok::Punct("|") | Tok::Punct("||") => self.rust_closure(false, start),
@@ -2993,7 +3064,7 @@ impl<'a> Parser<'a> {
                 StrPart::Interp { src: s, offset, spec } => {
                     let (toks, mut diags) = lexer::lex_at(&s, offset);
                     self.diags.append(&mut diags);
-                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types: self.caps_types.clone() };
+                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types: self.caps_types.clone() };
                     let e = sub.expr();
                     if e.is_ok() && !matches!(sub.tok(), Tok::Newline | Tok::Eof) {
                         let sp = sub.span();

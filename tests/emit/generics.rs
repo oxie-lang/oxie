@@ -28,7 +28,6 @@ pub(crate) struct Square {
 }
 
 impl Square {
-    #[allow(dead_code)]
     pub(crate) fn new(side: f64) -> Self {
         Self {
             side,

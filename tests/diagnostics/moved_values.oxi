@@ -9,7 +9,7 @@ fun release(guards: Vec<MutexGuard<i32>>) = println("releasing ${guards.len()}")
 
 class Token(val text: String)
 
-pub fun show(t: Token) = println(t.text)                 // `pub`: keeps its parameter type
+fun show(t: Token) = println(t.text)                     // used as a value: keeps its parameter type
 
 fun main() {
     val m = Mutex::new(0)
@@ -30,4 +30,5 @@ fun main() {
     // error: 28: fix: give the lambda its own copy of `name`
     // not: 28: let value
     h.join().unwrap()
+    vec[Token("b".to_string())].into_iter().for_each(show)
 }

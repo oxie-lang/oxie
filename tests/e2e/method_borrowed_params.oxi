@@ -1,0 +1,69 @@
+// Methods lend the parameters they only read, like functions, when Oxie resolves every call
+// that may reach them: callers keep their values. A method that keeps the value, implements an
+// interface, is called after `?.` or uses the value in Rust code keeps the declared type.
+import std::path::PathBuf
+
+interface Named {
+    fun named(prefix: String): String
+}
+
+data class Item(name: String, price: f64) {
+    companion object {
+        fun free(name: String): Item = Item(name, 0.0)
+    }
+}
+
+class Shop(owner: String) : Named {
+    var items: [Item] = []
+
+    // only read: lent
+    fun has(name: String): bool = items.any { it.name == name }
+    fun total_of(wanted: [String]): f64 = items.filter { wanted.contains(&it.name) }.sum_of { it.price }
+    fun describe(item: Item): String = "${item.name} for ${item.price}"
+    fun count(stock: [String: i32]): i32 = stock.values().sum()
+    fun shout(word: String): String = loud(word) // passed on to a lent parameter
+    fun loud(word: String): String = word.to_uppercase()
+    fun location(path: PathBuf): String = "${path.display()}"
+    pub fun public_read(text: String): usize = text.len() // a program: `pub` too
+
+    // kept owned
+    fun add(item: Item) = items.push(item)
+    fun rename(name: String): Item = Item { name, price: 0.0 }
+    fun raw_len(text: String): usize = rust { text.len() }
+    override fun named(prefix: String): String = "$prefix $owner"
+    fun label(text: String): String = "[$text]"
+}
+
+shared class Log {
+    var lines: [String] = []
+    fun has(line: String): bool = lines.any { it == line }
+    fun add(line: String) = lines.push(line)
+}
+
+fun main() {
+    var shop = Shop("ada")
+    val pen = Item("pen", 1.5)
+    shop.add(pen.clone())
+    shop.add(Item("ink", 3.0))
+    val n = "pen".to_string()
+    val wanted = ["pen".to_string()]
+    val stock: [String: i32] = ["a": 1, "b": 2]
+    val w = "hey".to_string()
+    val p = PathBuf.from("/tmp/x")
+    val t = "abc".to_string()
+    println("${shop.has(n)} ${shop.total_of(wanted)} ${shop.describe(pen)} ${shop.count(stock)}")
+    println("${shop.shout(w)} ${shop.location(p)} ${shop.public_read(t)}")
+    // still the caller's
+    println("$n ${wanted.len()} ${pen.name} ${stock.len()} $w ${p.display()} $t")
+    // a value made by a call is lent too, also one whose type Oxie doesn't know
+    println(shop.describe(Item.free("cup".to_string())))
+    println(shop.location(PathBuf.from("/tmp/y")))
+    println("${shop.rename("cup".to_string()).name} ${shop.raw_len("four".to_string())} ${shop.named("shop".to_string())}")
+    val maybe: Shop? = Shop("bob")
+    println(maybe?.label("x".to_string()) ?: "-")
+
+    val log = Log()
+    val line = "hello".to_string()
+    log.add(line.clone())
+    println("${log.has(line)} $line")
+}

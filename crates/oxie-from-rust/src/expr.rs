@@ -453,6 +453,10 @@ impl Printer<'_> {
                     return self.str_literal(s);
                 }
             }
+            // `Vec::new()` for a declared list: `[]`
+            if vec_elem(t).is_some() && matches!(e, syn::Expr::Call(c) if c.args.is_empty() && matches!(&*c.func, syn::Expr::Path(p) if p.qself.is_none() && tok(&p.path).replace(' ', "") == "Vec::new")) {
+                return "[]".into();
+            }
         }
         match e {
             syn::Expr::Array(a) => {
@@ -882,7 +886,7 @@ impl Printer<'_> {
         if let syn::Expr::Path(p) = &*c.func {
             let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
             let no_args = p.path.segments.iter().all(|s| s.arguments.is_empty());
-            // `HashMap::from([(k, v)])` → `mapOf(k to v)`, `HashSet::from([a])` → `setOf(a)`
+            // `HashMap::from([(k, v)])` → `[k: v]`, `HashSet::from([a])` → `setOf(a)`
             let std_path = segs.len() == 2 || (segs.len() == 4 && segs[0] == "std" && segs[1] == "collections");
             if p.qself.is_none() && no_args && std_path && segs.last().is_some_and(|l| l == "from") && c.args.len() == 1 && !self.info.structs.contains_key(&segs[segs.len() - 2]) {
                 if let syn::Expr::Array(arr) = &c.args[0] {
@@ -893,10 +897,10 @@ impl Printer<'_> {
                                 .iter()
                                 .map(|e| {
                                     let syn::Expr::Tuple(t) = e else { unreachable!() };
-                                    format!("{} to {}", self.postfix(&t.elems[0]), self.postfix(&t.elems[1]))
+                                    format!("{}: {}", self.expr(&t.elems[0]), self.expr(&t.elems[1]))
                                 })
                                 .collect();
-                            return format!("mapOf({})", pairs.join(", "));
+                            return format!("[{}]", pairs.join(", "));
                         }
                         "HashSet" => {
                             let v: Vec<String> = arr.elems.iter().map(|e| self.expr(e)).collect();
@@ -916,6 +920,8 @@ impl Printer<'_> {
                         expects = si.new_params.iter().cloned().map(Some).collect();
                         func = Some(id(&p.path.segments[0].ident));
                     }
+                } else if c.args.is_empty() && segs[0] == "HashMap" && self.info.std_collections.contains("HashMap") {
+                    return "[:]".into();
                 } else if c.args.is_empty() && ["HashMap", "HashSet", "BTreeMap", "BTreeSet", "String", "VecDeque", "Vec"].contains(&segs[0].as_str()) {
                     return format!("{}()", segs[0]);
                 }
@@ -1062,6 +1068,14 @@ impl Printer<'_> {
                 other => root = Some(self.postfix(other)),
             }
             prefix = ".".into();
+        }
+        // `collect::<Vec<_>>()` is `to_list()`
+        if name == "collect" && m.args.is_empty() && m.turbofish.as_ref().is_some_and(|t| t.args.len() == 1 && tok(&t.args[0]).replace(' ', "") == "Vec<_>") {
+            let call = format!("{}to_list()", prefix);
+            return match root {
+                Some(r) => (r, segs, Some(call)),
+                None => (call, segs, None),
+            };
         }
         let turbofish = m.turbofish.as_ref().map(|t| self.generic_args(t)).unwrap_or_default();
         let mut args: Vec<&syn::Expr> = m.args.iter().collect();
@@ -1850,17 +1864,19 @@ impl Printer<'_> {
 
     fn vec_macro(&mut self, m: &syn::Macro, ctx: &Ctx) -> Option<String> {
         let elem = ctx.expect.as_ref().and_then(vec_elem).cloned();
+        // for a declared list, a list literal: Oxie gives it that type
+        let vec = if elem.is_some() { "" } else { "vec" };
         if let Ok(rep) = m.parse_body_with(|input: syn::parse::ParseStream| {
             let a: syn::Expr = input.parse()?;
             input.parse::<syn::Token![;]>()?;
             let b: syn::Expr = input.parse()?;
             Ok((a, b))
         }) {
-            return Some(format!("vec[{}; {}]", self.expr(&rep.0), self.expr(&rep.1)));
+            return Some(format!("{}[{}; {}]", vec, self.expr(&rep.0), self.expr(&rep.1)));
         }
         let args = macro_args(m)?;
         let v: Vec<String> = args.iter().map(|a| self.ex(a, &Ctx::expect(elem.as_ref()))).collect();
-        Some(format!("vec{}", bracket_list(&v)))
+        Some(format!("{}{}", vec, bracket_list(&v)))
     }
 
     // ------------------------------------------------------------------ patterns

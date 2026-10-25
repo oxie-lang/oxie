@@ -13,6 +13,7 @@ pub mod fields;
 pub mod format;
 pub mod infer;
 pub mod lexer;
+pub mod lists;
 pub mod lower;
 pub mod lower_expr;
 pub mod params;

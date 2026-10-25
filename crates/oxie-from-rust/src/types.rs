@@ -93,6 +93,8 @@ pub fn tok<T: ToTokens>(t: &T) -> String {
 
 impl Printer<'_> {
     pub fn ty(&self, t: &syn::Type) -> String {
+        // where Oxie reads `[T]` as a slice, a `Vec<T>` keeps its name
+        let slice = self.slice_here.take();
         match t {
             syn::Type::Path(p) => {
                 if p.qself.is_none() {
@@ -103,6 +105,13 @@ impl Printer<'_> {
                     }
                     if is_any_error(t) {
                         return "AnyError".into();
+                    }
+                    // `[T]` for a list, `[K: V]` for std's map
+                    if let Some(elem) = self.list_elem(&p.path).filter(|_| !slice) {
+                        return format!("[{}]", self.ty(elem));
+                    }
+                    if let Some((k, v)) = self.std_map(&p.path) {
+                        return format!("[{}: {}]", self.ty(k), self.ty(v));
                     }
                 }
                 self.type_path(p.qself.as_ref(), &p.path)
@@ -123,10 +132,16 @@ impl Printer<'_> {
                         return s;
                     }
                 }
+                self.slice_here.set(true);
                 s.push_str(&self.ty(&r.elem));
                 s
             }
-            syn::Type::Slice(s) => format!("[{}]", self.ty(&s.elem)),
+            syn::Type::Slice(s) => {
+                if !slice {
+                    self.slice_by_value.set(true);
+                }
+                format!("[{}]", self.ty(&s.elem))
+            }
             syn::Type::Array(a) => format!("[{}; {}]", self.ty(&a.elem), self.rust_expr_inline(&a.len)),
             syn::Type::Tuple(t) => {
                 let v: Vec<String> = t.elems.iter().map(|e| self.ty(e)).collect();
@@ -136,11 +151,20 @@ impl Printer<'_> {
                     format!("({})", v.join(", "))
                 }
             }
-            syn::Type::Ptr(p) => format!("*{} {}", if p.mutability.is_some() { "mut" } else { "const" }, self.ty(&p.elem)),
+            syn::Type::Ptr(p) => {
+                self.slice_here.set(true);
+                format!("*{} {}", if p.mutability.is_some() { "mut" } else { "const" }, self.ty(&p.elem))
+            }
             syn::Type::ImplTrait(i) => format!("impl {}", self.bounds(&i.bounds)),
             syn::Type::TraitObject(o) => format!("dyn {}", self.bounds(&o.bounds)),
-            syn::Type::Paren(p) => format!("({})", self.ty(&p.elem)),
-            syn::Type::Group(g) => self.ty(&g.elem),
+            syn::Type::Paren(p) => {
+                self.slice_here.set(slice);
+                format!("({})", self.ty(&p.elem))
+            }
+            syn::Type::Group(g) => {
+                self.slice_here.set(slice);
+                self.ty(&g.elem)
+            }
             syn::Type::Never(_) => "!".into(),
             syn::Type::Infer(_) => "_".into(),
             syn::Type::BareFn(f) => {
@@ -179,7 +203,45 @@ impl Printer<'_> {
         tok(t)
     }
 
+    /// The element type of `Vec<T>` (`std::vec::Vec<T>`), unless the file declares a `Vec`.
+    fn list_elem<'p>(&self, path: &'p syn::Path) -> Option<&'p syn::Type> {
+        let names: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let is_vec = match names.as_slice() {
+            [v] => v == "Vec" && !self.info.structs.contains_key("Vec") && path.leading_colon.is_none(),
+            [k, m, v] => (k == "std" || k == "alloc") && m == "vec" && v == "Vec",
+            _ => false,
+        };
+        match &path.segments.last()?.arguments {
+            syn::PathArguments::AngleBracketed(a) if is_vec && a.args.len() == 1 => match &a.args[0] {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The key and value types of std's `HashMap<K, V>` (imported, or by its whole path), which
+    /// Oxie writes `[K: V]`.
+    fn std_map<'p>(&self, path: &'p syn::Path) -> Option<(&'p syn::Type, &'p syn::Type)> {
+        let names: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let is_std = match names.as_slice() {
+            [m] => m == "HashMap" && self.info.std_collections.contains("HashMap") && path.leading_colon.is_none(),
+            [s, c, m] => s == "std" && c == "collections" && m == "HashMap",
+            [s, c, h, m] => s == "std" && c == "collections" && h == "hash_map" && m == "HashMap",
+            _ => false,
+        };
+        match &path.segments.last()?.arguments {
+            syn::PathArguments::AngleBracketed(a) if is_std && a.args.len() == 2 => match (&a.args[0], &a.args[1]) {
+                (syn::GenericArgument::Type(k), syn::GenericArgument::Type(v)) => Some((k, v)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn type_path(&self, qself: Option<&syn::QSelf>, path: &syn::Path) -> String {
+        // a trait's type arguments may be slices (`AsRef<[u8]>`)
+        let is_trait = self.trait_args.take();
         if qself.is_none() {
             if let Some(s) = crate::oxie_aux::strip_runtime_path(path) {
                 return s;
@@ -190,13 +252,14 @@ impl Printer<'_> {
         let mut start = 0;
         if let Some(q) = qself {
             s.push('<');
+            self.slice_here.set(true);
             s.push_str(&self.ty(&q.ty));
             if q.position > 0 {
                 s.push_str(" as ");
                 if path.leading_colon.is_some() {
                     s.push_str("::");
                 }
-                let tr: Vec<String> = segs[..q.position].iter().map(|seg| self.path_segment(seg)).collect();
+                let tr: Vec<String> = segs[..q.position].iter().map(|seg| self.path_segment_of(seg, true)).collect();
                 s.push_str(&tr.join("::"));
             }
             s.push('>');
@@ -210,17 +273,24 @@ impl Printer<'_> {
         if path.leading_colon.is_some() && !segs.first().is_some_and(|f| f.ident == "std" || f.ident == "core" || f.ident == "alloc") {
             s.push_str("::");
         }
-        let v: Vec<String> = segs[start..].iter().map(|seg| self.path_segment(seg)).collect();
+        let v: Vec<String> = segs[start..].iter().map(|seg| self.path_segment_of(seg, is_trait)).collect();
         s.push_str(&v.join("::"));
         s
     }
 
     pub fn path_segment(&self, seg: &syn::PathSegment) -> String {
+        self.path_segment_of(seg, false)
+    }
+
+    /// `is_trait`: the segment is a trait's, whose type arguments may be slices.
+    fn path_segment_of(&self, seg: &syn::PathSegment, is_trait: bool) -> String {
         let mut s = id(&seg.ident);
         match &seg.arguments {
             syn::PathArguments::None => {}
             syn::PathArguments::AngleBracketed(a) => {
-                s.push_str(&self.generic_args(a));
+                // the pointers that hold slices: `Box<[T]>`, `Rc<[T]>`
+                let unsized_args = is_trait || matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc" | "Cow" | "Weak");
+                s.push_str(&self.generic_args_of(a, unsized_args));
             }
             syn::PathArguments::Parenthesized(p) => {
                 let ins: Vec<String> = p.inputs.iter().map(|t| self.ty(t)).collect();
@@ -234,11 +304,20 @@ impl Printer<'_> {
     }
 
     pub fn generic_args(&self, a: &syn::AngleBracketedGenericArguments) -> String {
+        self.generic_args_of(a, false)
+    }
+
+    /// `unsized_args`: the arguments are a pointer's or a trait's, where Oxie reads `[T]` as a
+    /// slice.
+    fn generic_args_of(&self, a: &syn::AngleBracketedGenericArguments, unsized_args: bool) -> String {
         let v: Vec<String> = a
             .args
             .iter()
             .map(|g| match g {
-                syn::GenericArgument::Type(t) => self.ty(t),
+                syn::GenericArgument::Type(t) => {
+                    self.slice_here.set(unsized_args);
+                    self.ty(t)
+                }
                 syn::GenericArgument::Lifetime(l) => l.to_string(),
                 syn::GenericArgument::Const(e) => {
                     let s = self.rust_expr_inline(e);
@@ -250,6 +329,8 @@ impl Printer<'_> {
                 }
                 syn::GenericArgument::AssocType(at) => {
                     let g = at.generics.as_ref().map(|g| self.generic_args(g)).unwrap_or_default();
+                    // `Deref<Target = [T]>`
+                    self.slice_here.set(unsized_args && at.ident == "Target");
                     format!("{}{} = {}", at.ident, g, self.ty(&at.ty))
                 }
                 syn::GenericArgument::Constraint(c) => format!("{}: {}", c.ident, self.bounds(&c.bounds)),
@@ -278,6 +359,7 @@ impl Printer<'_> {
                 if let syn::TraitBoundModifier::Maybe(_) = t.modifier {
                     s.push('?');
                 }
+                self.trait_args.set(true);
                 s.push_str(&self.type_path(None, &t.path));
                 if t.paren_token.is_some() {
                     s.push(')');
@@ -342,6 +424,8 @@ impl Printer<'_> {
                         s.push_str(&tok(l));
                         s.push(' ');
                     }
+                    // `where [T]: Ord`
+                    self.slice_here.set(true);
                     s.push_str(&format!("{}: {}", self.ty(&t.bounded_ty), self.bounds(&t.bounds)));
                     s
                 }

@@ -39,9 +39,9 @@ x86-64), which also has checksums. `cargo install` compiles it, which takes a mi
 Running the same command again updates `oxie`.
 
 New projects and scripts depend on the `oxie-build` release from crates.io that matches the
-installed `oxie` (`oxie-build = "0.2.0"` for `oxie` 0.2.0). After updating `oxie`, set the
+installed `oxie` (`oxie-build = "0.3.0"` for `oxie` 0.3.0). After updating `oxie`, set the
 same version in a project's Cargo.toml (`oxie` warns when the two differ); within one release
-series, such as 0.2.x, `cargo update -p oxie-build` is enough.
+series, such as 0.3.x, `cargo update -p oxie-build` is enough.
 
 ### Working on Oxie
 
@@ -127,7 +127,7 @@ fixes:
 | no method `size`, `toUpperCase`, ... (E0599) | the Rust name (`len`, `to_uppercase`) |
 | no method `is_not_empty` on text, where rustc suggests `is_empty` (E0599) | `!value.is_empty()`: a name that means the opposite of the one called is never the fix |
 | a list operation on text (E0599) | says it is one of Oxie's list operations, instead of suggesting to implement the runtime's `ListOps` |
-| a list operation on an iterator (E0599) | call it on the list (`xs.map_indexed { }` for `xs.iter().map_indexed { }`), or collect the iterator into a list first (`s.chars().collect::<Vec<_>>().join_to_string("")`) when its items aren't references into a list; never rustc's similar name (`is_sorted` for `sorted`) |
+| a list operation on an iterator (E0599) | call it on the list (`xs.map_indexed { }` for `xs.iter().map_indexed { }`), or collect the iterator into a list first (`s.chars().to_list().join_to_string("")`) when its items aren't references into a list; never rustc's similar name (`is_sorted` for `sorted`) |
 | trait / type not imported (E0599, E0433, E0412) | `import` the suggested path |
 | unused `var` | declare it with `val` |
 | an ignored error, from a call that can fail used as a statement in a function that doesn't throw | add `throws` to the function, or `.unwrap()` |
@@ -277,7 +277,12 @@ fun parse_point(s: &str): Point throws {
   `T?` and `None` is `null`; `match` is `when`; `if let Some(x) = e` is `if (val x = e)`.
 * `format!`, `println!` and friends use string templates; closures become lambdas (`{ it * 2 }`
   for simple one-parameter bodies) and move outside the parentheses when last; `vec![..]`,
-  `HashMap::from([(k, v)])` and `HashSet::from([..])` become `vec[..]`, `mapOf(k to v)` and `setOf(..)`.
+  `HashMap::from([(k, v)])` and `HashSet::from([..])` become `vec[..]` (`[..]` for a declared
+  list), `[k: v]` and `setOf(..)`, `HashMap::new()` becomes `[:]`, and `.collect::<Vec<_>>()`
+  becomes `.to_list()`.
+* `Vec<T>` is written `[T]` and std's `HashMap<K, V>` `[K: V]`. `Vec<T>` stays where Oxie reads
+  `[T]` as a slice (`&mut Vec<T>`, `Arc<Vec<T>>`), and an item with a slice type Oxie can't write
+  (`type Bytes = [u8]`) is kept as Rust.
 * Receivers, `self.`, `Type::new` and literal `.to_string()`s are dropped where Oxie restores
   them, and a call to a function that a method of the same name hides in Oxie becomes
   `self::name(..)`. The translation is compiled with the Oxie compiler before it is printed:
@@ -378,7 +383,7 @@ other than lints, such as `#![cfg_attr(windows, windows_subsystem = "windows")]`
 ## Project layout
 
 ```
-Cargo.toml          [build-dependencies] oxie-build = "0.2.0"
+Cargo.toml          [build-dependencies] oxie-build = "0.3.0"
 build.rs            fn main() { oxie_build::compile(); }
 src/main.rs         include!(concat!(env!("OUT_DIR"), "/oxie/main.rs"));
 src/main.oxi        crate root (src/lib.oxi for libraries)

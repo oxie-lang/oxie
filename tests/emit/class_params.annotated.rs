@@ -14,7 +14,6 @@ pub(crate) struct User {
 }
 
 impl User {
-    #[allow(dead_code)]
     pub(crate) fn new(name: String, age: i32) -> Self {
         Self {
             name,
@@ -34,7 +33,6 @@ pub(crate) struct Node {
 }
 
 impl Node {
-    #[allow(dead_code)]
     pub(crate) fn new(label: String) -> Self {
         Self {
             label,

@@ -12,13 +12,13 @@ error enum TodoError {
 }
 
 /// Stores tasks in a simple tab-separated text file.
-class TodoList(path: PathBuf, tasks: Vec<Task> = vec[]) {
+class TodoList(path: PathBuf, tasks: [Task] = []) {
     companion object {
         fun load(path: PathBuf): TodoList throws {
             var list = TodoList(path.clone())
             if (path.exists()) {
                 for (line in fs.read_to_string(&path).context("reading ${path.display()}")?.lines()) {
-                    val parts: Vec<&str> = line.splitn(3, '\t').collect()
+                    val parts = line.splitn(3, '\t').to_list()
                     if (parts.len() != 3) continue
                     list.tasks.push(Task(parts[0].parse()?, parts[2].to_string(), parts[1] == "x"))
                 }
@@ -32,9 +32,9 @@ class TodoList(path: PathBuf, tasks: Vec<Task> = vec[]) {
         fs.write(&path, text)?
     }
 
-    fun add(title: &str): u32 {
+    fun add(title: String): u32 {
         val id = tasks.iter().map { it.id }.max().unwrap_or(0) + 1
-        tasks.push(Task(id, title.to_string()))
+        tasks.push(Task(id, title))
         id
     }
 
@@ -63,25 +63,25 @@ class TodoList(path: PathBuf, tasks: Vec<Task> = vec[]) {
     }
 }
 
-fun arg_id(args: &[String]): u32 throws {
-    val text = args.get(2) ?: throw TodoError.MissingArgument("task id".to_string())
+fun arg_id(args: [String]): u32 throws {
+    val text = args.get(2) ?: throw TodoError.MissingArgument("task id")
     text.parse()?
 }
 
 fun main() throws {
-    val args: Vec<String> = env.args().collect()
+    val args = env.args().to_list()
     val path = env.var("TODO_FILE").map(PathBuf.from).unwrap_or(PathBuf.from("todo.txt"))
     var list = TodoList.load(path)?
     val cmd = args.get(1).map { it.as_str() } ?: "list"
     when (cmd) {
         "add" -> {
             val title = args[2..].join(" ")
-            if (title.is_empty()) throw TodoError.MissingArgument("task title".to_string())
-            val id = list.add(&title)
+            if (title.is_empty()) throw TodoError.MissingArgument("task title")
+            val id = list.add(title)
             println("Added task $id")
         }
-        "done" -> list.complete(arg_id(&args)?)?
-        "remove" -> list.remove(arg_id(&args)?)?
+        "done" -> list.complete(arg_id(args)?)?
+        "remove" -> list.remove(arg_id(args)?)?
         "clear" -> list.tasks.clear()
         "list" -> {}
         else -> throw TodoError.BadCommand(cmd.to_string())

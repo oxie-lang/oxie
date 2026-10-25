@@ -18,7 +18,6 @@ pub(crate) struct Inventory {
 }
 
 impl Inventory {
-    #[allow(dead_code)]
     pub(crate) fn new(items: Vec<String>) -> Self {
         Self {
             items,

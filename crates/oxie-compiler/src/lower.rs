@@ -1,6 +1,7 @@
 //! Lowering from the Oxie AST to Rust source text.
 
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diag::{Diag, Span};
@@ -22,6 +23,25 @@ pub(crate) const P_POSTFIX: u8 = 14;
 pub(crate) const P_PRIMARY: u8 = 15;
 
 pub const RT: &str = "crate::__oxie";
+
+/// The items of Rust's prelude that generated code names.
+const STD_PRELUDE: &[&str] = &[
+    "std::clone::Clone",
+    "std::marker::Copy",
+    "std::cmp::PartialEq",
+    "std::cmp::Eq",
+    "std::cmp::PartialOrd",
+    "std::cmp::Ord",
+    "std::default::Default",
+    "std::convert::From",
+    "std::convert::Into",
+    "std::result::Result",
+    "std::option::Option",
+    "std::boxed::Box",
+    "std::vec::Vec",
+    "std::string::String",
+    "std::iter::Iterator",
+];
 
 /// Rust keywords that are valid identifiers in Oxie and need `r#`.
 const RUST_ONLY_KEYWORDS: &[&str] = &[
@@ -320,6 +340,26 @@ pub struct Lowerer<'a> {
     /// typed as an Oxie interface are `Box<dyn I>` there, which keeps the interface usable as
     /// `dyn` (an `impl I` would make the method generic).
     pub(crate) iface_sig: bool,
+    /// The methods called where Oxie can't tell which method the call reaches (on a value of
+    /// unknown type, after `?.`, through a path it can't follow): such a call passes its
+    /// arguments as written, so methods of these names keep their parameters' types (see
+    /// `params::borrow_method_params`).
+    pub unresolved: HashSet<String>,
+    /// The words of the file's source and the modules declared beside it: generated code names
+    /// a std item by its short name only where none of them can shadow it. `None` keeps full
+    /// paths.
+    pub source_words: Option<HashSet<String>>,
+    /// The std items generated code names through `use` lines at the top of the file.
+    std_uses: RefCell<BTreeSet<String>>,
+    /// How deep the lowering is in `mod` and `object` blocks, which the file's `use` lines don't
+    /// reach.
+    inline_depth: usize,
+    /// What the generated code calls: methods and accessors by name, constructors as `Class::new`.
+    pub calls: HashSet<String>,
+    /// What the whole crate calls (the `calls` of an earlier lowering and the calls in Rust code),
+    /// when known: generated accessors nobody calls are left out, and generated items that are
+    /// called lose their `#[allow(dead_code)]`.
+    pub crate_calls: Option<&'a HashSet<String>>,
 }
 
 /// The `#[cfg(..)]` attributes among `attrs`, each followed by a space.
@@ -452,7 +492,59 @@ impl<'a> Lowerer<'a> {
             impl_params: Vec::new(),
             in_trait_items: false,
             iface_sig: false,
+            unresolved: HashSet::new(),
+            source_words: None,
+            std_uses: RefCell::new(BTreeSet::new()),
+            inline_depth: 0,
+            calls: HashSet::new(),
+            crate_calls: None,
         }
+    }
+
+    /// How generated code names the std item `path` (`std::rc::Rc`). Where nothing in the file
+    /// can shadow the name, by the name, as hand-written Rust does: items of Rust's prelude as
+    /// they are, `fmt` and `process` items through their module (`fmt::Display`), and others
+    /// imported by a `use` at the top of the file. Elsewhere, by the full path.
+    pub(crate) fn std_name(&self, path: &str) -> String {
+        let full = format!("::{}", path);
+        let Some(words) = &self.source_words else { return full };
+        let segs: Vec<&str> = path.split("::").collect();
+        let name = segs[segs.len() - 1];
+        if STD_PRELUDE.contains(&path) {
+            return if words.contains(name) || self.has_globs() { full } else { name.to_string() };
+        }
+        let (word, import, short) = match segs.as_slice() {
+            ["std", m @ ("fmt" | "process"), n] => (*m, format!("std::{}", m), format!("{}::{}", m, n)),
+            _ => (name, path.to_string(), name.to_string()),
+        };
+        let mut uses = self.std_uses.borrow_mut();
+        // another item under the same name (`fmt::Result` beside `Result`) keeps its path
+        let clash = uses.iter().any(|u| u != &import && u.rsplit("::").next() == Some(word));
+        if self.inline_depth > 0 || words.contains(word) || clash {
+            return full;
+        }
+        uses.insert(import);
+        short
+    }
+
+    /// The runtime item `name` (`AnyError`), by the name the prelude gives it where nothing in
+    /// the file can shadow it.
+    pub(crate) fn rt_name(&self, name: &str) -> String {
+        match &self.source_words {
+            Some(words) if !words.contains(name) && !self.has_globs() => name.to_string(),
+            _ => format!("{}::{}", RT, name),
+        }
+    }
+
+    /// Does the file import everything from somewhere (`import shapes.*`)? Names imported that
+    /// way shadow those of the preludes.
+    fn has_globs(&self) -> bool {
+        self.k.globs.get(&self.module).is_some_and(|g| !g.is_empty()) || self.local_imports.iter().any(|(n, _)| n == "*")
+    }
+
+    /// Does the crate call `name` (a method, or `Class::new`)? False when that isn't known.
+    pub(crate) fn crate_calls(&self, name: &str) -> bool {
+        self.crate_calls.is_some_and(|c| c.contains(name))
     }
 
     pub(crate) fn error(&mut self, span: Span, msg: impl Into<String>) {
@@ -559,6 +651,7 @@ impl<'a> Lowerer<'a> {
         self.e.w("#[allow(unused_imports)]\nuse crate::__oxie::prelude::*;");
         self.e.nl();
         self.ext_imports();
+        let uses_at = self.e.line();
         // imports first so path roots are known
         for it in &file.items {
             if let ItemKind::Import(i) = &it.kind {
@@ -590,11 +683,34 @@ impl<'a> Lowerer<'a> {
         let n = self.module.len();
         let children = self.k.module_paths.iter().filter(|p| p.len() == n + 1 && p[..n] == self.module[..]).map(|p| p[n].clone());
         self.path_roots.extend(children.collect::<Vec<_>>());
+        // the modules declared beside the items can shadow std's names too
+        if let Some(words) = &mut self.source_words {
+            words.extend(self.k.module_paths.iter().filter(|p| p.len() > n && p[..n] == self.module[..]).map(|p| p[n].clone()));
+            words.insert("__oxie".into());
+        }
         for it in &file.items {
             self.e.nl();
             self.item(it, ItemCtx::Top);
         }
         self.emit_tests();
+        // `use std::hash::{Hash, Hasher};`, for the names the text uses (a type can be written
+        // out only to be compared)
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let words: HashSet<&str> = self.e.buf.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+        for u in self.std_uses.borrow().iter() {
+            let (parent, name) = u.rsplit_once("::").unwrap_or(("", u));
+            if !words.contains(name) {
+                continue;
+            }
+            groups.entry(parent.to_string()).or_default().push(name.to_string());
+        }
+        let mut uses: Vec<String> = groups
+            .iter()
+            .map(|(parent, names)| if names.len() == 1 { format!("use {}::{};", parent, names[0]) } else { format!("use {}::{{{}}};", parent, names.join(", ")) })
+            .collect();
+        // in rustfmt's order: `use std::error::Error;` before `use std::{fmt, process};`
+        uses.sort();
+        self.e.insert_lines(uses_at, &uses);
         if !self.root_lints.is_empty() {
             let lines: Vec<String> = self.root_lints.iter().map(|a| format!("#[{}]", a)).collect();
             self.e.prefix_paragraphs(&lines);
@@ -679,7 +795,7 @@ impl<'a> Lowerer<'a> {
             }
             let asyncs = if t.is_async { "async " } else { "" };
             if t.throws {
-                self.e.w(&format!("{}fn {}() -> ::std::result::Result<(), {}::AnyError> ", asyncs, name, RT));
+                self.e.w(&format!("{}fn {}() -> {}<(), {}> ", asyncs, name, self.std_name("std::result::Result"), self.rt_name("AnyError")));
             } else {
                 self.e.w(&format!("{}fn {}() ", asyncs, name));
             }
@@ -951,6 +1067,11 @@ impl<'a> Lowerer<'a> {
     }
 
     fn path_ty(&self, global: bool, segs: &[PathSeg], pos: TyPos) -> String {
+        // `[K: V]`: std's map, by its short name where the module imports it
+        if global && segs.len() == 1 && segs[0].name == "HashMap" {
+            let map = self.seg(&segs[0], TyPos::Generic);
+            return if self.names_std("HashMap") { map } else { map.replacen("HashMap", &self.std_name("std::collections::HashMap"), 1) };
+        }
         if segs.len() > 1 && self.k.nested.get(&segs[0].name).is_some_and(|inner| inner.contains(&segs[1].name)) {
             return self.path_ty(global, &segs[1..], pos);
         }
@@ -985,6 +1106,29 @@ impl<'a> Lowerer<'a> {
             s.push_str(&self.seg(seg, TyPos::Generic));
         }
         s
+    }
+
+    /// Does `name` name std's collection of that name (`HashMap`) here: imported by name or with
+    /// `std::collections::*`, and no type of the module's own is called that?
+    pub(crate) fn names_std(&self, name: &str) -> bool {
+        let is_std = |path: &[String]| {
+            let path: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+            matches!(path.as_slice(), ["std", "collections", n] | ["std", "collections", _, n] if *n == name)
+        };
+        if let Some((_, path)) = self.local_imports.iter().rev().find(|(n, _)| n == name) {
+            return is_std(path);
+        }
+        if self.class_info(name).is_some() || self.enum_info(name).is_some() || self.aliases.contains(name) {
+            return false;
+        }
+        if let Some(path) = self.k.imports.get(&(self.module.clone(), name.to_string())) {
+            return is_std(path);
+        }
+        let collections = |g: &Vec<String>| {
+            let g: Vec<&str> = g.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+            g == ["std", "collections"]
+        };
+        self.local_imports.iter().any(|(n, g)| n == "*" && collections(g)) || self.k.globs.get(&self.module).into_iter().flatten().any(collections)
     }
 
     /// The type behind `&` or `*`: `dyn A + B` needs parentheses there (`&(dyn Error + 'static)`).
@@ -1497,10 +1641,12 @@ impl<'a> Lowerer<'a> {
                 self.e.w("#[allow(unused_imports)]\nuse crate::__oxie::prelude::*;");
                 self.e.nl();
                 self.module.push(name.clone());
+                self.inline_depth += 1;
                 for i in items {
                     self.e.nl();
                     self.item(i, ItemCtx::Top);
                 }
+                self.inline_depth -= 1;
                 self.module.pop();
                 self.e.dedent();
                 self.e.w("}");
@@ -1515,10 +1661,12 @@ impl<'a> Lowerer<'a> {
                 self.e.nl();
                 self.e.w("#[allow(unused_imports)]\nuse super::*;");
                 self.e.nl();
+                self.inline_depth += 1;
                 for i in items {
                     self.e.nl();
                     self.item(i, ItemCtx::Object);
                 }
+                self.inline_depth -= 1;
                 self.e.dedent();
                 self.e.w("}");
                 self.e.nl();
@@ -1608,12 +1756,14 @@ impl<'a> Lowerer<'a> {
             Throws::No if pos == TyPos::Ret && self.iface_ret(f) == Some(true) => value.map(|t| self.ty(t, TyPos::Field)),
             Throws::No => value.map(|t| self.ty(t, pos)),
             Throws::Any => Some(format!(
-                "::std::result::Result<{}, {}::AnyError>",
+                "{}<{}, {}>",
+                self.std_name("std::result::Result"),
                 value.map(|t| self.ty(t, TyPos::Generic)).unwrap_or_else(|| "()".into()),
-                RT
+                self.rt_name("AnyError")
             )),
             Throws::Ty(e) => Some(format!(
-                "::std::result::Result<{}, {}>",
+                "{}<{}, {}>",
+                self.std_name("std::result::Result"),
                 value.map(|t| self.ty(t, TyPos::Generic)).unwrap_or_else(|| "()".into()),
                 self.ty(e, TyPos::Generic)
             )),
@@ -1818,8 +1968,11 @@ impl<'a> Lowerer<'a> {
             let asyncs = if f.mods.is_async { "async " } else { "" };
             let aw = if f.mods.is_async { ".await" } else { "" };
             self.e.w(&format!(
-                "{}fn main() {{\n    if let Err(err) = __oxie_main(){} {{\n        {}::report(err);\n        ::std::process::exit(1);\n    }}\n}}",
-                asyncs, aw, RT
+                "{}fn main() {{\n    if let Err(err) = __oxie_main(){} {{\n        {}::report(err);\n        {}(1);\n    }}\n}}",
+                asyncs,
+                aw,
+                RT,
+                self.std_name("std::process::exit")
             ));
             self.e.nl();
         }
@@ -2437,8 +2590,10 @@ impl<'a> Lowerer<'a> {
             .map(|(f, ty)| format!("{}: {}", esc(&f.name), self.ty(ty, TyPos::Field)))
             .collect();
         let vis = if self.members_pub { "pub " } else { "pub(crate) " };
-        // generated, so an unused constructor is not the user's problem
-        self.e.w(&format!("#[allow(dead_code)]\n{}fn new({}) -> Self {{", vis, params.join(", ")));
+        // generated, so an unused constructor is not the user's problem (a shared class's handle
+        // calls its data's)
+        let allow = if t.shared { String::new() } else { self.unused_allowed(&format!("{}::new", t.name)) };
+        self.e.w(&format!("{}{}fn new({}) -> Self {{", allow, vis, params.join(", ")));
         self.e.indent();
         self.e.nl();
         let has_init = t.init.is_some();
@@ -2489,7 +2644,7 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("{}: ", esc(&f.name)));
                     match &f.default {
                         Some(d) => self.coerce(d, ty, TyPos::Field),
-                        None => self.e.w("::std::default::Default::default()"),
+                        None => self.e.w(&format!("{}::default()", self.std_name("std::default::Default"))),
                     }
                     self.e.w(",");
                 }
@@ -2785,10 +2940,10 @@ impl<'a> Lowerer<'a> {
     }
 
     fn display_impl_from_to_string(&mut self, f: &FunDecl, g: &str, self_ty: &str, wc: &str) {
-        self.e.w(&format!("impl{} ::std::fmt::Display for {}{} {{", g, self_ty, wc));
+        self.e.w(&format!("impl{} {} for {}{} {{", g, self.std_name("std::fmt::Display"), self_ty, wc));
         self.e.indent();
         self.e.nl();
-        self.e.w("fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {");
+        self.e.w(&format!("fn fmt(&self, f: &mut {}<'_>) -> {} {{", self.std_name("std::fmt::Formatter"), self.std_name("std::fmt::Result")));
         self.e.indent();
         self.e.nl();
         // the formatter `f` isn't bound: a field `f` of the class is still the field
@@ -2862,8 +3017,8 @@ impl<'a> Lowerer<'a> {
         };
         let rhs = f.params.first().map(|p| self.ty(&p.ty, TyPos::Generic));
         let trait_text = match (&rhs, is_unary) {
-            (Some(r), false) if r != "Self" && r != self_ty => format!("::std::ops::{}<{}>", tr, r),
-            _ => format!("::std::ops::{}", tr),
+            (Some(r), false) if r != "Self" && r != self_ty => format!("{}<{}>", self.std_name(&format!("std::ops::{}", tr)), r),
+            _ => self.std_name(&format!("std::ops::{}", tr)),
         };
         let wc = self.impl_where(wc, &[f]);
         self.e.nl();
@@ -2893,10 +3048,10 @@ impl<'a> Lowerer<'a> {
 
     fn error_class_impls(&mut self, t: &TypeDecl, g: &str, self_ty: &str, wc: &str) {
         self.e.nl();
-        self.e.w(&format!("impl{} ::std::fmt::Display for {}{} {{", g, self_ty, wc));
+        self.e.w(&format!("impl{} {} for {}{} {{", g, self.std_name("std::fmt::Display"), self_ty, wc));
         self.e.indent();
         self.e.nl();
-        self.e.w("fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {");
+        self.e.w(&format!("fn fmt(&self, f: &mut {}<'_>) -> {} {{", self.std_name("std::fmt::Formatter"), self.std_name("std::fmt::Result")));
         self.e.indent();
         self.e.nl();
         self.push_scope();
@@ -2920,7 +3075,7 @@ impl<'a> Lowerer<'a> {
         self.e.w("}");
         self.e.nl();
         self.e.nl();
-        self.e.w(&format!("impl{} ::std::error::Error for {}{} {{}}", g, self_ty, wc));
+        self.e.w(&format!("impl{} {} for {}{} {{}}", g, self.std_name("std::error::Error"), self_ty, wc));
         self.e.nl();
     }
 
@@ -2934,7 +3089,7 @@ impl<'a> Lowerer<'a> {
             }
             ExprKind::Str(parts) => self.e.w(&format!("f.write_str(\"{}\")", lit_parts(parts))),
             _ => {
-                self.e.w("::std::fmt::Display::fmt(&");
+                self.e.w(&format!("{}::fmt(&", self.std_name("std::fmt::Display")));
                 self.expr(msg, P_UNARY);
                 self.e.w(", f)");
             }
@@ -3057,10 +3212,10 @@ impl<'a> Lowerer<'a> {
         }
         // Display
         self.e.nl();
-        self.e.w(&format!("impl{} ::std::fmt::Display for {}{} {{", g, self_ty, wc));
+        self.e.w(&format!("impl{} {} for {}{} {{", g, self.std_name("std::fmt::Display"), self_ty, wc));
         self.e.indent();
         self.e.nl();
-        self.e.w("fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {");
+        self.e.w(&format!("fn fmt(&self, f: &mut {}<'_>) -> {} {{", self.std_name("std::fmt::Formatter"), self.std_name("std::fmt::Result")));
         self.e.indent();
         self.e.nl();
         self.e.w("match self {");
@@ -3117,7 +3272,7 @@ impl<'a> Lowerer<'a> {
                     self.fns.pop();
                 }
                 None => match &v.fields {
-                    VariantFields::Tuple(ts) if ts.len() == 1 => self.e.w("::std::fmt::Display::fmt(__0, f)"),
+                    VariantFields::Tuple(ts) if ts.len() == 1 => self.e.w(&format!("{}::fmt(__0, f)", self.std_name("std::fmt::Display"))),
                     // the values of the fields follow the case's name: "too many (count: 5, max: 3)"
                     VariantFields::Tuple(ts) => {
                         let specs: Vec<&str> = ts.iter().map(field_spec).collect();
@@ -3169,13 +3324,13 @@ impl<'a> Lowerer<'a> {
             .collect();
         self.e.nl();
         if sources.is_empty() {
-            self.e.w(&format!("impl{} ::std::error::Error for {}{} {{}}", g, self_ty, wc));
+            self.e.w(&format!("impl{} {} for {}{} {{}}", g, self.std_name("std::error::Error"), self_ty, wc));
             self.e.nl();
         } else {
-            self.e.w(&format!("impl{} ::std::error::Error for {}{} {{", g, self_ty, wc));
+            self.e.w(&format!("impl{} {} for {}{} {{", g, self.std_name("std::error::Error"), self_ty, wc));
             self.e.indent();
             self.e.nl();
-            self.e.w("fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {");
+            self.e.w(&format!("fn source(&self) -> Option<&(dyn {} + 'static)> {{", self.std_name("std::error::Error")));
             self.e.indent();
             self.e.nl();
             self.e.w("match self {");
@@ -3206,8 +3361,14 @@ impl<'a> Lowerer<'a> {
                     if explicit || (wraps_error(&ts[0]) && from_counts.get(&tt) == Some(&1)) {
                         self.e.nl();
                         self.e.w(&format!(
-                            "impl{} ::std::convert::From<{}> for {}{} {{\n    fn from(e: {}) -> Self {{\n        Self::{}(e)\n    }}\n}}",
-                            g, tt, self_ty, wc, tt, v.name
+                            "impl{} {}<{}> for {}{} {{\n    fn from(e: {}) -> Self {{\n        Self::{}(e)\n    }}\n}}",
+                            g,
+                            self.std_name("std::convert::From"),
+                            tt,
+                            self_ty,
+                            wc,
+                            tt,
+                            v.name
                         ));
                         self.e.nl();
                     }

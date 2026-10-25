@@ -5,6 +5,7 @@
 pub(crate) mod __oxie;
 #[allow(unused_imports)]
 use crate::__oxie::prelude::*;
+use std::process;
 
 use std::collections::HashMap;
 
@@ -16,7 +17,6 @@ pub(crate) struct Ids {
 }
 
 impl Ids {
-    #[allow(dead_code)]
     pub(crate) fn new(next: usize) -> Self {
         Self {
             next,
@@ -31,7 +31,7 @@ impl Ids {
         self.next
     }
 
-    pub(crate) fn checked_id(&mut self) -> ::std::result::Result<usize, String> {
+    pub(crate) fn checked_id(&mut self) -> Result<usize, String> {
         if self.next >= 10 {
             return Err("out of ids".into());
         }
@@ -60,7 +60,7 @@ impl Ids {
         old.into()
     }
 
-    pub(crate) fn add_checked(&mut self) -> ::std::result::Result<(), String> {
+    pub(crate) fn add_checked(&mut self) -> Result<(), String> {
         let checked_id = self.checked_id()?;
         self.items.push(checked_id);
         Ok(())
@@ -76,7 +76,7 @@ impl Ids {
     }
 }
 
-fn __oxie_main() -> ::std::result::Result<(), String> {
+fn __oxie_main() -> Result<(), String> {
     let mut ids = Ids::new(0);
     ids.add();
     ids.add_scaled();
@@ -91,6 +91,6 @@ fn __oxie_main() -> ::std::result::Result<(), String> {
 fn main() {
     if let Err(err) = __oxie_main() {
         crate::__oxie::report(err);
-        ::std::process::exit(1);
+        process::exit(1);
     }
 }

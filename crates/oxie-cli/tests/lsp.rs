@@ -305,12 +305,15 @@ fn symlinked_directories_keep_the_editors_uri() {
 }
 
 // `pub`, so Oxie keeps the owned parameter (it would lend a private function's)
+// `consume` only reads `v`, but it is used as a value below, so it keeps its signature and the
+// call moves `nums`; being `pub`, it gets the fix that lets it borrow
 const MOVED: &str = r#"pub fun consume(v: Vec<i32>): usize = v.len()
 
 fun main() {
     val nums = vec[1, 2, 3]
     val n = consume(nums)
     println("$n ${nums.len()}")
+    println(vec[vec[4]].into_iter().map(consume).count())
 }
 "#;
 
@@ -365,6 +368,7 @@ fun main() {
 const PROJECT_TEXT: &str = r##"fun keep(v: Vec<i32>): Vec<i32> = v
 data class Tag(name: String)
 pub fun describe(t: Tag): String = "#${t.name}"
+fun describe_all(tags: Vec<Tag>): Vec<String> = tags.into_iter().map(describe).collect()
 "##;
 
 /// In a project, an explanation can point at another file (where a function keeps the value
@@ -401,8 +405,8 @@ fn explanations_and_fixes_reach_other_files_of_the_project() {
     assert_eq!(kept["location"]["range"]["start"], json!({"line": 0, "character": 34}), "{moved}");
     assert!(kept["message"].as_str().unwrap().contains("it returns `v`"), "{moved}");
 
-    // `tag` moved into `describe` (`pub`, so Oxie keeps its signature): the fix changes the
-    // parameter in text.oxi
+    // `tag` moved into `describe` (used as a value, so Oxie keeps its signature): the fix changes
+    // the parameter in text.oxi
     let moved = at_line(8);
     let actions = c.request("textDocument/codeAction", json!({"textDocument": {"uri": uri}, "range": moved["range"], "context": {"diagnostics": [moved]}}));
     let borrow = actions.as_array().unwrap().iter().find(|a| a["title"] == "Let `describe` borrow it (parameter type `&Tag`)").unwrap_or_else(|| panic!("{actions}"));

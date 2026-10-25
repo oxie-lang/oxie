@@ -97,7 +97,7 @@ let exampleId = 0;
 function example(source, outputs) {
 	const tabs = [['oxie', 'Oxie', fence('oxie', source)]];
 	const rust = emit(source);
-	if (rust) tabs.push(['rust', 'Rust', fence('rust', rust)]);
+	if (rust) tabs.push(['rust', 'Generated Rust', `<p class="oxie-panel-note">What <code>oxie emit</code> generates for this example, produced by the current compiler.</p>\n\n${fence('rust', rust)}`]);
 	const output = outputs.get(source);
 	if (output) tabs.push(['output', 'Output', fence('text', output)]);
 	if (tabs.length === 1) return tabs[0][2];

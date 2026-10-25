@@ -38,7 +38,7 @@ interface Priced {
 }
 
 class Cart(owner: String) : Priced {                        // no inheritance, only interfaces
-    var items: Vec<Item> = vec[]                            // body properties need a value
+    var items: [Item] = []                                  // a list; body properties need a value
 
     fun add(item: Item) = items.push(item)                  // changes the cart: Oxie makes it &mut self
     override fun total() = items.sum_of { it.price * it.qty as f64 }
@@ -80,14 +80,15 @@ fun main() {
 | `data class P(x: f64)`, `p.copy(x = 1.0)` | struct deriving `Debug`, `Clone`, `PartialEq` (and `Copy`, `Eq`, `Hash` when the fields allow) |
 | `enum E { A(n: i32), B }`, `E.A(1)`, `when (e) { A(n) -> ...; B -> ... }` | enum with data; variants without `E.` in patterns |
 | `interface I { fun f(): i32 }`, `class C : I { override fun f() = 1 }` | trait and its impl |
-| `&I`, `Vec<I>` (an interface as a type) | `&dyn I`, `Vec<Box<dyn I>>` |
+| `&I`, `[I]` (an interface as a type) | `&dyn I`, `Vec<Box<dyn I>>` |
 | `shared class S(var n: i32)`, `@sync shared class` | a handle to one object: `Rc<RefCell<..>>`, `Arc<Mutex<..>>` |
 | `operator fun plus(o: V): V`, `minus`, `times`, `div`, `rem`, `unaryMinus`, `plusAssign` | `impl Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `AddAssign` |
 | `override fun toString() = "($x, $y)"` | `impl Display` |
 | `fun String.shout(): String = this.to_uppercase()`, `fun i32.is_even(): bool = this % 2 == 0` | extension functions (a trait and its impl, imported everywhere) |
 | `object O { }`, `companion object { }`, `static fun` | namespace; static functions |
 | `{ it * 2 }`, `{ a, b -> a + b }`, `(a, b) => a + b`, `xs.map { }` | lambdas; a last lambda argument goes outside the parentheses |
-| `vec[1, 2]`, `listOf(1, 2)`, `mutableListOf<i32>()`, `mapOf("a" to 1)`, `setOf(1)` | `Vec`, `Vec`, `Vec::new()`, `HashMap`, `HashSet` |
+| `[T]`, `[K: V]`, `&[T]` | `Vec<T>`, `HashMap<K, V>`, a slice |
+| `val xs: [i32] = [1, 2]`, `val m: [String: i32] = ["a": 1]`, `[:]`, `setOf(1)` | `vec![1, 2]`, `HashMap::from([..])`, `HashMap::new()`, `HashSet` |
 | `x in xs`, `x !in xs`, `x is Some(_)`, `a to b` | `contains` (`contains_key` for a map), `matches!`, a tuple `(a, b)` |
 | `Type.function()`, `Enum.Variant`, `module.item`, `HashMap()` | `::` paths; a constructor call `Type::new()` |
 | `import std::fs`, `import std.collections.HashMap`, `import { A, B } from module` | `use` |
@@ -99,11 +100,16 @@ fun main() {
 
 * **Ranges.** `1..n` excludes `n`; Kotlin's `1..n` is `1..=n` here. `until`, `downTo` and
   `step` work as in Kotlin.
-* **Collections are Rust's.** There is no `List`, `MutableList` or `Map` type: lists are
-  `Vec<T>` (`listOf`, `vec[...]` and `mutableListOf()` all make one), maps `HashMap<K, V>`,
-  sets `HashSet<T>`. A parameter that only reads a list is `&[T]`; one that only reads text
-  is `&str`. `m[k] = v` puts a value in a map, but `m[k] += 1` is an error (the key may be
-  missing): write `*m.entry(k).or_default() += 1` to start a missing key at 0.
+* **Collections are Rust's, with short names.** A list is `[T]` (Rust's `Vec<T>`) and a map
+  `[K: V]` (std's `HashMap<K, V>`); there is no `List`, `MutableList` or `Map` type, and sets
+  are `HashSet<T>`. A literal takes the declared type: `val names: [String] = ["ada", "bob"]`,
+  `var stock: [String: i32] = [:]`, `["a": 1]`. Without a declared type `[1, 2]` is a
+  fixed-size array, unless the code after a `var` grows it (`xs.push(3)`), which makes it a list.
+  After `&`, `[T]` is a slice: `&[T]` takes any list or array, and a function that adds to the
+  caller's list takes `&mut Vec<T>`. `iter.to_list()` collects an iterator into a list.
+  `Vec<T>`, `HashMap<K, V>`, `vec[...]`, `listOf(...)` and `mapOf(k to v)` still work.
+  `m[k] = v` puts a value in a map, but `m[k] += 1` is an error (the key may be missing): write
+  `*m.entry(k).or_default() += 1` to start a missing key at 0.
 * **Method names are Rust's**: `len()` (not `size` or `length`), `is_empty()`,
   `to_uppercase()`, `contains()`, `push()`, `insert()`, `remove()`, `to_string()`,
   `trim()`, `split(',')`, `chars()`, `parse::<i32>()` (it returns a `Result`). Lists also have
@@ -119,16 +125,18 @@ fun main() {
   and slices, not on iterators: what `iter()`, `split()`, `chars()`, `lines()` or a range
   `.map { }` return is a lazy iterator with Rust's methods, so call the operation on the list
   (`xs.map { }`, not `xs.iter().map { }`) or `collect()` first:
-  `"b a".split(' ').collect::<Vec<_>>().sorted()`. `is_not_empty()` is only for lists; for text
+  `"b a".split(' ').to_list().sorted()`. `is_not_empty()` is only for lists; for text
   write `!s.is_empty()`. You implement `toString()`, but you call `to_string()`.
 * **Numbers don't convert by themselves.** `i32 * f64` is an error: write `n as f64`.
   `len()` is a `usize`; a list can be indexed with any integer type. Integer division truncates. `Int`, `Long` and `Double` are
   names for `i32`, `i64` and `f64`.
-* **Values have one owner.** Assigning a `String`, `Vec` or class value, or passing it to a
+* **Values have one owner.** Assigning a `String`, list or class value, or passing it to a
   function that keeps it, moves it, and the old variable can't be used afterwards. Lend it
   instead (`&T` and `&mut T` parameters; Oxie writes the `&` at the call), or pass
-  `.clone()` when the function really needs its own copy. A function that only reads a
-  `String`, `Vec`, class or `Box` parameter borrows it without your help. A `for (x in xs)`
+  `.clone()` when the function really needs its own copy. Write parameters as values
+  (`name: String`, `items: [Item]`, `prices: [String: f64]`, `user: User`): a function or
+  method that only reads one borrows it without your help (`&str`, `&[Item]`, ...), and one that
+  keeps it takes it. A `for (x in xs)`
   over a local list that is used afterwards borrows it, so `x` is a reference; when the body
   changes `x` (`x.qty += 1`), it borrows the list mutably.
 * **Objects are not shared references.** `val b = a` moves or copies `a`; it doesn't alias it.
@@ -214,9 +222,9 @@ error enum ParseError {
     BadNumber(text: String) = "'$text' is not a number"
 }
 
-fun parse_all(text: &str): Vec<i32> throws ParseError {
+fun parse_all(text: String): [i32] throws ParseError {
     if (text.trim().is_empty()) throw ParseError.Empty
-    var out = vec[]
+    var out = []                                 // a list: it grows below
     for (part in text.split(',')) {
         val n: i32 = part.trim().parse().map_err { ParseError.BadNumber(part.trim().to_string()) }?
         out.push(n)
@@ -256,7 +264,7 @@ data class User(name: String, email: String?)
 fun find(users: &[User], name: &str): &User? = users.iter().find { it.name == name }
 
 fun main() {
-    val users = vec[User("ada", "ada@example.org"), User("bob", null)]
+    val users: [User] = [User("ada", "ada@example.org"), User("bob", null)]
     println(find(&users, "ada")?.email.clone() ?: "no email")
     println(find(&users, "bob")?.email.clone() ?: "no email")
     if (val u = find(&users, "bob")) println("found ${u.name}")
@@ -307,7 +315,7 @@ class Circle(r: f64) : Shape {
 fun describe(s: &Shape) = println("${s.name()}: ${s.area():.2}")
 
 fun main() {
-    var shapes: Vec<Shape> = vec[Square(2.0), Circle(1.0)]    // each value is boxed for you
+    var shapes: [Shape] = [Square(2.0), Circle(1.0)]          // each value is boxed for you
     shapes.sort_by { a, b -> a.area().total_cmp(&b.area()) }
     for (s in &shapes) describe(s)
     describe(shapes[0])
@@ -315,7 +323,7 @@ fun main() {
 ```
 
 A function returning an interface (`fun pick(): Shape`) returns its value as it is, or a box
-when its branches build different classes. A list typed `Vec<Shape>` boxes the values you put in it; with `Vec<Box<Shape>>` you write
+when its branches build different classes. A list typed `[Shape]` boxes the values you put in it; with `[Box<Shape>]` you write
 `Box.new(...)` yourself. Its elements, and interface-typed fields, are lent to an `&Shape`
 parameter as they are: no `.as_ref()` needed. `sorted_by` needs `Clone`, which a box of an interface isn't, so sort
 such a list in place with `sort_by`.

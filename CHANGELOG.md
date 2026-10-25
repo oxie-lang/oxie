@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+* The generated Rust reads more like hand-written Rust. Std items are named the way people write
+  them (`Rc<RefCell<..>>`, `impl fmt::Display`, `Result<T, E>`) with `use` lines at the top of
+  the file, unless something in the file could shadow the name. A shared class gets only the
+  getters and setters code calls (a library keeps those of its public fields), generated items
+  that are called lose `#[allow(dead_code)]`, and `a.count += 1` on a shared object no longer
+  goes through a temporary.
+* The docs site labels each example's Rust tab "Generated Rust": it is what `oxie emit` prints,
+  not a hand-written comparison.
 * A throwing call in a `when` arm or a brace-less `else` (`if (c) a() else b()`) passes its error
   on, as any statement in a throwing function or a `try` does. Before, the error was dropped with
   only a warning, and the function went on.
@@ -159,15 +167,66 @@
   a + b`) or passes on as `&s` are lent as `&str`, as the docs say.
 * A lambda stored in a `val` that changes a captured variable through a method
   (`{ s: &str -> log.push(s.to_string()) }`) can be called; before, it failed with E0596.
-* Methods borrow the `String`, `Vec` and class parameters they only read, like top-level
-  functions (`fun cheaper_than(o: Item)` no longer moves `o`). Extension functions that change
-  their receiver take `&mut self` (`fun Temp.warm(by: f64) { c += by }`) without `mut fun`.
+* Extension functions that change their receiver take `&mut self`
+  (`fun Temp.warm(by: f64) { c += by }`) without `mut fun`.
 * Changing a parameter (`fun fill(c: Cart) { c.add("x") }`) offers `c: &mut Cart`. A function
   that stores or returns its parameter no longer gets a fix that would borrow it (which didn't
   compile); the error says where it keeps it.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.
+
+## 0.3.0 - 2026-10-25
+
+Oxie 0.3.0 makes code look less like Rust. Lists and maps have short types, `[T]` and `[K: V]`,
+whose literals take the declared type, and methods borrow the parameters they only read, so
+`&str`, `&[T]` and `&T` mostly leave parameter lists. Context parameters declare GPUI's `window`
+and `cx` once, `oxie from-rust` translates whole crates into the new forms, and null checks
+unwrap optional variables.
+
+### Upgrading
+
+* Set `oxie-build = "0.3.0"` in the `[build-dependencies]` of each project (`cargo update`
+  doesn't move from 0.2 to 0.3). `oxie` warns when a project builds with another `oxie-build`.
+* Nothing that compiled stops compiling for the new syntax: `Vec<T>`, `HashMap<K, V>`,
+  `vec[...]` and `mapOf(...)` keep working, and `[T]` used to be an error everywhere but behind
+  `&`, `Box`, `Rc`, `Arc` and in a trait's arguments, where it is still a slice.
+* More parameters are borrowed: those of methods, maps, sets and `PathBuf`s, and in a program
+  (`main.oxi` without `lib.oxi`) those of `pub` functions and methods. Oxie lends the arguments
+  of the calls it compiles; Rust code in `rust { }` blocks and macro arguments keeps calling
+  them with the declared types. Hand-written Rust in the same crate (a Rust crate with Oxie
+  modules) that calls an Oxie function that isn't `pub` may need `&` where that function only
+  reads its parameter, as in 0.2.
+
+### Changes
+
+* Lists and maps have short types: `[T]` is a list (Rust's `Vec<T>`) and `[K: V]` a map (std's
+  `HashMap<K, V>`), so `var log: [String] = []` and `val ages: [String: i32] = ["ada": 36]`
+  replace `Vec<String>` and `HashMap<String, i32>`. After `&`, in `Box`, `Rc` and `Arc` and in a
+  trait's arguments `[T]` is still Rust's slice (`&[T]`, `impl AsRef<[u8]>`). A list or map literal
+  takes the declared type, element by element (`["a", "b"]` for a `[String]` makes `String`s),
+  also for a `HashSet`, `BTreeMap` or `VecDeque`; `[:]` is an empty map, a `var` array that the
+  code after it grows (`xs.push(3)`) is a list, and `iter.to_list()` collects an iterator.
+  `Vec<T>`, `HashMap<K, V>`, `vec[...]` and `mapOf(...)` keep working.
+* Methods borrow the parameters they only read, as functions did: `fun has(name: String)` takes
+  `&str`, `fun total(items: [Item])` takes `&[Item]`, and callers keep their values. A method
+  keeps its parameters' types when Oxie can't resolve every call to it (a receiver of unknown
+  type, `?.`, a method used as a value, Rust code calling it), and when it implements an
+  interface method. Maps and sets (`&HashMap<K, V>`) and `PathBuf` (`&Path`) parameters are
+  borrowed too, and in a program (`main.oxi` without `lib.oxi`) so are `pub` functions and
+  methods; a library's keep the types they declare.
+* A parameter stored through a field written without its value (`Point { x, y }`) or named in a
+  `rust { }` block is no longer borrowed. Before, the generated Rust didn't compile.
+* The language server shows lists and maps as written, `[String]` and `[String: i32]`, in hovers
+  and symbol details (`&Vec<T>` and `Box<[T]>` stay as they are), and completes `to_list()`. An
+  error about a list or map parameter that a function keeps says why instead of offering to
+  borrow it.
+* A method call whose result Oxie knows is a value (`describe(Point.origin())`) is lent to a `&T`
+  parameter, as function calls already were.
+* `oxie from-rust` writes `[T]` and `[K: V]` (for std's `HashMap`), `[a, b]` and `[]` for a
+  declared list, `[k: v]` and `[:]` for maps, and `.to_list()` for `.collect::<Vec<_>>()`.
+  `Vec<T>` stays where Oxie reads `[T]` as a slice (`&mut Vec<T>`, `Arc<Vec<T>>`), and an item with
+  a slice type Oxie can't write (`type Bytes = [u8]`) stays Rust.
 * `oxie new` and `oxie init` also write a `CLAUDE.md` with the line `@AGENTS.md`, so Claude Code
   reads the notes for agents that the other agents read in `AGENTS.md`. A crate's own `CLAUDE.md`
   is kept. The documentation has a page on [AI coding agents](docs/ai-agents.md): setting up

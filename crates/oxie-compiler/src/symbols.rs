@@ -41,7 +41,26 @@ pub struct Symbol {
 // pretty printing in Oxie syntax
 
 pub fn type_text(t: &Type) -> String {
+    text(t, false, false)
+}
+
+/// A trait bound (`AsRef<Vec<u8>>`), whose type arguments are where Oxie reads `[T]` as a slice.
+pub fn bound_text(t: &Type) -> String {
+    text(t, false, true)
+}
+
+/// `slice`: the type is where Oxie reads `[T]` as a slice (after `&`, in `Box<..>`), so a list
+/// there keeps its name `Vec<T>`; elsewhere a list is `[T]`. `is_trait`: a trait's path.
+fn text(t: &Type, slice: bool, is_trait: bool) -> String {
     match t {
+        Type::Path { segs, .. } if t.is_map() => match segs[0].generics.as_deref() {
+            Some([k, v]) => format!("[{}: {}]", generic_arg_text(k), generic_arg_text(v)),
+            _ => "HashMap".into(),
+        },
+        Type::Path { global: false, segs, .. } if !slice && !is_trait && segs.len() == 1 && segs[0].name == "Vec" && segs[0].fn_sugar.is_none() => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(elem)]) => format!("[{}]", type_text(elem)),
+            _ => "Vec".into(),
+        },
         Type::Path { global, segs, .. } => {
             let mut s = if *global { "::".to_string() } else { String::new() };
             let parts: Vec<String> = segs
@@ -49,8 +68,14 @@ pub fn type_text(t: &Type) -> String {
                 .map(|seg| {
                     let mut p = seg.name.clone();
                     if let Some(g) = &seg.generics {
+                        let unsized_args = is_trait || matches!(seg.name.as_str(), "Box" | "Rc" | "Arc" | "Cow" | "Weak");
+                        let arg = |a: &GenericArg| match a {
+                            GenericArg::Type(t) if unsized_args => text(t, true, false),
+                            GenericArg::Binding(n, t) if unsized_args && n == "Target" => format!("{} = {}", n, text(t, true, false)),
+                            a => generic_arg_text(a),
+                        };
                         p.push('<');
-                        p.push_str(&g.iter().map(generic_arg_text).collect::<Vec<_>>().join(", "));
+                        p.push_str(&g.iter().map(arg).collect::<Vec<_>>().join(", "));
                         p.push('>');
                     }
                     if let Some((ps, r)) = &seg.fn_sugar {
@@ -89,18 +114,18 @@ pub fn type_text(t: &Type) -> String {
             if *mutable {
                 s.push_str("mut ");
             }
-            s.push_str(&type_text(inner));
+            s.push_str(&text(inner, true, false));
             s
         }
-        Type::Ptr { mutable, inner } => format!("*{} {}", if *mutable { "mut" } else { "const" }, type_text(inner)),
+        Type::Ptr { mutable, inner } => format!("*{} {}", if *mutable { "mut" } else { "const" }, text(inner, true, false)),
         Type::Tuple(v) => format!("({})", v.iter().map(type_text).collect::<Vec<_>>().join(", ")),
         Type::Array(inner, n) => format!("[{}; {}]", type_text(inner), n),
         Type::Slice(inner) => format!("[{}]", type_text(inner)),
         Type::Option(inner) => format!("{}?", type_text(inner)),
         Type::Fn { params, ret } => format!("({}) -> {}", params.iter().map(type_text).collect::<Vec<_>>().join(", "), type_text(ret)),
-        Type::Dyn(b) => format!("dyn {}", b.iter().map(type_text).collect::<Vec<_>>().join(" + ")),
-        Type::Impl(b) => format!("impl {}", b.iter().map(type_text).collect::<Vec<_>>().join(" + ")),
-        Type::Bounds(b) => b.iter().map(type_text).collect::<Vec<_>>().join(" + "),
+        Type::Dyn(b) => format!("dyn {}", b.iter().map(bound_text).collect::<Vec<_>>().join(" + ")),
+        Type::Impl(b) => format!("impl {}", b.iter().map(bound_text).collect::<Vec<_>>().join(" + ")),
+        Type::Bounds(b) => b.iter().map(bound_text).collect::<Vec<_>>().join(" + "),
         Type::Lifetime(l) => format!("'{}", l),
         Type::Maybe(t) => format!("?{}", type_text(t)),
         Type::Never => "!".into(),
@@ -131,7 +156,7 @@ pub fn generics_text(g: &Generics) -> String {
                 if bounds.is_empty() {
                     name.clone()
                 } else {
-                    format!("{}: {}", name, bounds.iter().map(type_text).collect::<Vec<_>>().join(" + "))
+                    format!("{}: {}", name, bounds.iter().map(bound_text).collect::<Vec<_>>().join(" + "))
                 }
             }
             GenericParam::Const { name, ty, .. } => format!("const {}: {}", name, type_text(ty)),
@@ -253,7 +278,7 @@ fn type_decl_signature(t: &TypeDecl) -> String {
     }
     if !t.supertypes.is_empty() {
         s.push_str(" : ");
-        s.push_str(&t.supertypes.iter().map(type_text).collect::<Vec<_>>().join(", "));
+        s.push_str(&t.supertypes.iter().map(bound_text).collect::<Vec<_>>().join(", "));
     }
     s
 }
@@ -360,7 +385,7 @@ fn item_symbol(it: &Item, src: &str, container: Option<&str>) -> Option<Symbol> 
             let mut detail = format!("interface {}{}", t.name, generics_text(&t.generics));
             if !t.supertraits.is_empty() {
                 detail.push_str(" : ");
-                detail.push_str(&t.supertraits.iter().map(type_text).collect::<Vec<_>>().join(" + "));
+                detail.push_str(&t.supertraits.iter().map(bound_text).collect::<Vec<_>>().join(" + "));
             }
             sym(&t.name, SymKind::Interface, detail, t.name_span, children)
         }
@@ -368,7 +393,7 @@ fn item_symbol(it: &Item, src: &str, container: Option<&str>) -> Option<Symbol> 
             let owner = imp.self_ty.last_name().unwrap_or("impl").to_string();
             let children = imp.members.iter().filter_map(|m| item_symbol(m, src, Some(&owner))).collect();
             let name = match &imp.trait_ {
-                Some(t) => format!("impl {} for {}", type_text(t), type_text(&imp.self_ty)),
+                Some(t) => format!("impl {} for {}", bound_text(t), text(&imp.self_ty, true, false)),
                 None => format!("impl {}", type_text(&imp.self_ty)),
             };
             let span = find_name(src, it.span, "impl");
@@ -633,5 +658,21 @@ fn collect_lets(b: &Block, offset: u32, out: &mut Vec<Local>) {
         if let Stmt::Let { pat, ty, .. } = s {
             push_pat(pat, ty.clone(), offset, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn types_print_as_written() {
+        let src = "fun f(a: [String], b: &Vec<i32>, c: &[i32], d: Box<[u8]>, e: impl AsRef<[u8]>, m: [String: [i32]], o: [[i32]]?, v: Vec<i32>) {}\n";
+        let (file, diags) = crate::parser::parse_file(src);
+        assert!(diags.is_empty(), "{:?}", diags);
+        let ItemKind::Fun(f) = &file.items[0].kind else { panic!() };
+        let texts: Vec<String> = f.params.iter().map(|p| type_text(&p.ty)).collect();
+        // `Vec<i32>` written by value is the same type as `[i32]`, and prints like it
+        assert_eq!(texts, ["[String]", "&Vec<i32>", "&[i32]", "Box<[u8]>", "impl AsRef<[u8]>", "[String: [i32]]", "[[i32]]?", "[i32]"]);
     }
 }

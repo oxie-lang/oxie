@@ -26,10 +26,10 @@ compiles to Rust. This page maps what you know to Oxie, and lists the Rust ideas
 | enum with data | `sealed class` | union types | `enum Shape { Circle(r: f64) }` |
 | switch | `when (x) { 1 -> ...; else -> ... }` | `switch` | `when (x) { 1 -> ...; else -> ... }` |
 | lambda | `{ x -> x * 2 }`, `{ it * 2 }` | `x => x * 2` | all three styles |
-| list | `listOf(1, 2)` | `[1, 2]` | `listOf(1, 2)` / `vec[1, 2]` |
+| list | `List<Int>`, `listOf(1, 2)` | `number[]`, `[1, 2]` | `[i32]`, `[1, 2]` (for a declared `[i32]`) / `vec[1, 2]` |
 | list operations | `xs.filter { it > 1 }.map { it * 2 }` | `xs.filter(x => x > 1).map(x => x * 2)` | `xs.filter { it > 1 }.map { it * 2 }` |
 | sum / sort / group | `sumOf { }`, `sortedBy { }`, `groupBy { }` | `reduce`, `sort`, — | `sum_of { }`, `sorted_by { }`, `group_by { }` |
-| map | `mapOf("a" to 1)` | `new Map([["a", 1]])` | `mapOf("a" to 1)` |
+| map | `Map<String, Int>`, `mapOf("a" to 1)` | `Map<string, number>`, `new Map([["a", 1]])` | `[String: i32]`, `["a": 1]`, `[:]` |
 | range | `0 until n`, `1..n` | — | `0 until n`, `1..=n` (Rust: `..` excludes the end) |
 | loop | `for (i in xs)` | `for (const i of xs)` | `for (i in xs)` |
 | exceptions | `throw`, `try/catch` | `throw`, `try/catch` | `throw`, `try/catch` on `Result` values |
@@ -44,19 +44,19 @@ compiles to Rust. This page maps what you know to Oxie, and lists the Rust ideas
 
 These come from Rust and are what makes Oxie as fast as Rust.
 
-**Values have one owner.** Assigning a `String`, `Vec` or class instance *moves* it; the old
-variable can't be used afterwards. A function that only needs to read or change a value takes
-a reference (`&T` or `&mut T`); Oxie lends the argument for you (`show(names)` passes
-`&names`). A function that only reads a `String`, `Vec`, class or `Box` parameter borrows it, and a `for`
-loop over a list you use again afterwards borrows it too. Call `.clone()` when you really want
-a copy.
+**Values have one owner.** Assigning a `String`, list or class instance *moves* it; the old
+variable can't be used afterwards. A function or method that only reads a parameter borrows it
+(`names: [String]` becomes `&[String]`), so `show(names)` lends `names` and the caller keeps
+it; one that changes the caller's value takes a reference (`&mut T`), and Oxie lends the
+argument for you. A `for` loop over a list you use again afterwards borrows it too. Call
+`.clone()` when you really want a copy.
 
 ```oxie
-fun show(names: &Vec<String>) = println("${names.len()} names")
+fun show(names: [String]) = println("${names.len()} names")
 
 fun main() {
-    var names = vec["ada".to_string()]
-    show(&names)              // lend
+    var names: [String] = ["ada"]
+    show(names)               // lends it: show(&names)
     names.push("bob".to_string())
     val copy = names.clone()  // explicit copy
     val moved = names         // `names` is moved

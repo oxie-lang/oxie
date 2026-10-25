@@ -24,7 +24,7 @@ pub data class Circle(center: Point, radius: f64) : Shape {
 }
 
 /// A polygon given by its vertices in order.
-pub data class Polygon(points: Vec<Point>) : Shape {
+pub data class Polygon(points: [Point]) : Shape {
     /// Shoelace formula.
     override fun area(): f64 {
         var sum = 0.0
@@ -48,7 +48,7 @@ test "distance" {
 }
 
 test "polygon area" {
-    val square = Polygon(vec[Point(0.0, 0.0), Point(2.0, 0.0), Point(2.0, 2.0), Point(0.0, 2.0)])
+    val square = Polygon([Point(0.0, 0.0), Point(2.0, 0.0), Point(2.0, 2.0), Point(0.0, 2.0)])
     assert_eq(square.area(), 4.0)
     assert_eq(square.perimeter(), 8.0)
 }

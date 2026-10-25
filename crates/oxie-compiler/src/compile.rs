@@ -124,7 +124,8 @@ struct Parsed {
 pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
     let mut parsed: Vec<Parsed> = Vec::new();
     for input in inputs {
-        let (file, diags) = parser::parse_file(&input.text);
+        let (mut file, diags) = parser::parse_file(&input.text);
+        crate::lists::grow_lists(&mut file.items);
         let (module, is_root) = module_of(&input.rel_path);
         parsed.push(Parsed { input, module, is_root, file, diags });
     }
@@ -134,8 +135,12 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         parsed[i].diags.push(d);
     }
     sema::auto_type_lifetimes(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>());
-    let param_notes = crate::params::borrow_params(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>());
     let has_lib = parsed.iter().any(|p| p.is_root && p.input.rel_path.file_stem().is_some_and(|s| s == "lib"));
+    // in a program (an Oxie root without a library) no other crate calls `pub` items, so they lend
+    // their parameters too
+    let has_root = parsed.iter().any(|p| p.is_root);
+    let lend_pub = has_root && !has_lib;
+    let param_notes = crate::params::borrow_params(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>(), lend_pub);
     let collect = |parsed: &[Parsed]| {
         let units: Vec<SourceUnit> = parsed.iter().map(|p| SourceUnit { module: p.module.clone(), file: &p.file }).collect();
         sema::collect(&units, &opts.crate_name, opts.extern_crates.clone(), has_lib)
@@ -149,11 +154,35 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
     // what takes the receivers: methods that take only the fields they use, and class and `Box`
     // parameters to lend. Then sema again, for the new signatures.
     let field_notes = crate::fields::take_fields(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
-    let class_notes = crate::params::borrow_class_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
+    let class_notes = crate::params::borrow_class_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k, lend_pub);
     if !field_notes.is_empty() || class_notes.iter().any(|n| n.borrowed) {
         k = collect(&parsed);
     }
-    let param_notes: Vec<crate::params::ParamNote> = param_notes.into_iter().chain(field_notes).chain(class_notes).collect();
+    let mut param_notes: Vec<crate::params::ParamNote> = param_notes.into_iter().chain(field_notes).chain(class_notes).collect();
+    let words: Vec<HashSet<String>> = parsed.iter().map(|p| source_words(&p.input.text)).collect();
+    // what the crate calls: the dry run records the Oxie code's calls, beside those in Rust code
+    let mut calls = HashSet::new();
+    for p in &parsed {
+        crate::params::raw_calls(&p.file.items, &mut calls);
+    }
+    // methods lend theirs where every call that may reach them is one the lowering resolves, so
+    // it writes the `&`: a dry run of the lowering names the methods called otherwise. Not in a
+    // Rust crate with Oxie modules, whose Rust code may call them too.
+    if has_root {
+        let mut unresolved = HashSet::new();
+        for (i, p) in parsed.iter().enumerate() {
+            let mut l = Lowerer::new(&k, p.module.clone(), p.is_root);
+            l.source_words = Some(words[i].clone());
+            l.lower_file(&p.file);
+            unresolved.extend(l.unresolved);
+            calls.extend(l.calls);
+        }
+        let notes = crate::params::borrow_method_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k, &unresolved, lend_pub);
+        if notes.iter().any(|n| n.borrowed) {
+            k = collect(&parsed);
+        }
+        param_notes.extend(notes);
+    }
 
     let mut out = Output::default();
     // module tree: path -> generated file
@@ -170,14 +199,30 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
     }
     let abs = |rel: &Path| opts.out_dir.join(rel).to_string_lossy().replace('\\', "/");
 
-    for (i, p) in parsed.iter().enumerate() {
-        let mut l = Lowerer::new(&k, p.module.clone(), p.is_root);
-        l.param_notes = param_notes.iter().filter(|n| n.file == i).map(|n| ((n.fun_span, n.index), n.clone())).collect();
-        l.src_dir = p.input.abs_path.parent().map(|d| d.to_path_buf());
-        l.crate_attrs_allowed = opts.script;
-        l.lower_file(&p.file);
+    // with an Oxie root, generated accessors nobody calls are left out: the lowering runs again
+    // in the rare case that it calls one the dry run didn't
+    let lowered = loop {
+        let mut missed = HashSet::new();
+        let mut lowered = Vec::new();
+        for (i, p) in parsed.iter().enumerate() {
+            let mut l = Lowerer::new(&k, p.module.clone(), p.is_root);
+            l.param_notes = param_notes.iter().filter(|n| n.file == i).map(|n| ((n.fun_span, n.index), n.clone())).collect();
+            l.src_dir = p.input.abs_path.parent().map(|d| d.to_path_buf());
+            l.crate_attrs_allowed = opts.script;
+            l.source_words = Some(words[i].clone());
+            l.crate_calls = has_root.then_some(&calls);
+            l.lower_file(&p.file);
+            missed.extend(l.calls.iter().filter(|c| !calls.contains(*c)).cloned());
+            lowered.push((l.e, l.diags, l.root_lints));
+        }
+        if !has_root || missed.is_empty() {
+            break lowered;
+        }
+        calls.extend(missed);
+    };
+    for (p, (e, mut ldiags, root_lints)) in parsed.iter().zip(lowered) {
         let mut diags = p.diags.clone();
-        diags.append(&mut l.diags);
+        diags.append(&mut ldiags);
         let idx = LineIndex::new(&p.input.text);
         let mut header = String::from("// Generated by Oxie from ");
         // a script is compiled as `main.oxi`; the header names its file
@@ -192,12 +237,12 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
             ));
             // crate-level lint attributes (`#![allow(...)]` in the root file) also cover every module
             let decls = module_decls(&module_files, &[], &abs);
-            if l.root_lints.is_empty() {
+            if root_lints.is_empty() {
                 header.push_str(&decls);
             } else {
                 for line in decls.lines() {
                     if line.starts_with("#[path") || (line.starts_with("pub mod") && line.ends_with('{')) {
-                        for lint in &l.root_lints {
+                        for lint in &root_lints {
                             header.push_str(&format!("#[{}]\n", lint));
                         }
                     }
@@ -210,7 +255,7 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         }
         let header_lines = header.matches('\n').count() as u32;
         let mut text = header;
-        text.push_str(&l.e.buf);
+        text.push_str(&e.buf);
         if !text.ends_with('\n') {
             text.push('\n');
         }
@@ -218,13 +263,13 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
             text.push('\n');
             text.push_str(&footer);
         }
-        let entries = map_entries(&l.e.marks, header_lines, &idx, &p.input.text);
+        let entries = map_entries(&e.marks, header_lines, &idx, &p.input.text);
         let rel = if p.is_root {
             PathBuf::from(format!("{}.rs", p.input.rel_path.file_stem().unwrap().to_string_lossy()))
         } else {
             module_files[&p.module].clone()
         };
-        let decisions = l.e.decisions.iter().map(|d| Decision { gen_line: d.gen_line + header_lines, ..d.clone() }).collect();
+        let decisions = e.decisions.iter().map(|d| Decision { gen_line: d.gen_line + header_lines, ..d.clone() }).collect();
         out.files.push(GenFile { rel_path: rel, text, map: Some(SourceMap { source: p.input.abs_path.clone(), entries }), decisions });
         out.diags.push((p.input.abs_path.clone(), p.input.text.clone(), diags));
     }
@@ -281,6 +326,42 @@ fn map_entries(marks: &[Mark], line_offset: u32, idx: &LineIndex, src: &str) -> 
     v.sort();
     v.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
     v
+}
+
+/// The words of a source file outside comments: generated code doesn't shorten a std path to a
+/// name among them.
+fn source_words(text: &str) -> HashSet<String> {
+    let mut code = String::with_capacity(text.len());
+    let b = text.as_bytes();
+    let mut i = 0;
+    let mut in_str = false;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            // the words of a string count (`${name}`), only comments are skipped
+            if c == b'\\' {
+                code.push(' ');
+                i += 2;
+                continue;
+            }
+            in_str = c != b'"';
+        } else if c == b'"' {
+            in_str = true;
+        } else if c == b'\'' && b.get(i + 2) == Some(&b'\'') {
+            // `'"'`: a character, not the start of a string
+            i += 3;
+            continue;
+        } else if b[i..].starts_with(b"//") {
+            i = b[i..].iter().position(|&c| c == b'\n').map_or(b.len(), |n| i + n);
+            continue;
+        } else if b[i..].starts_with(b"/*") {
+            i = b[i + 2..].windows(2).position(|w| w == b"*/").map_or(b.len(), |n| i + n + 4);
+            continue;
+        }
+        code.push(if c.is_ascii() { c as char } else { ' ' });
+        i += 1;
+    }
+    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).map(String::from).collect()
 }
 
 /// Lowers a single file in isolation (for `oxie emit`, tests and tooling).
@@ -407,7 +488,7 @@ mod tests {
         // the method shares the name of the function whose parameter is lent, but keeps its own
         let src = "fun describe(t: String): usize = t.len()\nclass Shelf(var items: Vec<String> = vec[]) {\n    fun describe(t: String) { items.push(t) }\n}\n";
         let ds = decisions(src);
-        let about_t: Vec<(&str, &str)> = ds.iter().filter(|(about, ..)| about.starts_with("t:")).map(|(_, chosen, why)| (chosen.as_str(), why.as_str())).collect();
+        let about_t: Vec<_> = ds.iter().filter(|(about, ..)| about.starts_with("t:")).map(|(_, what, why)| (what.as_str(), why.as_str())).collect();
         assert_eq!(about_t, [("&str", "it only reads `t`"), ("owned", "it passes `t` to `.push()`")], "{ds:?}");
         assert!(ds.contains(&("describe".into(), "&mut self".into(), "it calls `items.push()`".into())), "{ds:?}");
     }

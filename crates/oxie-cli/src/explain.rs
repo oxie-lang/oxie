@@ -260,11 +260,14 @@ fn moved_value(d: &mut MappedDiag, sources: &Sources, lines: &[&str], name: &str
         let (pl, pc, pe, ty) = fun_param(&lines, f, *index)?;
         Some((sources.elsewhere(&file.path, &d.file), pl, pc, pe, ty, lines[pl as usize].to_string()))
     });
-    // Oxie already lends `String` and `Vec` parameters that a top-level function only reads; one
-    // that stayed owned is kept by the function (stored or returned), so `&` wouldn't compile.
-    // Nor would it for a parameter of any function that stores or returns it.
+    // Oxie already lends `String`, list, map, set and `PathBuf` parameters that a top-level
+    // function only reads; one that stayed owned is kept by the function (stored or returned), so
+    // `&` wouldn't compile. Nor would it for a parameter of any function that stores or returns it.
     let stored = callee.as_ref().filter(|_| param.is_some()).and_then(|(f, index)| stored_reason(sources, &d.file, f, *index));
-    let lent_kind = param.as_ref().is_some_and(|(.., ty, decl)| ["fun ", "private fun ", "internal fun "].iter().any(|p| decl.starts_with(p)) && (ty == "String" || ty.starts_with("Vec<")));
+    let lendable = |ty: &str| {
+        ty == "String" || ty == "PathBuf" || (ty.starts_with('[') && !ty.contains(';')) || ["Vec<", "HashMap<", "HashSet<", "BTreeMap<", "BTreeSet<"].iter().any(|p| ty.starts_with(p))
+    };
+    let lent_kind = param.as_ref().is_some_and(|(.., ty, decl)| ["fun ", "private fun ", "internal fun "].iter().any(|p| decl.starts_with(p)) && lendable(ty));
     let kept = lent_kind || stored.is_some();
     if kept {
         // say where and why the function keeps it, from the same rules that decided it
@@ -1406,7 +1409,7 @@ fn list_op_on_iterator(d: &mut MappedDiag, sources: &Sources, method: &str, ty: 
     // receiver of the chain, an iterator too
     d.secondary.retain(|s| !s.text.starts_with(&format!("method `{}` is available on", method)));
     d.notes.push(help(&format!(
-        "`{m}()` is one of Oxie's list operations: lists, arrays and slices have it, but `{ty}` is an iterator. Call it on the list (`xs.{m}()` rather than `xs.iter().{m}()`), or collect the iterator into a list first (`.collect::<Vec<_>>().{m}()`).",
+        "`{m}()` is one of Oxie's list operations: lists, arrays and slices have it, but `{ty}` is an iterator. Call it on the list (`xs.{m}()` rather than `xs.iter().{m}()`), or collect the iterator into a list first (`.to_list().{m}()`).",
         m = method,
         ty = ty
     )));
@@ -1439,7 +1442,7 @@ fn list_op_on_iterator(d: &mut MappedDiag, sources: &Sources, method: &str, ty: 
         // a list collected from it is a temporary, which the operations that return a reference
         // into the list would outlive
         _ if values_iterator(ty) && !["find", "find_last", "max_by_key", "min_by_key"].contains(&method) => {
-            d.fixes.push(Fix { title: "collect the iterator into a list first".into(), edits: vec![span_edit(src, Span::new(end as usize, end as usize), ".collect::<Vec<_>>()")] });
+            d.fixes.push(Fix { title: "collect the iterator into a list first".into(), edits: vec![span_edit(src, Span::new(end as usize, end as usize), ".to_list()")] });
         }
         _ => {}
     }

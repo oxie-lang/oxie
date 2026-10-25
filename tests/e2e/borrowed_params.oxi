@@ -1,5 +1,6 @@
 // A `String` or `Vec<T>` parameter that a function only reads becomes `&str` / `&[T]`, so callers
-// keep their values. Functions that keep the value, `pub` ones and ones used as values are unchanged.
+// keep their values. Functions that keep the value and ones used as values are unchanged; `pub` ones
+// are lent too, since no other crate calls a program's functions (a library's keep their types).
 
 fun greet(name: String) = println("hi $name (${name.len()})")
 fun shout(name: String): String = name.to_uppercase()
@@ -13,6 +14,8 @@ fun store(name: String, into: &mut Vec<String>) = into.push(name)
 pub fun public_api(name: String) = println(name)
 // used as a value below: keeps its signature
 fun used_as_value(s: String) = println(s)
+// called from Rust that Oxie doesn't read, with the declared type
+pub fun called_from_rust(s: String): usize = s.len()
 fun main() {
     val n = "ada".to_string()
     greet(n)
@@ -30,4 +33,5 @@ fun main() {
     println("${nums:?} ${names:?} ${all:?} ${keep("k".to_string())}")
     public_api("p".to_string())
     vec["v".to_string()].into_iter().for_each(used_as_value)
+    println(rust { called_from_rust(String::from("rust")) })
 }

@@ -136,6 +136,28 @@ impl Emitter {
         }
     }
 
+    /// Inserts whole lines before line `line` (zero-based), keeping the marks and decisions
+    /// after them in place.
+    pub fn insert_lines(&mut self, line: u32, lines: &[String]) {
+        if lines.is_empty() {
+            return;
+        }
+        let offset = match line {
+            0 => 0,
+            n => self.buf.match_indices('\n').nth(n as usize - 1).map_or(self.buf.len(), |(i, _)| i + 1),
+        };
+        let text: String = lines.iter().map(|l| format!("{}\n", l)).collect();
+        self.buf.insert_str(offset, &text);
+        let n = lines.len() as u32;
+        for m in self.marks.iter_mut().filter(|m| m.gen_line >= line) {
+            m.gen_line += n;
+        }
+        for d in self.decisions.iter_mut().filter(|d| d.gen_line >= line) {
+            d.gen_line += n;
+        }
+        self.line += n;
+    }
+
     /// Records a decision whose result was just written.
     pub fn decide(&mut self, span: Span, chosen: impl Into<String>, why: impl Into<String>, cause: Option<Span>) {
         let col = if self.at_line_start { (self.indent * 4) as u32 } else { self.col };

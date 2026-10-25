@@ -18,7 +18,7 @@ fun main() {
 
     // collections and lambdas
     val people = listOf(Person("Ada", 36), Person("Tim", 12), Person("Grace", 45))
-    val adults = people.iter().filter { it.age >= 18 }.map { it.name.as_str() }.collect::<Vec<_>>()
+    val adults = people.iter().filter { it.age >= 18 }.map { it.name.as_str() }.to_list()
     println("adults: ${adults.join(", ")}")
 
     // control flow is an expression

@@ -1,0 +1,19 @@
+// A list or map parameter that a function keeps (returns or stores) stays owned: the error says
+// why, and offers no fix that would borrow it.
+
+fun keep(v: [i32]): [i32] = v
+
+fun count(m: [String: i32]): usize = m.into_iter().count()
+
+fun main() {
+    val nums: [i32] = [1, 2]
+    val kept = keep(nums)
+    println("${kept.len()} ${nums.len()}")
+    // error: 11: `keep` keeps it (it returns `v`)
+    // not: 11: borrow it
+    val ages: [String: i32] = ["ada": 36]
+    println(count(ages))
+    println(ages.len())
+    // error: 16: `count` keeps it (it calls `.into_iter()` on `m`
+    // not: 16: borrow it
+}

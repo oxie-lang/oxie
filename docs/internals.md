@@ -9,13 +9,16 @@ This document is for people working on Oxie itself.
   │ lexer.rs      tokens with byte spans; significant newlines; string interpolation parts
   ▼
   │ parser.rs     recursive descent → ast.rs; error recovery per statement
+  │ lists.rs      array literals of `var`s that grow (`xs.push(..)`) become lists
   ▼
   │ contexts.rs   context parameters: `context(...)` clauses become parameters whose default is
   │               the caller's variable of that name; a class's methods get the ones they use
   ▼
+  │ params.rs     parameters that functions only read become references
   │ sema.rs       crate-wide symbol table: classes, enums, traits, functions, modules,
   │               extension traits; receiver inference; automatic derives
   │ fields.rs     methods that take only the fields they use (then sema.rs again)
+  │ params.rs     class parameters, then methods' (after a dry run of the lowering)
   ▼
   │ lower.rs      items, types, patterns → Rust text
   │ lower_expr.rs statements and expressions → Rust text (with source-map marks)
@@ -57,6 +60,17 @@ The compiler is a library (`oxie-compiler`) with no dependencies. `oxie-build` c
   since it would never run; the help points to `run { }`.
 * Errors are collected; after an error the parser skips to the end of the statement.
 * `rust { }` blocks and `name!( )` macro calls keep their source text verbatim.
+* `[T]` is parsed as a list, `Vec<T>` (`Type::list`), except where Rust takes an unsized slice:
+  `ty_base` reads and clears the `slice` flag, which the type before it sets (after `&`/`&mut`
+  and `*const`/`*mut`, in the arguments of `Box`, `Rc`, `Arc`, `Cow` and `Weak`, of a trait path
+  (`trait_path`: bounds, supertypes, an `impl`'s trait, `Target = `), for an `impl`'s type, an
+  associated type and a `where` predicate's type). `[K: V]` is `Type::map`: a single `HashMap`
+  segment with `global` set, which no Rust path can be (`::HashMap` would name a crate), so the
+  lowering prints std's map (see `std_name` below) while every analysis sees `HashMap`.
+* In expressions, `[k: v, ...]` is a `MapLit` of `Pair`s (as `mapOf(k to v)`) and `[:]` an empty
+  one. `[1, 2]` stays an `Array`: `coerce` turns it into the declared collection
+  (`collection_lit`: `vec![..]` for a `Vec`, `Name::from([..])` for other std collections, maps
+  from `MapLit`s), converting each element.
 
 ## Semantic analysis (`sema.rs`)
 
@@ -89,6 +103,24 @@ since rustc points inside the string for errors about it. Names Oxie introduces 
 `'__oxie_try1`) are numbered per function, so changing a function renumbers only its own.
 Multi-arm `match` lowerings (`?:` with a default that isn't a literal, `?` inside `try`) put
 each arm on its own line, as rustfmt does.
+
+Generated code names std items as hand-written Rust does where nothing can shadow the name:
+`Lowerer::std_name` is given a path (`std::rc::Rc`) and returns `Rc`, recording a `use` that
+`lower_file` inserts below the prelude import (`Emitter::insert_lines` moves the marks after
+it). `fmt` and `process` items go through their module (`fmt::Display`, `process::exit`) and
+prelude items (`Clone`, `Result`) need no `use`. A name is shadowable when the word appears
+anywhere in the file's source (`source_words`, so a user's `Error` class or `Rc` import keeps
+std's full path) or is a module declared beside it, when the file imports with a glob, and in
+`mod` and `object` blocks, which the file's `use` lines don't reach; there the full path
+(`::std::rc::Rc`) is written. `rt_name` does the same for runtime items in the prelude
+(`AnyError`).
+
+With an Oxie root, the dry run of the lowering (see `params.rs`) also records what the code calls
+(`Lowerer::calls`: methods, getters and setters by name, constructors as `Class::new`), with the
+calls in Rust text (`params::raw_calls`). The final lowering gets that set as `crate_calls`:
+a shared class's getters and setters that nothing calls are left out (a library keeps those of
+its public fields), and generated items that are called lose their `#[allow(dead_code)]`. If
+the final lowering calls an accessor the set lacks, it runs again with it added.
 
 The choices the source doesn't spell out are recorded as `Decision`s where their result is
 written (`Emitter::decide`): an inferred `&mut self` (with the reason from receiver inference),
@@ -131,9 +163,12 @@ Notable translations:
   lambda parameters) don't. Receiver inference (`sema.rs`) treats a field passed to a `&mut`
   parameter as a mutation of `self`.
 * **Borrowed parameters** (`params.rs`, before lowering): a `String`/`Vec<T>` parameter of a
-  non-`pub` top-level function becomes `&str`/`&[T]` when every use is a read (a method that
-  exists on `str`/slices, printing, comparing, indexing, or passing it to a parameter that is
-  itself borrowed). A greatest fixpoint over the crate handles forwarding and recursion; a
+  top-level function becomes `&str`/`&[T]` when every use is a read (a method that exists on
+  `str`/slices, printing, comparing, indexing, or passing it to a parameter that is itself
+  borrowed); a map or set (`Kind::Coll`) becomes `&HashMap<K, V>` and a `PathBuf` `&Path` the
+  same way. `pub` functions are left out, except in a program (`main.oxi` without `lib.oxi`),
+  which no other crate calls. A field written without its value (`Point { x, y }`) or Rust text
+  (`rust { }`, a macro's arguments) that names the parameter keeps it owned. A greatest fixpoint over the crate handles forwarding and recursion; a
   `move` lambda or async block capturing the parameter keeps it owned. A `Vec<T>` is lent only
   when dropping a `T` just frees memory (`Types::drop_free`: primitives, `String`, std
   containers of such types, and Oxie classes, enums and aliases made of them with no `Drop`
@@ -147,6 +182,16 @@ Notable translations:
   formatted, compared, indexed, lent on, `Copy`, or the receiver of a method that only reads
   their type. `Copy` and `shared` classes, classes with lifetimes, and functions whose result
   is a reference are left out. The pass runs next to `fields.rs`, before sema collects again.
+  Methods go through it last (`borrow_method_params`, `Stage::Methods`), with every kind of
+  parameter: a call `x.f(..)` from a method of the same class (`f(..)`, `this.f(..)`) lends when
+  `f`'s parameter does. A lent parameter only works where the lowering writes the `&`, in calls
+  it resolves to the method, so `compile.rs` first lowers the crate once without keeping the
+  result: `Lowerer::unresolved` collects the names of methods called where the receiver's type
+  doesn't say which method it is (`may_reach_oxie`: unknown, `Box<..>`, a crate's type), after
+  `?.`, or through a path the lowering can't follow, and methods of those names keep their
+  types. So do methods used as values, called from Rust text (`raw_calls`) or implementing an
+  interface or operator, a library's `pub` methods, and every method of a Rust crate with Oxie
+  modules, whose Rust code may call any of them.
 * **Methods that take only the fields they use** (`fields.rs`, after receiver inference): a
   `&mut self` method that a method of its class calls inside a loop over another field (or a
   lambda passed to a method of one) becomes `static`, with the fields it uses as parameters.
@@ -184,8 +229,8 @@ Notable translations:
   literal are read with `crate::__oxie::val(it)` (the `Val` trait strips any number of
   references from numbers, `bool` and `char`).
 * **Shared classes** (`shared.rs`): the class is lowered as `{Name}Data`, then the handle
-  (`Rc<RefCell<..>>` or `Arc<Mutex<..>>`), forwarding methods, getters, setters and identity
-  `PartialEq`/`Hash` are emitted. Expression lowering routes `obj.field` reads, assignments
+  (`Rc<RefCell<..>>` or `Arc<Mutex<..>>`), forwarding methods, the getters and setters the
+  crate calls, and identity `PartialEq`/`Hash` are emitted. Expression lowering routes `obj.field` reads, assignments
   and calls on fields of known shared types through getters, setters or a single borrow,
   evaluating arguments before a mutable borrow; shared places used by value get `.clone()`.
 

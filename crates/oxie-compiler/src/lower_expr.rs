@@ -1165,10 +1165,20 @@ impl<'a> Lowerer<'a> {
             }
         }
         match ty {
+            // `&["a": 1]` for a `&[String: i32]` parameter
+            Type::Ref { mutable: false, inner, .. } if matches!(&e.kind, ExprKind::Unary(UnOp::Ref, x) if is_collection_lit(x)) => {
+                let ExprKind::Unary(_, x) = &e.kind else { unreachable!() };
+                self.e.w("&");
+                if !self.borrowed_lit(x, inner) {
+                    self.expr(x, P_UNARY);
+                }
+            }
             Type::Ref { mutable, inner, .. } if pos == TyPos::Param && (self.auto_borrow(e, *mutable) || !mutable && self.lend_to_slice(e, inner)) => {
                 self.e.mark(e.span);
                 self.e.w(if *mutable { "&mut " } else { "&" });
-                self.expr(e, P_UNARY);
+                if !(is_collection_lit(e) && self.borrowed_lit(e, inner)) {
+                    self.expr(e, P_UNARY);
+                }
                 let param = self.ty(ty, TyPos::Param);
                 self.e.decide(e.span, if *mutable { "&mut" } else { "&" }, format!("the parameter is `{}`", param), None);
             }
@@ -1243,25 +1253,7 @@ impl<'a> Lowerer<'a> {
                     self.expr(e, P_LOWEST);
                 }
             }
-            Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Vec" && segs[0].generics.as_ref().is_some_and(|g| g.len() == 1) => {
-                let elem = match &segs[0].generics.as_ref().unwrap()[0] {
-                    GenericArg::Type(t) => Some(t.clone()),
-                    _ => None,
-                };
-                match (&e.kind, elem) {
-                    (ExprKind::VecLit(items), Some(elem)) if !items.iter().any(|x| matches!(x.kind, ExprKind::ArrayRepeat(..))) => {
-                        self.e.w("vec![");
-                        for (i, x) in items.iter().enumerate() {
-                            if i > 0 {
-                                self.e.w(", ");
-                            }
-                            self.coerce(x, &elem, TyPos::Generic);
-                        }
-                        self.e.w("]");
-                    }
-                    _ => self.expr(e, P_LOWEST),
-                }
-            }
+            Type::Path { .. } if self.collection_lit(e, ty) => {}
             Type::Path { segs, .. }
                 if segs.len() == 1 && matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local) && self.is_trait_name(&segs[0].name) && self.boxes_into(e, &segs[0].name) =>
             {
@@ -1270,6 +1262,108 @@ impl<'a> Lowerer<'a> {
                 self.e.w(")");
             }
             _ => self.expr(e, P_LOWEST),
+        }
+    }
+
+    /// A list or map literal (`[1, 2]`, `vec[..]`, `[x; n]`, `["a": 1]`, `[:]`) for a declared std
+    /// collection: `vec![..]` for a list, `Name::from([..])` for the others, with each element
+    /// converted to the element type (`"a"` to a `String`). False, emitting nothing, for other
+    /// expressions and types.
+    fn collection_lit(&mut self, e: &Expr, ty: &Type) -> bool {
+        let Type::Path { segs, .. } = ty else { return false };
+        let [seg] = segs.as_slice() else { return false };
+        let name = seg.name.as_str();
+        if self.k.is_user_type(name) && !ty.is_map() {
+            return false;
+        }
+        let args: Vec<&Type> = seg.generics.iter().flatten().filter_map(|a| if let GenericArg::Type(t) = a { Some(t) } else { None }).collect();
+        match (&e.kind, name, args.as_slice()) {
+            (ExprKind::Array(items) | ExprKind::VecLit(items), "Vec", [elem]) => match items.as_slice() {
+                [x] if matches!(x.kind, ExprKind::ArrayRepeat(..)) => return self.collection_lit(x, ty),
+                _ => {
+                    self.e.w("vec![");
+                    self.coerce_each(items, elem);
+                    self.e.w("]");
+                }
+            },
+            (ExprKind::ArrayRepeat(x, n), "Vec", [elem]) => {
+                self.e.w("vec![");
+                self.coerce(x, elem, TyPos::Generic);
+                self.e.w("; ");
+                self.expr(n, P_LOWEST);
+                self.e.w("]");
+            }
+            (ExprKind::Array(items), "VecDeque" | "LinkedList" | "BinaryHeap" | "HashSet" | "BTreeSet", [elem]) => {
+                let path = self.std_collection(name);
+                if items.is_empty() {
+                    self.e.w(&format!("{}::new()", path));
+                } else {
+                    self.e.w(&format!("{}::from([", path));
+                    self.coerce_each(items, elem);
+                    self.e.w("])");
+                }
+            }
+            (ExprKind::MapLit(items), "HashMap" | "BTreeMap", [key, value]) => {
+                let path = self.std_collection(name);
+                if items.is_empty() {
+                    self.e.w(&format!("{}::new()", path));
+                    return true;
+                }
+                self.e.w(&format!("{}::from([", path));
+                for (i, x) in items.iter().enumerate() {
+                    if i > 0 {
+                        self.e.w(", ");
+                    }
+                    match pair_parts(x) {
+                        Some((k, v)) => {
+                            self.e.w("(");
+                            self.coerce(k, key, TyPos::Generic);
+                            self.e.w(", ");
+                            self.coerce(v, value, TyPos::Generic);
+                            self.e.w(")");
+                        }
+                        None => self.expr(x, P_LOWEST),
+                    }
+                }
+                self.e.w("])");
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// A collection literal lent to a `&T` parameter, converted to `T`: `[..]` for a slice, else
+    /// as for a value (`collection_lit`). False, emitting nothing, when it can't be.
+    fn borrowed_lit(&mut self, e: &Expr, inner: &Type) -> bool {
+        match (&e.kind, inner) {
+            (ExprKind::Array(items), Type::Slice(elem)) => {
+                self.e.w("[");
+                self.coerce_each(items, elem);
+                self.e.w("]");
+                true
+            }
+            (ExprKind::VecLit(_), Type::Slice(elem)) => self.collection_lit(e, &Type::list((**elem).clone(), e.span)),
+            _ => self.collection_lit(e, inner),
+        }
+    }
+
+    /// `items` separated by commas, each converted to `elem`.
+    fn coerce_each(&mut self, items: &[Expr], elem: &Type) {
+        for (i, x) in items.iter().enumerate() {
+            if i > 0 {
+                self.e.w(", ");
+            }
+            self.coerce(x, elem, TyPos::Generic);
+        }
+    }
+
+    /// The path of std's collection `name` (`HashSet`) here: the name itself where the module
+    /// imports it, else `::std::collections::HashSet`.
+    pub(crate) fn std_collection(&self, name: &str) -> String {
+        if self.names_std(name) {
+            name.to_string()
+        } else {
+            self.std_name(&format!("std::collections::{}", name))
         }
     }
 
@@ -1297,8 +1391,23 @@ impl<'a> Lowerer<'a> {
             }
             _ if mutable => self.is_place(e),
             ExprKind::Field { .. } | ExprKind::Index(..) => true,
-            ExprKind::Call { .. } | ExprKind::StructLit { .. } | ExprKind::VecLit(_) | ExprKind::Array(_) | ExprKind::Template(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Tuple(_) => true,
-            ExprKind::MethodCall { name, .. } => matches!(name.as_str(), "clone" | "to_string" | "to_owned" | "to_vec" | "collect" | "format"),
+            ExprKind::Call { .. }
+            | ExprKind::StructLit { .. }
+            | ExprKind::VecLit(_)
+            | ExprKind::Array(_)
+            | ExprKind::ArrayRepeat(..)
+            | ExprKind::MapLit(_)
+            | ExprKind::SetLit(_)
+            | ExprKind::Template(_)
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Tuple(_) => true,
+            // a call that makes a value: by its name, or by the type Oxie knows it returns
+            // (`LineEdit.of(..)`); a reference it returns would be lent as `&&T`
+            ExprKind::MethodCall { name, .. } => {
+                matches!(name.as_str(), "clone" | "to_string" | "to_owned" | "to_vec" | "to_list" | "collect" | "format")
+                    || self.infer_type(e).is_some_and(|t| !matches!(t, Type::Ref { .. } | Type::Ptr { .. } | Type::Infer) && t.last_name() != Some("str"))
+            }
             _ => false,
         }
     }
@@ -1312,12 +1421,14 @@ impl<'a> Lowerer<'a> {
     /// An argument for a `&str` or `&[T]` parameter is lent unless it already is a reference:
     /// lending a reference (`&s.trim()`) is harmless, since `&&str` coerces to `&str`.
     fn lend_to_slice(&self, e: &Expr, inner: &Type) -> bool {
-        if !(matches!(inner, Type::Slice(_)) || inner.single_name() == Some("str")) {
-            return false;
-        }
+        (matches!(inner, Type::Slice(_)) || inner.single_name() == Some("str")) && self.lends_value(e)
+    }
+
+    /// Is `e` a value to lend, rather than something that already is a reference?
+    fn lends_value(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Unary(UnOp::Ref | UnOp::RefMut, _) | ExprKind::Null | ExprKind::Lambda { .. } | ExprKind::SelfValue => false,
-            ExprKind::Paren(x) => self.lend_to_slice(x, inner),
+            ExprKind::Paren(x) => self.lends_value(x),
             // a lambda parameter without a type gets it from this use: `&it` would make it `str`
             _ if e.ident().is_some_and(|n| self.untyped_param(n)) => false,
             _ => match e.ident().and_then(|n| self.local(n)) {
@@ -2015,7 +2126,8 @@ impl<'a> Lowerer<'a> {
                     self.expr(x, P_LOWEST);
                     self.e.w(" {");
                     self.e.indent();
-                    self.e.w(&format!("\nOk({v}) => {v},\nErr({err}) => break '{label} Err(::std::convert::From::from({err})),"));
+                    let from = self.std_name("std::convert::From");
+                    self.e.w(&format!("\nOk({v}) => {v},\nErr({err}) => break '{label} Err({from}::from({err})),"));
                     self.e.dedent();
                     self.e.w("\n}");
                 } else {
@@ -2353,20 +2465,12 @@ impl<'a> Lowerer<'a> {
                 self.comma_list(v);
                 self.e.w("]");
             }
-            MapLit(v) => {
+            MapLit(v) | SetLit(v) => {
+                let path = self.std_collection(if matches!(e.kind, MapLit(_)) { "HashMap" } else { "HashSet" });
                 if v.is_empty() {
-                    self.e.w("::std::collections::HashMap::new()");
+                    self.e.w(&format!("{}::new()", path));
                 } else {
-                    self.e.w("::std::collections::HashMap::from([");
-                    self.comma_list(v);
-                    self.e.w("])");
-                }
-            }
-            SetLit(v) => {
-                if v.is_empty() {
-                    self.e.w("::std::collections::HashSet::new()");
-                } else {
-                    self.e.w("::std::collections::HashSet::from([");
+                    self.e.w(&format!("{}::from([", path));
                     self.comma_list(v);
                     self.e.w("])");
                 }
@@ -2993,6 +3097,10 @@ impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ paths
 
     fn path_expr(&mut self, segs: &[String], generics: Option<&Vec<GenericArg>>, global: bool, span: Span) {
+        // `Account::balance` as a value
+        if let [_, .., last] = segs {
+            self.calls.insert(last.clone());
+        }
         let mut s = String::new();
         if global {
             s.push_str("::");
@@ -3277,7 +3385,7 @@ impl<'a> Lowerer<'a> {
         if refs >= 2 {
             self.e.w("*");
             self.expr(key, P_UNARY);
-        } else if literal || self.auto_borrow(key, false) && (lend_unknown || !key.ident().is_some_and(|n| matches!(self.local(n), Some(None)))) {
+        } else if literal || self.auto_borrow(key, false) && (lend_unknown || !key.ident().is_some_and(|n| self.is_local(n)) || self.infer_type(key).is_some()) {
             self.e.w("&");
             self.expr(key, P_UNARY);
         } else {
@@ -3421,9 +3529,9 @@ impl<'a> Lowerer<'a> {
                     // `mutableListOf<T>()`, `mapOf<K, V>()`: empty collections with explicit types
                     if let Some(g) = generics.as_ref().filter(|_| args.is_empty()) {
                         let ty = match name.as_str() {
-                            "listOf" | "mutableListOf" | "arrayListOf" | "vecOf" => Some("Vec"),
-                            "mapOf" | "mutableMapOf" | "hashMapOf" => Some("::std::collections::HashMap"),
-                            "setOf" | "mutableSetOf" | "hashSetOf" => Some("::std::collections::HashSet"),
+                            "listOf" | "mutableListOf" | "arrayListOf" | "vecOf" => Some("Vec".to_string()),
+                            "mapOf" | "mutableMapOf" | "hashMapOf" => Some(self.std_collection("HashMap")),
+                            "setOf" | "mutableSetOf" | "hashSetOf" => Some(self.std_collection("HashSet")),
                             _ => None,
                         };
                         if let Some(ty) = ty {
@@ -3438,6 +3546,7 @@ impl<'a> Lowerer<'a> {
                 }
                 if let Some(cls) = self.class_info(&name).cloned() {
                     if !cls.is_tuple && !cls.is_union {
+                        self.calls.insert(format!("{}::new", name));
                         let g = generics.as_ref().map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                         self.e.w(&format!("{}{}::new", esc(&name), g));
                         let params = cls.ctor_params();
@@ -3522,6 +3631,7 @@ impl<'a> Lowerer<'a> {
             }
             if let Some(c) = self.class_at(&owner).cloned() {
                 if last == "new" && !c.user_new {
+                    self.calls.insert(format!("{}::new", owner[owner.len() - 1]));
                     self.e.w(&path);
                     if let Some(g) = generics {
                         let gt = self.generic_args_text(g);
@@ -3540,6 +3650,7 @@ impl<'a> Lowerer<'a> {
             // `shapes.Circle(2.0)`: a class constructed through the module that declares it
             if let Some(c) = self.k.type_key_at(segs, &self.module).and_then(|key| self.k.classes.get(&key)).cloned() {
                 if !c.is_tuple && !c.is_union {
+                    self.calls.insert(format!("{}::new", segs[n - 1]));
                     let g = generics.map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                     self.e.w(&format!("{}{}::new", path, g));
                     let params = c.ctor_params();
@@ -3555,6 +3666,9 @@ impl<'a> Lowerer<'a> {
                 self.arg_list(args, Some(&fi.params), TyPos::Param, span);
                 return;
             }
+        }
+        if n >= 2 {
+            self.unresolved.insert(segs[n - 1].clone());
         }
         let mut path = self.join_path(segs);
         if let Some(g) = generics {
@@ -3574,12 +3688,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             VariantShape::Tuple(types) => {
-                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false }).collect();
+                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false }).collect();
                 self.e.w(path);
                 self.arg_list(args, Some(&params), TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
-                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false }).collect();
+                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false }).collect();
                 let slots = self.fill_args(args, &params, span);
                 self.e.w(&format!("{} {{ ", path));
                 for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
@@ -3590,7 +3704,7 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("{}: ", esc(&name)));
                     match a {
                         Some(x) => self.coerce(x, &p.ty, TyPos::Field),
-                        None => self.e.w("::std::default::Default::default()"),
+                        None => self.e.w(&format!("{}::default()", self.std_name("std::default::Default"))),
                     }
                 }
                 self.e.w(" }");
@@ -3692,7 +3806,7 @@ impl<'a> Lowerer<'a> {
             if self.this_recv.is_none() {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
-            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false });
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false });
             args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span), trailing: false });
         }
         (args, params)
@@ -3713,6 +3827,13 @@ impl<'a> Lowerer<'a> {
                         // a lambda can't be annotated with the callee's type parameters
                         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
                             self.expr(a, P_LOWEST);
+                        } else if p.lent && !is_collection_lit(a) && self.lends_value(a) {
+                            // its callers passed the owned value before Oxie lent the parameter
+                            self.e.mark(a.span);
+                            self.e.w("&");
+                            self.expr(a, P_UNARY);
+                            let param = self.ty(&p.ty, TyPos::Param);
+                            self.e.decide(a.span, "&", format!("the parameter is `{}`", param), None);
                         } else {
                             self.coerce(a, &p.ty, if p.boxed { TyPos::Generic } else { pos });
                         }
@@ -3958,6 +4079,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn method_call(&mut self, recv: &Expr, name: &str, generics: Option<&Vec<GenericArg>>, args: &[Arg], span: Span) {
+        self.record_member(recv, name);
         // Kotlin scope function: x.let { ... }
         if name == "let" && args.len() == 1 {
             if let ExprKind::Lambda { params, body, .. } = &args[0].value.kind {
@@ -4032,7 +4154,8 @@ impl<'a> Lowerer<'a> {
         }
         // method of an Oxie class when the receiver's type is known
         if !matches!(recv.kind, ExprKind::SelfValue) {
-            let owner = self.infer_type(recv).and_then(|t| self.type_owner(&t));
+            let recv_ty = self.infer_type(recv);
+            let owner = recv_ty.as_ref().and_then(|t| self.type_owner(t));
             let m = owner.as_ref().and_then(|o| self.class_at(o).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(o).and_then(|e| e.methods.get(name)))).cloned();
             if let Some(m) = m {
                 self.expr(recv, P_POSTFIX);
@@ -4043,6 +4166,9 @@ impl<'a> Lowerer<'a> {
                 }
                 self.arg_list(args, Some(&m.params), TyPos::Param, span);
                 return;
+            }
+            if self.may_reach_oxie(recv_ty.as_ref()) {
+                self.unresolved.insert(name.to_string());
             }
         }
         // an interface's method with interface parameters, which take boxes, on an interface
@@ -4115,6 +4241,30 @@ impl<'a> Lowerer<'a> {
         self.arg_list(&args, None, TyPos::Param, span);
     }
 
+    /// Can a method call on a value of type `t` reach a method of an Oxie class it didn't
+    /// resolve to? Not on std's plain values (`String`, `Vec`, numbers, `Option`, ...) or on an
+    /// Oxie class or enum without that method; on anything else (an unknown type, `Box<..>`, a
+    /// crate's type) it may, through `Deref`.
+    fn may_reach_oxie(&self, t: Option<&Type>) -> bool {
+        const PLAIN: &[&str] = &[
+            "String", "Vec", "VecDeque", "LinkedList", "BinaryHeap", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Option", "Result",
+            "PathBuf", "Path", "OsString", "OsStr", "Duration", "Instant", "SystemTime", "Range", "RangeInclusive",
+        ];
+        match t {
+            None => true,
+            Some(Type::Ref { inner, .. }) => self.may_reach_oxie(Some(inner)),
+            Some(Type::Tuple(_) | Type::Array(..) | Type::Slice(_) | Type::Option(_) | Type::Never) => false,
+            Some(t @ Type::Path { segs, .. }) => {
+                if self.type_owner(t).is_some_and(|o| self.class_at(&o).is_some() || self.enum_at(&o).is_some()) {
+                    return false;
+                }
+                let name = segs.last().map(|s| s.name.as_str()).unwrap_or_default();
+                !(PLAIN.contains(&name) || crate::lower::PRIMITIVES.contains(&name) || kotlin_alias(name).is_some())
+            }
+            Some(_) => true,
+        }
+    }
+
     /// Kotlin lambdas may ignore their argument (`map_err { MyError() }`); Rust closures must
     /// declare it. Adds `_` for std methods whose closure always receives a value.
     fn fix_lambda_arity(&self, recv: &Expr, name: &str, args: &[Arg]) -> Vec<Arg> {
@@ -4173,6 +4323,7 @@ impl<'a> Lowerer<'a> {
                 self.e.w(&member(name));
             }
             ExprKind::MethodCall { name, generics, args, .. } => {
+                self.unresolved.insert(name.clone());
                 self.e.w(".");
                 self.e.w(&member(name));
                 if let Some(g) = generics {
@@ -4302,7 +4453,15 @@ impl<'a> Lowerer<'a> {
                 _ => None,
             };
             match shared {
-                Some((name, _)) if i == seg.len() - 1 => self.e.w(&format!(".{}()", member(name))),
+                Some((name, _)) if i == seg.len() - 1 => {
+                    self.calls.insert(name.clone());
+                    if let ExprKind::Field { recv, .. } = &l.kind {
+                        if let Some(c) = self.optional_shared_class(recv) {
+                            self.calls.insert(format!("{}::{}", c, name));
+                        }
+                    }
+                    self.e.w(&format!(".{}()", member(name)));
+                }
                 Some((name, _)) => {
                     let write = matches!(&seg[i + 1].kind, ExprKind::MethodCall { name, .. } if crate::sema::MUTATING_METHODS.contains(&name.as_str()));
                     let access = if write { "write()" } else { "read()" };
@@ -4426,6 +4585,16 @@ impl<'a> Lowerer<'a> {
 
     /// Is `recv.field` (in a `?.` chain) a field of a shared class, reached through a `T?` or
     /// a reference? Returns whether the class is `@sync`.
+    /// The shared class of a value in a `?.` chain, through `T?` and references.
+    fn optional_shared_class(&self, recv: &Expr) -> Option<String> {
+        let mut t = self.chain_value_type(recv);
+        while let Some(Type::Option(inner) | Type::Ref { inner, .. }) = t {
+            t = Some(*inner);
+        }
+        let n = t.as_ref()?.single_name()?;
+        self.class_info(n).filter(|c| c.is_shared).map(|_| n.to_string())
+    }
+
     fn optional_shared_field(&self, recv: &Expr, field: &str) -> Option<bool> {
         let mut t = self.chain_value_type(recv);
         while let Some(Type::Option(inner) | Type::Ref { inner, .. }) = t {
@@ -5318,7 +5487,7 @@ impl<'a> Lowerer<'a> {
         let label = self.fresh("try");
         let err_ty = match catch.and_then(|c| c.ty.as_ref()) {
             Some(t) => self.ty(t, TyPos::Generic),
-            None => format!("{}::AnyError", RT),
+            None => self.rt_name("AnyError"),
         };
         let wrap = format!("Ok::<_, {}>", err_ty);
         let emit_block = |l: &mut Self, value: bool| {
@@ -5717,6 +5886,20 @@ fn spine<'e>(e: &'e Expr, ops: &mut Vec<&'e Expr>, nodes: &mut Vec<&'e Expr>) {
 
 /// The names an import brings in, with the paths they stand for (`Config` for
 /// `nucleo_matcher::{Config, Matcher}`).
+/// A list or map literal: `[1, 2]`, `[x; n]`, `vec[..]`, `["a": 1]`.
+fn is_collection_lit(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Array(_) | ExprKind::ArrayRepeat(..) | ExprKind::VecLit(_) | ExprKind::MapLit(_))
+}
+
+/// The key and value of a map literal's entry: `k: v`, `k to v` or `(k, v)`.
+fn pair_parts(x: &Expr) -> Option<(&Expr, &Expr)> {
+    match &x.kind {
+        ExprKind::Pair(k, v) => Some((k, v)),
+        ExprKind::Tuple(t) if t.len() == 2 => Some((&t[0], &t[1])),
+        _ => None,
+    }
+}
+
 fn imported_names(tree: &UseTree, prefix: &[String], out: &mut Vec<(String, Vec<String>)>) {
     match tree {
         UseTree::Path { segments, alias } => {

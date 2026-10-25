@@ -83,7 +83,7 @@ fun short(x: i32) = x * 2
 * **Inferred bounds**: bounds a function body needs are added to the generated signature
   (methods of generic classes get them as a `where` clause on the method):
 
-  | use of a `T` value (or an element of `&[T]`, `Vec<T>`) | bound added |
+  | use of a `T` value (or an element of `[T]`, `&[T]`) | bound added |
   |---|---|
   | `"$x"`, `println(x)`, `x.to_string()` | `Display` |
   | `"${x:?}"` | `Debug` |
@@ -101,26 +101,36 @@ fun short(x: i32) = x * 2
   Interface methods keep the interface's signature.
 * **Automatic borrowing**: an argument for a `&T` or `&mut T` parameter of a function or method
   declared in Oxie is borrowed: `total(v)` → `total(&v)`, `add_one(v)` → `add_one(&mut v)`.
-  For a `&str` or `&[T]` parameter any owned argument is lent (`greet(name.to_uppercase())`).
-* **Borrowed parameters**: a `String` or `Vec<T>` parameter of a function or method that isn't
-  `pub` (except interface methods, overrides and methods of shared classes) becomes `&str` or
-  `&[T]` when the body only reads it (calls `len`, `contains`, `iter`, `map`, ..., prints it,
-  compares it, joins it with `+`, indexes it, loops over it reading the elements, or passes it on
-  to another borrowed parameter), so callers keep their value. `Copy` elements of a lent `Vec`
-  stay values in a loop (`for &x in xs`). A function that stores, returns or consumes the value keeps the
-  owned type, and so do functions that are `pub`, `async`, used as values (`xs.map(greet)`) or
-  called through a path (`util.greet(x)`). A `Vec<T>` is lent only when dropping a `T` just
-  frees memory (numbers, strings, std collections of them, and Oxie types made of those that
-  don't implement `Drop`). A `Vec` of mutex guards, files, `Rc`s or a type parameter stays
-  owned, so the function drops it when it returns, as in Rust: a guard unlocks there, not at
-  the end of the caller.
+  For a `&str` or `&[T]` parameter any owned argument is lent (`greet(name.to_uppercase())`); for
+  another `&T` parameter, so is a call whose result Oxie knows is a value (`describe(Point.origin())`).
+* **Borrowed parameters**: a `String` or list (`[T]`) parameter that the body only reads
+  becomes `&str` or `&[T]` (calls `len`, `contains`, `iter`, `map`, ..., prints it, compares it,
+  joins it with `+`, indexes it, loops over it reading the elements, or passes it on to another
+  borrowed parameter), so callers keep their value; `Copy` elements of a lent list stay values in
+  a loop (`for &x in xs`). So
+  does a map or set (`[K: V]`, `HashSet<T>`, `BTreeMap<K, V>`; reading it with `get`, `keys`,
+  `key in m`, `m[k]`, ...: `&HashMap<K, V>`) and a `PathBuf` (`exists`, `join`, `display`, ...:
+  `&Path`). A function that stores, returns or consumes the value keeps the owned type, and so
+  do functions that are `async`, used as values (`xs.map(greet)`) or called through a path
+  (`util.greet(x)`). A list is lent only when dropping a `T` just frees memory (numbers,
+  strings, std collections of them, and Oxie types made of those that don't implement `Drop`).
+  A list of mutex guards, files, `Rc`s or a type parameter stays owned, so the function drops
+  it when it returns, as in Rust: a guard unlocks there, not at the end of the caller.
   A parameter of an Oxie class or `Box<T>` becomes `&T` the same way when the body only reads
   it: calls its methods that take `&self` (or `clone`, `to_string`, `copy(...)`), formats it, or
   reads its fields (`u.name.len()`, `u.age > 18`, `"${u.address.city}"`, a `Copy` field
   anywhere). Comparing the value itself (`u == other`), taking a field out (`val n = u.name`),
   changing it or calling a method that does keeps it owned. So do `Copy` classes (a copy is
   passed) and `shared` classes (a handle is), and functions whose result is a reference. The drop
-  rule of `Vec<T>` applies to the whole value.
+  rule of lists applies to the whole value.
+  **Methods** lend their parameters the same way, when Oxie resolves every call that may reach
+  them, so it can write the `&`: not a method called on a value whose type Oxie doesn't know,
+  after `?.`, used as a value (`Self.save`) or called from a `rust { }` block, nor one that
+  implements an interface method or an operator (its parameters are the interface's).
+  **Who calls it**: in a program (`main.oxi`), every function and method; in a library
+  (`lib.oxi`), those that aren't `pub`, since other crates call those with the declared types;
+  in a Rust crate with Oxie modules, top-level functions that aren't `pub`, and no methods, since
+  its Rust code may call them.
   Arguments that already are references (`&v`, reference-typed variables, `self`, string
   literals) are passed as they are. Passing a field to a `&mut` parameter makes the method
   `&mut self`.
@@ -171,7 +181,7 @@ fun short(x: i32) = x * 2
 ### Context parameters
 
 ```oxie
-class Log(var lines: Vec<String> = vec[]) {
+class Log(var lines: [String] = []) {
     fun add(line: String) = lines.push(line)
 }
 
@@ -181,7 +191,7 @@ fun record(line: &str) = log.add(line.to_string())
 
 // each method takes the contexts it uses
 context(log: &mut Log)
-class Cart(var items: Vec<String> = vec[]) {
+class Cart(var items: [String] = []) {
     fun add(item: &str) {
         items.push(item.to_string())
         record("added $item")              // passes its own `log`
@@ -230,9 +240,11 @@ fun main() {
 | `i32`, `u8`, `f64`, `bool`, `char`, `str`, `String`, ... | same |
 | `Int`, `Long`, `Short`, `Byte`, `UInt`, `ULong`, `Double`, `Float`, `Boolean`, `Char`, `Unit` | `i32`, `i64`, `i16`, `i8`, `u32`, `u64`, `f64`, `f32`, `bool`, `char`, `()` |
 | `T?` | `Option<T>` (`&T?` is `Option<&T>`) |
+| `[T]` | `Vec<T>`, a list; Rust's slice `[T]` right after `&`, `&mut`, `*const` and `*mut`, inside `Box`, `Rc`, `Arc`, `Cow` and `Weak`, in a trait's type arguments (`impl AsRef<[u8]>`), and as an `impl` block's type or an associated type (`type Target = [T]`) |
+| `[K: V]` | `HashMap<K, V>`, std's map |
 | `(A, B) -> R` | `impl FnMut(A, B) -> R`, `Box<dyn Fn(A, B) -> R>` or `dyn Fn(..)` depending on position |
 | `Shape` (an interface used as a type) | `impl Shape` (parameters, returns; `impl Shape + 'static` for a parameter the function stores), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, returns of different classes, and parameters and results of interface methods) |
-| `&T`, `&mut T`, `[T]`, `[T; N]`, `(A, B)`, `Vec<T>`, `dyn T`, `impl T`, `*const T` | same |
+| `&T`, `&mut T`, `&[T]`, `[T; N]`, `(A, B)`, `Vec<T>`, `HashMap<K, V>`, `dyn T`, `impl T`, `*const T` | same |
 | `std.io.Error` | `std::io::Error` (dots or `::` in paths) |
 
 A function that returns an interface returns its value unboxed (`impl Shape`), unless its
@@ -250,7 +262,7 @@ fun pick(round: bool): Shape = if (round) Circle(1.0) else Square(2.0)   // -> B
 fun main() = println("${unit().area()} ${pick(true).area()} ${pick(false).area()}")
 ```
 
-An element of a `Vec<Shape>` (or `Vec<Box<Shape>>`), a loop variable over one and an
+An element of a `[Shape]` (or `[Box<Shape>]`), a loop variable over one and an
 interface-typed field are lent to an `&Shape` parameter as the value inside the box
 (`describe(shapes[0])` → `describe(&*shapes[0])`). Oxie also implements each interface for
 `Box<T>` and `&T` that forward to the value (`impl<T: Shape + ?Sized> Shape for Box<T>`, when its
@@ -310,7 +322,7 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
   not a derive of zeros.
 * `@derive(...)` adds derives; `@no_auto_derive` turns the automatic ones off.
 * **Reference fields**: a class, struct or enum whose fields hold references without a lifetime
-  (`&str`, `Vec<&T>`, `&str?`, or another such type) gets one: `class Parser(input: &str)` →
+  (`&str`, `[&T]`, `&str?`, or another such type) gets one: `class Parser(input: &str)` →
   `struct Parser<'a> { input: &'a str }`. Write the type as `Parser`; signatures spell it
   `Parser<'_>`. Declaring lifetimes yourself (`class Pair<'a, 'b>`) turns this off.
 * Rust-style `struct Point { x: f64, y: f64 }`, tuple structs `struct Meters(f64)` and unit
@@ -338,7 +350,7 @@ shared class Name(var a: A) : Interface { ... }   // Rc<RefCell<..>> handle
   and `Name`, a handle: `struct Name(Rc<RefCell<NameData>>)`.
 * The handle has the same constructor, one method per instance method that borrows the data
   for the call (`self.0.write().deposit(n)`), a getter `a()` and setter `set_a(v)` per
-  field, and implements the class's Oxie interfaces and `toString` (`Display`) by forwarding.
+  field that code uses (in a library, also those of public fields), and implements the class's Oxie interfaces and `toString` (`Display`) by forwarding.
 * Static methods and `companion object` functions are on the handle.
 * `Clone` copies the handle; `==` and `Hash` use identity (`Rc::ptr_eq`).
 * Using a shared variable or field by value copies the handle (`val b = a` → `a.clone()`), so
@@ -357,7 +369,7 @@ shared class Name(var a: A) : Interface { ... }   // Rc<RefCell<..>> handle
   An `@sync` object panics the same way instead of waiting for its own lock forever.
 
 ```oxie
-shared class Node(name: String, var children: Vec<Node> = vec[], var parent: Node? = null) {
+shared class Node(name: String, var children: [Node] = [], var parent: Node? = null) {
     fun add(child: Node) {
         child.parent = this          // the handle
         children.push(child)
@@ -516,7 +528,8 @@ the declared type of a variable, field, parameter or return value:
 * a lambda or function parameter to a function-typed field or list (`Box::new(...)`), a value of
   an implementing class or enum (or an interface-typed parameter) to an interface-typed field or
   collection, also when it is pushed or inserted (`Box::new(...)`);
-* a `vec[...]` to `Vec<T>` element by element.
+* a list or map literal to the declared collection, element by element (see
+  [Collections](#collections)).
 
 ## Strings
 
@@ -710,30 +723,48 @@ f(x) { trailing lambda }        // the last parameter, outside the parentheses
 
 ## Collections
 
+Lists are `[T]` (Rust's `Vec<T>`) and maps `[K: V]` (std's `HashMap<K, V>`); see
+[Types](#types) for where `[T]` is Rust's slice instead. `Vec<T>` and `HashMap<K, V>` work too.
+
 | Oxie | Rust |
 |---|---|
-| `vec[1, 2, 3]`, `listOf(1, 2, 3)`, `mutableListOf()` | `vec![1, 2, 3]`, `Vec::new()` |
-| `vec[0; n]` | `vec![0; n]` |
-| `[1, 2, 3]`, `arrayOf(...)` | array `[1, 2, 3]` |
-| `mapOf(k to v, ...)` | `HashMap::from([(k, v), ...])` |
-| `setOf(a, b)` | `HashSet::from([a, b])` |
+| `[1, 2, 3]` for a declared `[T]`, `vec[1, 2, 3]`, `listOf(1, 2, 3)` | `vec![1, 2, 3]` |
+| `[]` for a declared `[T]`, `mutableListOf()` | `vec![]`, `Vec::new()` |
+| `[0; n]` for a declared `[T]`, `vec[0; n]` | `vec![0; n]` |
+| `[1, 2, 3]` otherwise, `arrayOf(...)` | array `[1, 2, 3]` |
+| `["a": 1, "b": 2]`, `mapOf("a" to 1, ...)` | `HashMap::from([("a", 1), ...])` |
+| `[:]` | `HashMap::new()` |
+| `setOf(a, b)`, `[a, b]` for a declared `HashSet<T>` | `HashSet::from([a, b])` |
 | `m[key]`, `v[i]`, `&v[1..3]` | indexing and slicing; a list, array or slice takes an index of any integer type (`v[i as usize]` for an `i32` `i`) |
 | `m[key] = v` on a `HashMap` or `BTreeMap` | `m.insert(key, v)`: adds the key or replaces its value |
+| `iter.to_list()` | `iter.collect::<Vec<_>>()` |
 
 All standard library types and methods are used with their Rust names.
+
+A list literal takes the collection its variable, field, parameter or return type declares,
+converting each element: `val names: [String] = ["ada", "bob"]` is
+`vec![String::from("ada"), String::from("bob")]`, and the same literal for a `HashSet`,
+`BTreeSet`, `VecDeque`, `BinaryHeap` or `LinkedList` is `Type::from([...])`. A map literal does
+the same for a `[K: V]` or `BTreeMap<K, V>`. Without a declared type, `[1, 2]` is an array, which
+can't grow: when the code after a `var` changes its length (`xs.push(3)`, `xs.clear()`), the
+literal is a list instead.
 
 `m[key] += 1` on a map is an error: the key may be missing, and what that should mean is up to
 the program. `*m.entry(key).or_default() += 1` starts a missing key at its default value (0,
 `""`, an empty list), and `*m.get_mut(&key).unwrap() += 1` stops the program when it is missing.
 
 ```oxie
-import std::collections::HashMap
-
 fun main() {
-    var stock: HashMap<String, i32> = HashMap()
+    var stock: [String: i32] = [:]
     stock["pen"] = 3                          // stock.insert(String::from("pen"), 3)
     for (item in ["pen", "ink", "pen"]) *stock.entry(item.to_string()).or_default() += 1
     println("${stock["pen"]} ${stock["ink"]}")
+
+    val shelves: [String: [String]] = ["new": ["Dune"], "old": []]
+    var seen = [1, 2]
+    seen.push(3)                              // a list: `vec![1, 2]`
+    val words = "b a".split(' ').to_list()    // [T] of the iterator's items
+    println("${shelves["new"]:?} ${seen:?} ${words:?}")
 }
 ```
 
@@ -744,9 +775,9 @@ Each one is the iterator chain you would write by hand; the element is passed by
 
 | Oxie | Result | Rust |
 |---|---|---|
-| `xs.map { f(it) }`, `map_indexed { i, x -> }` | `Vec<U>` | `xs.iter().map(f).collect()` |
-| `xs.filter { p(it) }`, `filter_not` | `Vec<T>` (copies kept elements, `T: Clone`) | `xs.iter().filter(p).cloned().collect()` |
-| `xs.filter_map { }`, `flat_map { }` | `Vec<U>` | `filter_map` / `flat_map` + `collect` |
+| `xs.map { f(it) }`, `map_indexed { i, x -> }` | `[U]` | `xs.iter().map(f).collect()` |
+| `xs.filter { p(it) }`, `filter_not` | `[T]` (copies kept elements, `T: Clone`) | `xs.iter().filter(p).cloned().collect()` |
+| `xs.filter_map { }`, `flat_map { }` | `[U]` | `filter_map` / `flat_map` + `collect` |
 | `xs.for_each { }`, `for_each_indexed { i, x -> }` | — | `iter().for_each(..)` |
 | `xs.find { }`, `find_last { }` | `T?` (a reference) | `iter().find(..)` |
 | `xs.index_of_first { }` | `usize?` | `iter().position(..)` |
@@ -754,11 +785,11 @@ Each one is the iterator chain you would write by hand; the element is passed by
 | `xs.sum()`, `sum_of { }` | number | `iter().sum()`, `iter().map(..).sum()` |
 | `xs.max_of { }`, `min_of { }` | `S?` | `iter().map(..).max_by(..)` |
 | `xs.max_by_key { }`, `min_by_key { }` | `T?` (a reference) | works with `f64` keys too |
-| `xs.sorted()`, `sorted_descending()`, `sorted_by { }`, `sorted_by_descending { }` | `Vec<T>` | `to_vec()` + `sort` (also `f64`: NaN sorts last) |
-| `xs.reversed()`, `distinct()`, `distinct_by { }`, `chunked(n)` | `Vec<T>` / `Vec<Vec<T>>` | |
-| `xs.group_by { key }` | `HashMap<K, Vec<T>>` | |
-| `xs.associate_by { key }` | `HashMap<K, T>` | |
-| `xs.partition { }` | `(Vec<T>, Vec<T>)` | |
+| `xs.sorted()`, `sorted_descending()`, `sorted_by { }`, `sorted_by_descending { }` | `[T]` | `to_vec()` + `sort` (also `f64`: NaN sorts last) |
+| `xs.reversed()`, `distinct()`, `distinct_by { }`, `chunked(n)` | `[T]` / `[[T]]` | |
+| `xs.group_by { key }` | `[K: [T]]` | |
+| `xs.associate_by { key }` | `[K: T]` | |
+| `xs.partition { }` | `([T], [T])` | |
 | `xs.join_to_string(", ")`, `join_with(", ") { it.name.as_str() }` | `String` | |
 | `xs.is_not_empty()` | `bool` | `!xs.is_empty()` |
 

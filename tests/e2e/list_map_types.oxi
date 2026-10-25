@@ -1,0 +1,60 @@
+// `[T]` is a list (`Vec<T>`) and `[K: V]` a map (`HashMap<K, V>`). Behind `&`, in `Box`, `Rc`,
+// `Arc` and in a trait's arguments `[T]` is still Rust's slice. List and map literals take the
+// declared type, a `var` array that grows is a list, and `to_list()` collects an iterator.
+import std::collections::{BTreeMap, HashSet, VecDeque}
+import std::rc::Rc
+
+data class Item(name: String, price: f64)
+
+class Cart(owner: String) {
+    var items: [Item] = []
+    var tags: [String: [String]] = [:]
+
+    fun add(item: Item) = items.push(item)
+    fun tag(name: String, tag: String) {
+        if (name !in tags) tags[name.clone()] = []
+        tags.get_mut(&name).unwrap().push(tag)
+    }
+    fun names(): [String] = items.map { it.name.clone() }
+}
+
+fun total(prices: &[f64]): f64 = prices.iter().sum()
+fun count(words: [String: i32]): i32 = words.values().sum()
+fun primes(): [i32] = [2, 3, 5, 7]
+fun nothing(): [String: i32] = [:]
+fun bytes(data: impl AsRef<[u8]>): usize = data.as_ref().len()
+fun first_row(grid: &[[i32]]): [i32] = grid[0].clone()
+
+fun main() {
+    var cart = Cart("ada")
+    cart.add(Item("pen", 1.5))
+    cart.add(Item("ink", 3.0))
+    cart.tag("pen".to_string(), "blue".to_string())
+    cart.tag("pen".to_string(), "cheap".to_string())
+    println("${cart.owner}: ${cart.names():?} ${cart.tags:?}")
+
+    val prices: [f64] = [1.5, 2.5]
+    println("${total(prices)} ${total([1.0, 2.0])} ${count(["a": 1, "b": 2])}")
+    println("${primes():?} ${nothing().len()} ${bytes("abc")} ${bytes(vec[1u8, 2])}")
+
+    var stock: [String: i32] = [:]
+    stock["pen"] = 3
+    stock["ink"] = 1
+    var keys = stock.keys().to_list()
+    keys.sort()
+    println("${"pen" in stock} ${keys:?}")
+
+    var grow = [1, 2]
+    grow.push(3)
+    var queue: VecDeque<i32> = [1, 2]
+    queue.push_front(0)
+    val ordered: BTreeMap<String, i32> = ["b": 2, "a": 1]
+    val seen: HashSet<i32> = [1, 1, 2]
+    val grid: [[i32]] = [[0; 2]; 2]
+    val shared: Rc<[i32]> = Rc.from(vec[4, 5])
+    println("${grow:?} ${queue:?} ${ordered:?} ${seen.len()} ${grid:?} ${first_row(grid):?} ${shared:?}")
+
+    val words = "b a c".split(' ').to_list()
+    val maybe: [String]? = null
+    println("${words:?} ${words.len()} ${maybe.is_none()}")
+}

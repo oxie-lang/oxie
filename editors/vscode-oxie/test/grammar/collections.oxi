@@ -1,0 +1,23 @@
+// SYNTAX TEST "source.oxie" "list and map types and literals"
+
+class Shelf(var books: [String] = []) {
+//                     ^ punctuation.brackets.square.oxie
+//                      ^^^^^^ entity.name.type.oxie
+//                            ^ punctuation.brackets.square.oxie
+    var counts: [String: [i32]] = [:]
+//               ^^^^^^ entity.name.type.oxie
+//                     ^ keyword.operator.key-value.oxie
+//                        ^^^ entity.name.type.numeric.oxie
+//                                 ^ keyword.operator.key-value.oxie
+}
+
+fun main() {
+    val ages: [String: i32] = ["ada": 36]
+//             ^^^^^^ entity.name.type.oxie
+//                     ^^^ entity.name.type.numeric.oxie
+//                             ^^^^^ string.quoted.double.oxie
+//                                  ^ keyword.operator.key-value.oxie
+//                                    ^^ constant.numeric.decimal.oxie
+    val words = "b a".split(' ').to_list()
+//                               ^^^^^^^ entity.name.function.oxie
+}

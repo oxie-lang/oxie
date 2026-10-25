@@ -23,7 +23,7 @@ async fun main() {
         set.spawn(run_job(Job(id, 10 * (9 - id) as u64)))
     }
     var ok = 0u64
-    var failed = vec[]
+    var failed = []
     while (val Some(res) = set.join_next().await) {
         when (res.unwrap()) {
             Ok(v) -> ok += v
@@ -40,7 +40,7 @@ async fun main() {
             tx.send("message $i".to_string()).await.unwrap()
         }
     })
-    var received = vec[]
+    var received = []
     while (val Some(msg) = rx.recv().await) received.push(msg)
     producer.await.unwrap()
     println("received: ${received:?}")

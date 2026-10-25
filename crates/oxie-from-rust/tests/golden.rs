@@ -277,7 +277,7 @@ fn main() {
 
 fun main() {
     val v = vec[1, 3, 4, 6]
-    val doubled: Vec<i32> = v.iter().map { it * 2 }.collect()
+    val doubled: [i32] = v.iter().map { it * 2 }.collect()
     val sum = v.iter().fold(0) { acc, x -> acc + x }
     val none: i32? = null
     if (val e = first_even(&v)) println("$e ${doubled:?} $sum ${none:?}")
@@ -328,7 +328,7 @@ class Dog(age: u8) : Animal {
 }
 
 fun main() {
-    val pets: Vec<Box<dyn Animal>> = vec[Box.new(Dog { age: 3 })]
+    val pets: [Box<dyn Animal>] = [Box.new(Dog { age: 3 })]
     for (p in &pets) {
         println(p.speak())
     }
@@ -418,7 +418,7 @@ fn main() {
 }
 "#,
         r#"fun main() {
-    var v: Vec<i32> = Vec()
+    var v: [i32] = []
     @cfg(test) v.push(1)
     @allow(unused_must_use) "5".parse::<i32>()
     @allow(unused_mut) var n = v.len()
@@ -889,7 +889,7 @@ impl Workspace {
 mod saving
 
 context(window: &mut Window, cx: &mut Context<Self>)
-pub class Workspace(tabs: Vec<String>) {
+pub class Workspace(tabs: [String]) {
     pub fun open(path: &str) {
         tabs.push(path.to_string())
         self.save()
@@ -949,7 +949,7 @@ impl Pane {
 }
 "#,
         r#"context(cx: &mut Context<Self>)
-pub class Pane(items: Vec<String>) {
+pub class Pane(items: [String]) {
     pub fun add(item: String) {
         items.push(item)
         changed()
