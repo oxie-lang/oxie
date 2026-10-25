@@ -1,0 +1,21 @@
+fun main() {
+    val a = "x".to_string()
+    var s = String()
+    s += a
+    var t = String.new()
+    t += a
+    var u = String.with_capacity(8)
+    u += a
+    println("$s $t $u")
+    val b = "b".to_string()
+    when (format("{}{}", a, b)) {
+        "xb" -> println("xb!")
+        else -> println("other")
+    }
+    var acc = ""
+    for (i in 0..3) {
+        acc += i.to_string()
+        acc += "-"
+    }
+    println(acc)
+}

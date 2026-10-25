@@ -210,6 +210,28 @@ fn replace_moved(e: &mut Expr, moved: &[(Span, String)]) {
     }
 }
 
+/// `var acc = ""` that a later statement appends to (`acc += x`) starts as `String::from("")`:
+/// a `&str` can't grow, so the variable could never compile as one.
+fn appended_text_var(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
+    let Stmt::Let { pat: pat @ Pat::Ident { name, mutable: true, sub: None, .. }, ty: None, init: Some(init @ Expr { kind: ExprKind::Str(_), .. }), else_: None, span, .. } = s else { return None };
+    let mut appended = false;
+    for s in rest {
+        visit::walk_stmt(s, &mut |e| {
+            if let ExprKind::Assign(Some(BinOp::Add), lhs, _) = &e.kind {
+                appended |= lhs.ident() == Some(name.as_str());
+            }
+            !appended
+        });
+    }
+    if !appended {
+        return None;
+    }
+    let sp = init.span;
+    let string = Expr::new(ExprKind::Path { segs: vec!["String".into()], generics: None, global: false }, sp);
+    let from = ExprKind::MethodCall { recv: Box::new(string), name: "from".into(), generics: None, args: vec![Arg { name: None, value: init.clone(), trailing: false }], safe: false };
+    Some(Stmt::Let { pat: pat.clone(), mutable: false, ty: None, init: Some(Expr::new(from, sp)), else_: None, span: *span })
+}
+
 impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ statements
 
@@ -241,6 +263,8 @@ impl<'a> Lowerer<'a> {
                     self.e.mark(expr.span);
                     self.tail_moving_args(expr, tail.unwrap());
                 }
+            } else if let Some(s) = appended_text_var(s, &stmts[i + 1..]) {
+                self.stmt(&s);
             } else {
                 self.stmt(s);
             }

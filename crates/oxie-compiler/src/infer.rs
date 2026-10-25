@@ -132,6 +132,8 @@ impl<'a> Lowerer<'a> {
                     "setOf" | "mutableSetOf" | "hashSetOf" if !args.is_empty() => Some(generic("HashSet", 1)),
                     "Vec" | "VecDeque" | "HashSet" | "BTreeSet" if args.is_empty() && !self.k.is_user_type(n) => Some(generic(n, 1)),
                     "HashMap" | "BTreeMap" if args.is_empty() && !self.k.is_user_type(n) => Some(generic(n, 2)),
+                    "String" if !self.k.is_user_type(n) => Some(ty("String")),
+                    "format" => Some(ty("String")),
                     _ => None,
                 }
             }
@@ -144,6 +146,10 @@ impl<'a> Lowerer<'a> {
                 if let Some((p, _)) = self.as_path(recv) {
                     // the type the call goes through: `Self`, `Counter` or `a.Counter`
                     let owner = if p.last()? == "Self" { vec![self.class.as_ref()?.name.clone()] } else { p };
+                    // `String.new()`, `String.with_capacity(n)`, `String.from(s)`
+                    if owner == ["String"] && !self.k.is_user_type("String") && matches!(name.as_str(), "new" | "with_capacity" | "from") {
+                        return Some(ty("String"));
+                    }
                     let owner_ty = || self.named_ty(&owner);
                     if let Some(c) = self.class_at(&owner) {
                         if name == "new" && !c.user_new {
