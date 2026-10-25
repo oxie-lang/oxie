@@ -323,7 +323,14 @@ impl Printer<'_> {
             syn::Pat::Type(pt) => (&*pt.pat, Some(&*pt.ty)),
             p => (p, None),
         };
-        let ty_text = ty.map(|t| format!(": {}", self.ty(t))).unwrap_or_default();
+        let mut ty_text = ty.map(|t| format!(": {}", self.ty(t))).unwrap_or_default();
+        // the `Result` the function returns: its error type no longer follows from the
+        // function's once the body ends in `r?` (`let r = (|| { .. })(); r`)
+        if let (None, syn::Pat::Ident(pi), Some(rt)) = (ty, pat, self.cx.result_ty.clone()) {
+            if self.cx.tail_var.as_deref() == Some(pi.ident.to_string().as_str()) && l.init.as_ref().is_some_and(|i| matches!(&*i.expr, syn::Expr::Call(_))) {
+                ty_text = format!(": {}", self.ty(&rt));
+            }
+        }
         let init = l.init.as_ref().map(|i| {
             let v = match &*i.expr {
                 syn::Expr::Closure(c) => self.closure(c, true),

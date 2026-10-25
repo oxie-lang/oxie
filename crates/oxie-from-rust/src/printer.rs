@@ -108,6 +108,8 @@ pub struct Cx {
     /// the fields of the type whose method this is: Oxie reads `name.x` as one of them, so a
     /// module of the same name is written `name::x`
     pub type_fields: HashSet<String>,
+    /// the variable a `throws` function's body ends with, whose `Result` it returns
+    pub tail_var: Option<String>,
 }
 
 pub struct Printer<'a> {
@@ -1519,6 +1521,11 @@ impl<'a> Printer<'a> {
         self.cx.ret = ret_ty.clone();
         self.cx.result_ty = match &sig.output {
             syn::ReturnType::Type(_, t) if throws.is_some() => Some((**t).clone()),
+            _ => None,
+        };
+        // `let r = ..; r` in a function that becomes `throws`: the body ends in `r?`
+        self.cx.tail_var = match block.stmts.last() {
+            Some(syn::Stmt::Expr(syn::Expr::Path(p), None)) if throws.is_some() => p.path.get_ident().map(|i| i.to_string()),
             _ => None,
         };
         let unit = ret_ty.is_none();
