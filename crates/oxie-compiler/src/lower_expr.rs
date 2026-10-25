@@ -85,6 +85,18 @@ fn branch_target(e: &Expr) -> Target {
     }
 }
 
+/// An argument that reads the same when written twice: a literal, a variable, a field of one,
+/// or arithmetic and comparisons of those.
+fn is_plain_read(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Path { .. } | ExprKind::SelfValue => true,
+        ExprKind::Field { recv, safe: false, .. } => is_plain_read(recv),
+        ExprKind::Paren(x) | ExprKind::Unary(UnOp::Neg | UnOp::Not, x) => is_plain_read(x),
+        ExprKind::Binary(_, l, r) => is_plain_read(l) && is_plain_read(r),
+        _ => is_literal(e),
+    }
+}
+
 fn is_ok_err_call(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Call { callee, .. } => matches!(callee.ident(), Some("Ok") | Some("Err")),
@@ -2788,7 +2800,7 @@ impl<'a> Lowerer<'a> {
                     }
                     slots[i] = Some(Expr::new(d.kind.clone(), span));
                 } else if let Some(d) = &p.default {
-                    slots[i] = Some(d.clone());
+                    slots[i] = Some(self.default_in_callee_scope(p.name.as_deref().unwrap_or_default(), d, params, &slots, span));
                 } else {
                     let n = p.name.clone().unwrap_or_else(|| format!("#{}", i + 1));
                     self.error(span, format!("missing argument `{}`", n));
@@ -2796,6 +2808,31 @@ impl<'a> Lowerer<'a> {
             }
         }
         slots
+    }
+
+    /// A default value as the callee sees it: a name of another parameter
+    /// (`verbose: bool = retries > 2`) is that parameter's argument, not a variable of the caller
+    /// that happens to have its name. Only arguments that read the same twice (literals,
+    /// variables, fields, arithmetic on them) are copied in; for others the default can't be
+/// filled in here.
+    fn default_in_callee_scope(&mut self, param: &str, d: &Expr, params: &[ParamInfo], slots: &[Option<Expr>], span: Span) -> Expr {
+        let mut d = d.clone();
+        let mut complex = None;
+        visit::walk_expr_mut(&mut d, &mut |e| {
+            let Some(n) = e.ident() else { return true };
+            let Some(j) = params.iter().position(|p| p.name.as_deref() == Some(n) && p.context.is_none()) else { return true };
+            match &slots[j] {
+                Some(a) if is_plain_read(a) => *e = a.clone(),
+                Some(_) => complex = Some(n.to_string()),
+                // a later parameter's default: not reachable in Kotlin either
+                None => complex = Some(n.to_string()),
+            }
+            false
+        });
+        if let Some(n) = complex {
+            self.error(span, format!("the default value of `{}` uses the parameter `{}`, whose argument here would run twice: store the argument in a `val` first, or pass `{}` yourself", param, n, param));
+        }
+        d
     }
 
     /// The arguments and parameters of a call to a method of this shared class that takes the

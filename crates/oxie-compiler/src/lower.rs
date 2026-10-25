@@ -2135,6 +2135,35 @@ impl<'a> Lowerer<'a> {
         self.e.indent();
         self.e.nl();
         let has_init = t.init.is_some();
+        // body properties computed from the parameters or from each other are computed first, in
+        // order, so they can read a parameter before it moves into its field
+        let mut known: HashSet<&str> = fields.iter().filter(|(f, _)| f.in_ctor).map(|(f, _)| f.name.as_str()).collect();
+        let mut computed_first = false;
+        for (f, _) in fields.iter().filter(|(f, _)| !f.in_ctor && f.attrs.is_empty()) {
+            if let Some(d) = &f.default {
+                let mut ids = Vec::new();
+                visit::idents_in(d, &mut ids);
+                computed_first |= ids.iter().any(|i| known.contains(i.as_str()));
+            }
+            known.insert(&f.name);
+        }
+        self.push_scope();
+        for (f, _) in fields.iter().filter(|(f, _)| f.in_ctor) {
+            self.bind_name(&f.name, Some(f.ty.clone()));
+        }
+        let saved = self.class.take();
+        let mut as_locals = HashSet::new();
+        if computed_first {
+            for (f, ty) in fields.iter().filter(|(f, _)| !f.in_ctor && f.attrs.is_empty()) {
+                let Some(d) = &f.default else { continue };
+                self.e.w(&format!("let {}: {} = ", esc(&f.name), self.ty(ty, TyPos::Local)));
+                self.coerce(d, ty, TyPos::Field);
+                self.e.w(";");
+                self.e.nl();
+                self.bind_name(&f.name, Some(ty.clone()));
+                as_locals.insert(f.name.clone());
+            }
+        }
         if has_init {
             self.e.w("#[allow(unused_mut)]\nlet mut __self = ");
         }
@@ -2143,16 +2172,11 @@ impl<'a> Lowerer<'a> {
         } else {
             self.e.w("Self {");
             self.e.indent();
-            self.push_scope();
-            for (f, _) in fields.iter().filter(|(f, _)| f.in_ctor) {
-                self.bind_name(&f.name, Some(f.ty.clone()));
-            }
-            let saved = self.class.take();
             for (f, ty) in fields {
                 self.e.nl();
                 // a field that exists only in some builds (`@cfg(test)`) is set only there
                 self.e.w(&cfg_attrs(&f.attrs));
-                if f.in_ctor {
+                if f.in_ctor || as_locals.contains(&f.name) {
                     self.e.w(&format!("{},", esc(&f.name)));
                 } else {
                     self.e.w(&format!("{}: ", esc(&f.name)));
@@ -2163,12 +2187,12 @@ impl<'a> Lowerer<'a> {
                     self.e.w(",");
                 }
             }
-            self.class = saved;
-            self.pop_scope();
             self.e.dedent();
             self.e.nl();
             self.e.w("}");
         }
+        self.class = saved;
+        self.pop_scope();
         if has_init {
             self.e.w(";");
             self.e.nl();

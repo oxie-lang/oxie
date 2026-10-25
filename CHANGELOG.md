@@ -5,6 +5,13 @@
 * A throwing call in a `when` arm or a brace-less `else` (`if (c) a() else b()`) passes its error
   on, as any statement in a throwing function or a `try` does. Before, the error was dropped with
   only a warning, and the function went on.
+* A default value that names another parameter (`fun connect(retries: i32 = 3, verbose: bool =
+  retries > 2)`, `class Rect(w: i32, h: i32 = w)`) uses that parameter's argument. Before, the
+  default was pasted into the call, where it read a variable of the caller with that name, or
+  failed when there was none.
+* A class's body properties can be computed from its constructor parameters and from earlier
+  properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
+  read there was already moved into its field, and earlier properties weren't visible.
 
 * Context parameters: `context(log: &mut Log) fun record(line: &str)` takes `log` without its
   callers writing it. Each call passes the variable named `log` where it is made, or one given by

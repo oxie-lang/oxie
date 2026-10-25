@@ -1,0 +1,18 @@
+// A default value that names another parameter uses that argument, not a caller's variable
+// of the same name.
+
+fun connect(retries: i32 = 3, verbose: bool = retries > 2): String = "$retries $verbose"
+class Box2(w: i32, h: i32 = w)
+fun area(w: i32, h: i32 = w * 2, label: String = "${w}x$h"): String = "$label=${w * h}"
+
+fun main() {
+    val retries = 0
+    println(connect(5))
+    println(connect())
+    val w = 100
+    println(Box2(7).h)
+    println(area(3))
+    println(area(-2))
+    val n = 4
+    println(area(n, h = 1))
+}
