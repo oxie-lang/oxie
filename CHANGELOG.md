@@ -1,13 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-26
+
+Oxie 0.4.0 removes most of the Rust still visible in everyday code. Optionals are matched and
+compared by their value (`when (light) { Red -> ...; null -> ... }`, `xs.first() == 3`), lists,
+maps and optionals print with `"$x"`, recursive types need no `Box`, and `when` arms, text and
+lambdas read as written: no `*n`, `.as_str()`, `.to_string()` for text put into a list, or `move`
+on a lambda a function returns. Around 70 fixes make null checks, `?.` chains, interfaces, loops
+and diagnostics behave as Kotlin and TypeScript readers expect, the generated Rust reads more
+like hand-written Rust, and Zed gets an extension.
+
+### Upgrading
+
+* Set `oxie-build = "0.4.0"` in the `[build-dependencies]` of each project (`cargo update`
+  doesn't move from 0.3 to 0.4). `oxie` warns when a project builds with another `oxie-build`.
+* Code that compiled with 0.3 compiles with 0.4: the forms 0.4 adds were errors before, and the
+  ones they replace still work (`${xs:?}`, `Some(..)` patterns, `Box<Expr>` fields with
+  `Box.new(..)`, `move { }`, `.to_string()`).
+
+### Changes
 
 * Everyday forms that needed Rust's help now read as written:
   * a `when` arm's names have the types of the case's fields, so a text field matches text arms
     (`when (name) { "sqrt" -> ... }`), and a borrowed number, `char` or `bool` is read where its
     value is needed (`Num(n) -> n`, `op == '+'`, `if (on)`) without `*`;
-  * `sorted_by`, `sorted_by_descending`, `max_by_key` and `min_by_key` on a list borrow a field
-    key: `sorted_by { it.name }`;
+  * `sorted_by`, `sorted_by_descending`, `max_by_key`, `min_by_key` and `join_with` on a list
+    borrow a field key: `sorted_by { it.name }`, `join_with(", ") { it.name }`;
   * text put into a list, set or map of `String`s is converted: `names.push("bob")`;
   * `var s = ""` grown with `s.push(c)` or `s.push_str(t)` is a `String`, as with `s += t`;
   * a lambda that a function returns, that is stored in a field, or that runs on another thread
@@ -78,7 +96,7 @@
 * `x in a..b` no longer makes rustc warn about unneeded parentheses (with a broken suggested
   fix), and a `when` arm with several `in` conditions and a guard applies the guard to all of
   them. Before, the guard applied only to the last.
-* Printing a value without a text form (`println(xs)`) suggests `println("${xs:?}")`.
+* Printing a value without a text form (`println(user)`) suggests `println("${user:?}")`.
 * Assigning a plain value to a `T?` field from outside its class (`p.age = 5`) and in
   `copy(age = 7)` wraps it in `Some`, as in constructors.
 * `?.` after a link that gives a plain value (`p?.display()?.len()`, `s?.trim()?.len()`,
