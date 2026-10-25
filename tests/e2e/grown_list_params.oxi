@@ -1,0 +1,36 @@
+// A `&mut [T]` parameter that its function grows (`push`, `insert`, `clear`, ...) is a
+// `&mut Vec<T>`, since a slice can't change its length. One that only changes its elements stays a
+// slice, so it also takes arrays.
+
+fun add_one(items: &mut [i32]) {
+    items.push(1)
+}
+
+fun add_two(items: &mut [i32]) = items.extend([2, 2])
+
+fun zero(items: &mut [i32]) {
+    for (i in 0 until items.len()) items[i] = 0
+}
+
+class Log(var lines: [String] = []) {
+    fun flush(into: &mut [String]) {
+        into.append(&mut lines)
+    }
+}
+
+fun main() {
+    var xs: [i32] = []
+    add_one(xs)
+    add_two(xs)
+    println("${xs:?}")
+    zero(xs)
+    var arr = [5, 6]
+    zero(arr)
+    println("${xs:?} ${arr:?}")
+
+    var log = Log()
+    log.lines.push("started".to_string())
+    var out: [String] = []
+    log.flush(out)
+    println("${out:?} ${log.lines.len()}")
+}

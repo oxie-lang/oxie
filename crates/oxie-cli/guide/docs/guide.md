@@ -492,7 +492,7 @@ Oxie keeps Rust's ownership model, so `&`, `&mut`, moves and `clone()` work exac
 
 ```oxie
 fun total(xs: &[i32]): i32 = xs.iter().sum()
-fun add_one(xs: &mut Vec<i32>) = xs.push(1)
+fun add_one(xs: &mut [i32]) = xs.push(1)
 
 fun main() {
     var v: [i32] = [1, 2, 3]
@@ -504,8 +504,9 @@ fun main() {
 }
 ```
 
-`&[i32]` is Rust's slice: any list or array, read-only. A function that adds to the caller's
-list takes `&mut Vec<i32>`, since `&mut [i32]` can change the elements but not their number.
+`&[i32]` is Rust's slice: any list or array, read-only. `&mut [i32]` can change the elements of
+any list or array. When a function grows it (`push`, `insert`, `clear`, ...), Oxie makes the
+parameter `&mut Vec<i32>`, the caller's list, since a slice can't change its length.
 
 What Oxie removes is the bookkeeping around it:
 

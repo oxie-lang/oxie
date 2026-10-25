@@ -174,6 +174,9 @@
 * Changing a parameter (`fun fill(c: Cart) { c.add("x") }`) offers `c: &mut Cart`. A function
   that stores or returns its parameter no longer gets a fix that would borrow it (which didn't
   compile); the error says where it keeps it.
+* A `&mut [T]` parameter that its function grows (`items.push(x)`, `insert`, `clear`, ...) is a
+  `&mut Vec<T>`, as a grown `var xs = [..]` is a list. Before, the `items: &mut [T]` that the
+  fix above offers for a list parameter failed with "no method named `push`".
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.

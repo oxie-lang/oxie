@@ -31,3 +31,8 @@ fun main() {
     // error: 30: `keep` keeps it (it returns `v`)
     // not: 30: let `keep` borrow it
 }
+
+// a list parameter its function grows becomes `&mut Vec<T>`, so the `&mut [T]` the fix writes compiles
+fun add_one(items: [i32]) { items.push(1) }
+// error: 36: `items` is a parameter, so `add_one` can't change it
+// error: 36: fix: let `add_one` change `items` (`&mut`): `fun add_one(items: &mut [i32]) { items.push(1) }`

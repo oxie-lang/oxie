@@ -240,7 +240,7 @@ fun main() {
 | `i32`, `u8`, `f64`, `bool`, `char`, `str`, `String`, ... | same |
 | `Int`, `Long`, `Short`, `Byte`, `UInt`, `ULong`, `Double`, `Float`, `Boolean`, `Char`, `Unit` | `i32`, `i64`, `i16`, `i8`, `u32`, `u64`, `f64`, `f32`, `bool`, `char`, `()` |
 | `T?` | `Option<T>` (`&T?` is `Option<&T>`) |
-| `[T]` | `Vec<T>`, a list; Rust's slice `[T]` right after `&`, `&mut`, `*const` and `*mut`, inside `Box`, `Rc`, `Arc`, `Cow` and `Weak`, in a trait's type arguments (`impl AsRef<[u8]>`), and as an `impl` block's type or an associated type (`type Target = [T]`) |
+| `[T]` | `Vec<T>`, a list; Rust's slice `[T]` right after `&`, `&mut`, `*const` and `*mut`, inside `Box`, `Rc`, `Arc`, `Cow` and `Weak`, in a trait's type arguments (`impl AsRef<[u8]>`), and as an `impl` block's type or an associated type (`type Target = [T]`); a `&mut [T]` parameter that its function grows (`push`, `insert`, `clear`, ...) is `&mut Vec<T>` |
 | `[K: V]` | `HashMap<K, V>`, std's map |
 | `(A, B) -> R` | `impl FnMut(A, B) -> R`, `Box<dyn Fn(A, B) -> R>` or `dyn Fn(..)` depending on position |
 | `Shape` (an interface used as a type) | `impl Shape` (parameters, returns; `impl Shape + 'static` for a parameter the function stores), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, returns of different classes, and parameters and results of interface methods) |

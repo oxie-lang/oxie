@@ -2,9 +2,12 @@
 //! the code after it grows or shrinks (`xs.push(3)`) is a list, `vec![1, 2]`: an array can't
 //! change its length, so Rust would reject the call. Other array literals stay arrays, and one
 //! with a declared type takes that type in the lowering (`val xs: [i32] = [1, 2]`).
+//!
+//! Likewise a `&mut [T]` parameter that its function grows (`items.push(x)`) is a
+//! `&mut Vec<T>`: a slice can't change its length either.
 
 use crate::ast::*;
-use crate::visit::{walk_block_mut, walk_expr_mut, walk_stmt};
+use crate::visit::{walk_block_mut, walk_expr, walk_expr_mut, walk_stmt};
 
 /// Methods of `Vec` that change its length, which arrays don't have.
 const GROWS: &[&str] = &[
@@ -17,11 +20,14 @@ const GROWS: &[&str] = &[
 pub fn grow_lists(items: &mut [Item]) {
     for it in items {
         match &mut it.kind {
-            ItemKind::Fun(f) => match &mut f.body {
-                Some(FunBody::Block(b)) => in_block(b),
-                Some(FunBody::Expr(e)) => in_expr(e),
-                None => {}
-            },
+            ItemKind::Fun(f) => {
+                grown_params(f);
+                match &mut f.body {
+                    Some(FunBody::Block(b)) => in_block(b),
+                    Some(FunBody::Expr(e)) => in_expr(e),
+                    None => {}
+                }
+            }
             ItemKind::Type(t) => {
                 if let Some(b) = &mut t.init {
                     in_block(b);
@@ -80,16 +86,44 @@ fn lists(b: &mut Block) {
     }
 }
 
+/// Makes each `&mut [T]` parameter of the function that its body grows a `&mut Vec<T>`.
+fn grown_params(f: &mut FunDecl) {
+    let Some(body) = &f.body else { return };
+    for p in &mut f.params {
+        let Some(name) = p.name().map(str::to_string) else { continue };
+        let Type::Ref { mutable: true, inner, .. } = &mut p.ty else { continue };
+        let Type::Slice(elem) = &**inner else { continue };
+        let grown = match body {
+            FunBody::Block(b) => b.stmts.iter().any(|s| grows(s, &name)),
+            FunBody::Expr(e) => grows_expr(e, &name),
+        };
+        if grown {
+            **inner = Type::list((**elem).clone(), p.span);
+        }
+    }
+}
+
 /// Does the statement call a method that changes the length of the variable `name`?
 fn grows(s: &Stmt, name: &str) -> bool {
     let mut found = false;
     walk_stmt(s, &mut |e| {
-        if let ExprKind::MethodCall { recv, name: m, .. } = &e.kind {
-            found |= recv.ident() == Some(name) && GROWS.contains(&m.as_str());
-        }
+        found |= grows_here(e, name);
         !found
     });
     found
+}
+
+fn grows_expr(e: &Expr, name: &str) -> bool {
+    let mut found = false;
+    walk_expr(e, &mut |e| {
+        found |= grows_here(e, name);
+        !found
+    });
+    found
+}
+
+fn grows_here(e: &Expr, name: &str) -> bool {
+    matches!(&e.kind, ExprKind::MethodCall { recv, name: m, .. } if recv.ident() == Some(name) && GROWS.contains(&m.as_str()))
 }
 
 #[cfg(test)]
@@ -114,5 +148,23 @@ mod tests {
         assert!(matches!(init_of("fun f() {\n    var xs = [1, 2]\n    xs.sort()\n}\n"), ExprKind::Array(_)));
         assert!(matches!(init_of("fun f() {\n    val xs = [1, 2]\n    println(xs.len())\n}\n"), ExprKind::Array(_)));
         assert!(matches!(init_of("fun f() {\n    var xs: [i32; 2] = [1, 2]\n    xs[0] = 3\n}\n"), ExprKind::Array(_)));
+    }
+
+    fn param_of(src: &str) -> Type {
+        let (mut file, diags) = crate::parser::parse_file(src);
+        assert!(diags.is_empty(), "{:?}", diags);
+        grow_lists(&mut file.items);
+        let ItemKind::Fun(f) = &file.items[0].kind else { panic!() };
+        let Type::Ref { inner, .. } = &f.params[0].ty else { panic!() };
+        (**inner).clone()
+    }
+
+    #[test]
+    fn grown_slice_params_become_lists() {
+        assert!(param_of("fun f(xs: &mut [i32]) {\n    xs.push(1)\n}\n").single_name() == Some("Vec"));
+        assert!(param_of("fun f(xs: &mut [i32]) = xs.clear()\n").single_name() == Some("Vec"));
+        // changing elements, or a read-only slice: still a slice
+        assert!(matches!(param_of("fun f(xs: &mut [i32]) {\n    xs[0] = 1\n}\n"), Type::Slice(_)));
+        assert!(matches!(param_of("fun f(xs: &[i32]) {\n    println(xs.len())\n}\n"), Type::Slice(_)));
     }
 }

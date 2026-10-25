@@ -142,7 +142,7 @@
   {
     "file": "docs/guide.md",
     "output": "7\n[1, 2, 3, 1] [1, 2, 3, 1]\n",
-    "source": "fun total(xs: &[i32]): i32 = xs.iter().sum()\nfun add_one(xs: &mut Vec<i32>) = xs.push(1)\n\nfun main() {\n    var v: [i32] = [1, 2, 3]\n    add_one(v)            // the parameter is `&mut`, so `v` is lent mutably: add_one(&mut v)\n    println(total(v))     // ... and here lent for reading: total(&v)\n    val w = v.clone()     // explicit copy\n    val moved = v         // `v` can't be used after this\n    println(\"${w:?} ${moved:?}\")\n}\n"
+    "source": "fun total(xs: &[i32]): i32 = xs.iter().sum()\nfun add_one(xs: &mut [i32]) = xs.push(1)\n\nfun main() {\n    var v: [i32] = [1, 2, 3]\n    add_one(v)            // the parameter is `&mut`, so `v` is lent mutably: add_one(&mut v)\n    println(total(v))     // ... and here lent for reading: total(&v)\n    val w = v.clone()     // explicit copy\n    val moved = v         // `v` can't be used after this\n    println(\"${w:?} ${moved:?}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
