@@ -1725,7 +1725,19 @@ impl<'a> Lowerer<'a> {
         self.e.w(&format!("#[allow(non_camel_case_types)]\n{}trait {}{}{} {{\n    {};\n}}", vis, tname, g, wc, sig));
         self.e.nl();
         self.e.nl();
-        self.e.w(&format!("impl{} {}{} for {}{} {{", g, tname, gn, self.ty(recv_ty, TyPos::Plain), wc));
+        // on an interface: every type that implements it (`impl<T: Shape + ?Sized> Ext for T`)
+        let iface = matches!(recv_ty, Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && self.is_trait_name(&segs[0].name));
+        if iface {
+            let tv = if f.generics.params.iter().any(|p| matches!(p, GenericParam::Type { name, .. } if name == "T")) { "S" } else { "T" };
+            let param = format!("{}: {} + ?Sized", tv, self.ty(recv_ty, TyPos::Plain));
+            let ig = match g.strip_suffix('>') {
+                Some(open) => format!("{}, {}>", open, param),
+                None => format!("<{}>", param),
+            };
+            self.e.w(&format!("impl{} {}{} for {}{} {{", ig, tname, gn, tv, wc));
+        } else {
+            self.e.w(&format!("impl{} {}{} for {}{} {{", g, tname, gn, self.ty(recv_ty, TyPos::Plain), wc));
+        }
         self.e.indent();
         self.e.nl();
         self.attrs(&it.attrs, &[]);
@@ -1736,6 +1748,12 @@ impl<'a> Lowerer<'a> {
         if let Some(owner) = recv_ty.single_name() {
             if self.class_info(owner).is_some() || self.enum_info(owner).is_some() {
                 let mut ctx = self.class_ctx_for(owner, &[], &[]);
+                ctx.is_static = matches!(f.self_param, Some(SelfParam::Typed(_)));
+                self.class = Some(ctx);
+            } else if iface && self.k.traits.contains_key(owner) {
+                // an interface's methods (and its supertraits') are callable without `this.`
+                let mut ctx = self.class_ctx_for(owner, &[], std::slice::from_ref(recv_ty));
+                ctx.trait_methods = None;
                 ctx.is_static = matches!(f.self_param, Some(SelfParam::Typed(_)));
                 self.class = Some(ctx);
             }
@@ -1865,6 +1883,7 @@ impl<'a> Lowerer<'a> {
                     trait_methods.insert(n.clone());
                     methods.entry(n.clone()).or_insert_with(|| m.clone());
                 }
+                stack.extend(ti.supertraits.iter().cloned());
             }
         }
         ClassCtx { name: name.to_string(), fields, methods, self_name: "self".into(), is_static: false, generics: Vec::new(), trait_methods: Some(trait_methods) }
