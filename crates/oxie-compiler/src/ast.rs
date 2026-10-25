@@ -123,6 +123,9 @@ pub struct Param {
     pub default: Option<Expr>,
     /// A context parameter (`context(cx: &mut App)`): its default is the caller's own `cx`.
     pub context: bool,
+    /// Declared as a value that the body only reads, so Oxie lends it (`params.rs`): its type is
+    /// now the reference, and every argument for it is lent.
+    pub lent: bool,
     pub span: Span,
 }
 

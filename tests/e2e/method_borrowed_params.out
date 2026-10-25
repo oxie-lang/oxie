@@ -2,6 +2,7 @@ true 1.5 pen for 1.5 3
 HEY /tmp/x 3
 pen 1 pen 2 hey /tmp/x abc
 cup for 0
+/tmp/y
 cup 4 shop ada
 [x]
 true hello

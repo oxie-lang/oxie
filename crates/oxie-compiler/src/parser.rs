@@ -614,7 +614,7 @@ impl<'a> Parser<'a> {
                 self.diags.push(Diag::error(span, format!("`{}` is already a context here", name)));
             }
             let pat = Pat::Ident { name, by_ref: false, mutable: false, sub: None, span };
-            out.push(Param { pat, ty, default: None, context: true, span: span.to(self.prev_span()) });
+            out.push(Param { pat, ty, default: None, context: true, lent: false, span: span.to(self.prev_span()) });
             if !self.eat_punct(",") {
                 self.expect_punct(")")?;
                 break;
@@ -781,7 +781,7 @@ impl<'a> Parser<'a> {
             self.expect_punct(":")?;
             let ty = self.ty()?;
             let default = if self.eat_punct("=") { Some(self.expr()?) } else { None };
-            params.push(Param { pat, ty, default, context: false, span: pstart.to(self.prev_span()) });
+            params.push(Param { pat, ty, default, context: false, lent: false, span: pstart.to(self.prev_span()) });
             if !self.eat_punct(",") {
                 self.expect_punct(")")?;
                 break;

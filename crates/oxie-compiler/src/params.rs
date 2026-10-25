@@ -1037,6 +1037,7 @@ fn lend(files: &mut [(&[String], &mut File)], stage: Stage, lend_pub: bool) -> V
                     for (i, p) in f.params.iter_mut().enumerate() {
                         if let Some(t) = lent.get(&((file, f.name_span.start), i)) {
                             p.ty = t.clone();
+                            p.lent = true;
                         }
                     }
                 }

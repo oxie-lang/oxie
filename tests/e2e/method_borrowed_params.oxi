@@ -55,8 +55,9 @@ fun main() {
     println("${shop.shout(w)} ${shop.location(p)} ${shop.public_read(t)}")
     // still the caller's
     println("$n ${wanted.len()} ${pen.name} ${stock.len()} $w ${p.display()} $t")
-    // a value made by a call is lent too
+    // a value made by a call is lent too, also one whose type Oxie doesn't know
     println(shop.describe(Item.free("cup".to_string())))
+    println(shop.location(PathBuf.from("/tmp/y")))
     println("${shop.rename("cup".to_string()).name} ${shop.raw_len("four".to_string())} ${shop.named("shop".to_string())}")
     val maybe: Shop? = Shop("bob")
     println(maybe?.label("x".to_string()) ?: "-")

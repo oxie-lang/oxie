@@ -23,6 +23,8 @@ pub struct ParamInfo {
     pub context: Option<String>,
     /// Generic parameter names of the declaring function (lambda arguments can't be annotated with them).
     pub generics: Vec<String>,
+    /// Lent by Oxie (`Param::lent`): every argument that isn't a reference is lent.
+    pub lent: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -82,7 +84,7 @@ impl ClassInfo {
         self.fields
             .iter()
             .filter(|f| f.in_ctor)
-            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new() })
+            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new(), lent: false })
             .collect()
     }
 }
@@ -953,7 +955,7 @@ pub fn params_info(f: &FunDecl) -> Vec<ParamInfo> {
         .collect();
     f.params
         .iter()
-        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone() })
+        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), lent: p.lent })
         .collect()
 }
 

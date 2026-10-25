@@ -1102,12 +1102,14 @@ impl<'a> Lowerer<'a> {
     /// An argument for a `&str` or `&[T]` parameter is lent unless it already is a reference:
     /// lending a reference (`&s.trim()`) is harmless, since `&&str` coerces to `&str`.
     fn lend_to_slice(&self, e: &Expr, inner: &Type) -> bool {
-        if !(matches!(inner, Type::Slice(_)) || inner.single_name() == Some("str")) {
-            return false;
-        }
+        (matches!(inner, Type::Slice(_)) || inner.single_name() == Some("str")) && self.lends_value(e)
+    }
+
+    /// Is `e` a value to lend, rather than something that already is a reference?
+    fn lends_value(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Unary(UnOp::Ref | UnOp::RefMut, _) | ExprKind::Null | ExprKind::Lambda { .. } | ExprKind::SelfValue => false,
-            ExprKind::Paren(x) => self.lend_to_slice(x, inner),
+            ExprKind::Paren(x) => self.lends_value(x),
             // a lambda parameter without a type gets it from this use: `&it` would make it `str`
             _ if e.ident().is_some_and(|n| self.untyped_param(n)) => false,
             _ => match e.ident().and_then(|n| self.local(n)) {
@@ -2797,7 +2799,7 @@ impl<'a> Lowerer<'a> {
                 self.arg_list(args, None, TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
-                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
+                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), lent: false }).collect();
                 let slots = self.fill_args(args, &params, span);
                 self.e.w(&format!("{} {{ ", path));
                 for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
@@ -2882,7 +2884,7 @@ impl<'a> Lowerer<'a> {
             if self.this_recv.is_none() {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
-            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new() });
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), lent: false });
             args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span) });
         }
         (args, params)
@@ -2903,6 +2905,13 @@ impl<'a> Lowerer<'a> {
                         // a lambda can't be annotated with the callee's type parameters
                         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
                             self.expr(a, P_LOWEST);
+                        } else if p.lent && !is_collection_lit(a) && self.lends_value(a) {
+                            // its callers passed the owned value before Oxie lent the parameter
+                            self.e.mark(a.span);
+                            self.e.w("&");
+                            self.expr(a, P_UNARY);
+                            let param = self.ty(&p.ty, TyPos::Param);
+                            self.e.decide(a.span, "&", format!("the parameter is `{}`", param), None);
                         } else {
                             self.coerce(a, &p.ty, pos);
                         }
