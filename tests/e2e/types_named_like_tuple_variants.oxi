@@ -1,0 +1,11 @@
+// `Name.member` with a tuple variant `Name(..)` of some enum goes through a type `Name`, here
+// one a glob import brings in, since a tuple variant has no members of its own.
+import std::time::*
+
+enum Wait { Never, Duration(u64) }
+
+fun main() {
+    println(Duration.from_millis(1500).as_secs())
+    val w = Wait.Duration(3)
+    println(match (w) { Wait.Duration(n) -> n, Wait.Never -> 0 })
+}

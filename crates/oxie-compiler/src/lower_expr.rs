@@ -2240,7 +2240,10 @@ impl<'a> Lowerer<'a> {
                     return Some((segs.clone(), PathKind::Type));
                 }
                 if is_type_like(n) {
-                    if self.variant_enum(n).is_some() && !self.k.is_user_type(n) {
+                    // a unit variant is a value with members; `Extension.instantiate(..)` with a
+                    // tuple variant `Extension(..)` goes through a type of that name
+                    let unit = self.variant_enum(n).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
+                    if unit && !self.k.is_user_type(n) {
                         return None;
                     }
                     return Some((segs.clone(), PathKind::Type));
