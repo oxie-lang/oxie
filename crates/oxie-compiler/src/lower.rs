@@ -1128,7 +1128,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// The types of the parts of a `path(elems)` pattern matching the current `pat_ty`.
-    fn tuple_pat_types(&self, path: &[String], shape: Option<&VariantShape>) -> Vec<Option<Type>> {
+    pub(crate) fn tuple_pat_types(&self, path: &[String], shape: Option<&VariantShape>) -> Vec<Option<Type>> {
         match shape {
             Some(VariantShape::Tuple(ts)) => return ts.iter().cloned().map(Some).collect(),
             Some(VariantShape::Named(fs)) => return fs.iter().map(|(_, t)| Some(t.clone())).collect(),

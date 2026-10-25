@@ -1,0 +1,44 @@
+// A `when` (or `if (val ...)`) on a field of `this` whose arms take a value out of it matches
+// the field by reference, as `for` borrows a field.
+
+enum State { Idle, Running(count: i32), Done(result: String) }
+
+class Job {
+    var state: State = State.Idle
+    var steps: i32 = 0
+
+    fun step() {
+        steps += 1
+        state = when (state) {
+            Idle -> Running(0)
+            Running(n) -> if (*n >= 2) Done("finished after $n".to_string()) else Running(n + 1)
+            Done(r) -> Done(r.clone())
+        }
+    }
+
+    fun describe(): String = when (this.state) {
+        Done(r) -> r.clone()
+        Running(n) -> "running $n"
+        Idle -> "idle"
+    }
+
+    fun result(): Option<String> {
+        if (val Done(r) = state) return Some(r.clone())
+        None
+    }
+
+    // a `Copy` part is still taken by value
+    fun count(): i32 = when (state) {
+        Running(n) -> n
+        else -> -1
+    }
+}
+
+fun main() {
+    var j = Job()
+    for (_i in 0..5) {
+        j.step()
+        println("${j.describe()} ${j.count()} ${j.result():?}")
+    }
+    println(j.steps)
+}

@@ -2029,7 +2029,7 @@ impl<'a> Lowerer<'a> {
             Cond::Let { pat, expr, implicit_some } => {
                 let end = guards_end(1);
                 self.e.w("match ");
-                self.expr(expr, P_LOWEST + 1);
+                self.let_subject(pat, expr, *implicit_some);
                 self.e.w(" {");
                 self.e.indent();
                 self.e.nl();
@@ -2235,9 +2235,72 @@ impl<'a> Lowerer<'a> {
                 } else {
                     self.e.w(&format!("let {} = ", p));
                 }
-                self.expr(expr, P_LOWEST + 1);
+                self.let_subject(pat, expr, *implicit_some);
                 self.bind_pat(pat, None);
             }
+        }
+    }
+
+    /// Is `subject` a field of `this` that arms with `pats` would move a value out of? A method
+    /// borrows `this`, so the field is matched by reference instead (`match &self.state`), as
+    /// `for` borrows a field.
+    fn match_field_by_ref(&mut self, subject: &Expr, pats: &[&Pat]) -> bool {
+        if self.self_by_value {
+            return false;
+        }
+        let name = match &strip_paren(subject).kind {
+            ExprKind::Path { segs, generics: None, global: false } if segs.len() == 1 && self.implicit_field(&segs[0]).is_some() => &segs[0],
+            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => name,
+            _ => return false,
+        };
+        let Some(ty) = self.class.as_ref().and_then(|c| c.fields.get(name)).cloned() else { return false };
+        if matches!(ty, Type::Ref { .. }) {
+            return false;
+        }
+        pats.iter().any(|p| self.pat_moves(p, Some(ty.clone())))
+    }
+
+    /// Does pattern `p`, matching a value of type `ty`, bind a part of it that isn't `Copy`?
+    fn pat_moves(&mut self, p: &Pat, ty: Option<Type>) -> bool {
+        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+        let saved = std::mem::replace(&mut self.pat_ty, ty.clone());
+        let moves = match p {
+            Pat::Ident { by_ref: false, sub, .. } => ty.as_ref().is_some_and(|t| !crate::sema::is_copy_simple(t, &copy)) || sub.as_ref().is_some_and(|s| self.pat_moves(s, ty.clone())),
+            Pat::Or(ps) => ps.iter().any(|p| self.pat_moves(p, ty.clone())),
+            Pat::Tuple(ps) => match &ty {
+                Some(Type::Tuple(ts)) if ts.len() == ps.len() => ps.iter().zip(ts.clone()).any(|(p, t)| self.pat_moves(p, Some(t))),
+                _ => false,
+            },
+            Pat::TupleStruct { path, elems, .. } => {
+                let (_, shape) = self.resolve_variant_path(path);
+                let tys = self.tuple_pat_types(path, shape.as_ref());
+                !elems.iter().any(|e| matches!(e, Pat::Rest)) && elems.iter().enumerate().any(|(i, e)| self.pat_moves(e, tys.get(i).cloned().flatten()))
+            }
+            Pat::Struct { path, fields, .. } => {
+                let (_, shape) = self.resolve_variant_path(path);
+                let field_ty = |n: &str| match &shape {
+                    Some(VariantShape::Named(fs)) => fs.iter().find(|(f, _)| f == n).map(|(_, t)| t.clone()),
+                    _ => None,
+                };
+                fields.iter().any(|(n, sub)| match sub {
+                    Some(sp) => self.pat_moves(sp, field_ty(n)),
+                    None => field_ty(n).is_some_and(|t| !crate::sema::is_copy_simple(&t, &copy)),
+                })
+            }
+            _ => false,
+        };
+        self.pat_ty = saved;
+        moves
+    }
+
+    /// The value of `if (val pat = expr)`: a field `pat` would move a value out of is borrowed.
+    fn let_subject(&mut self, pat: &Pat, expr: &Expr, implicit_some: bool) {
+        if !implicit_some && self.match_field_by_ref(expr, &[pat]) {
+            self.e.w("&");
+            self.expr(expr, P_UNARY);
+            self.e.decide(expr.span, "&", "the pattern takes a value out of the field, which a method can only borrow", None);
+        } else {
+            self.expr(expr, P_LOWEST + 1);
         }
     }
 
@@ -3944,7 +4007,16 @@ impl<'a> Lowerer<'a> {
                         self.expr(s, P_UNARY);
                         self.e.decide(s.span, "&*", "the arms compare text", None);
                     }
-                    None => self.expr(s, P_LOWEST),
+                    None => {
+                        let pats: Vec<&Pat> = arms.iter().flat_map(|a| a.conds.iter()).filter_map(|c| if let WhenCond::Pat(p) = c { Some(p) } else { None }).collect();
+                        if self.match_field_by_ref(s, &pats) {
+                            self.e.w("&");
+                            self.expr(s, P_UNARY);
+                            self.e.decide(s.span, "&", "an arm takes a value out of the field, which a method can only borrow", None);
+                        } else {
+                            self.expr(s, P_LOWEST);
+                        }
+                    }
                 }
                 self.e.w(" {");
                 self.e.indent();
