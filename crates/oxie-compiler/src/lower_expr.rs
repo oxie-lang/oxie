@@ -4595,16 +4595,24 @@ impl<'a> Lowerer<'a> {
             any
         };
         let method_opt = |name: &str| {
-            let mut any = false;
+            let mut any = None;
             for c in self.k.classes.values() {
                 if let Some(m) = c.methods.get(name) {
                     match &m.ret {
-                        Some(t) if is_opt(t) => any = true,
+                        Some(t) if is_opt(t) => any = Some(true),
                         _ => return false,
                     }
                 }
             }
-            any
+            // std methods that give an `Option`: `s?.chars().next()` is a `char?`
+            any.unwrap_or_else(|| {
+                matches!(
+                    name,
+                    "next" | "next_back" | "first" | "last" | "get" | "get_mut" | "pop" | "pop_front" | "pop_back" | "find" | "find_map"
+                        | "position" | "nth" | "peek" | "strip_prefix" | "strip_suffix" | "split_once" | "rsplit_once" | "ok" | "err"
+                        | "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "to_digit"
+                )
+            })
         };
         let mut opt = false;
         for (_i, l) in seg.iter().enumerate() {

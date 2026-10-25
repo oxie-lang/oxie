@@ -1,0 +1,15 @@
+// A `?.` chain ending in a std method that gives an optional (`next`, `first`, `get`) is flat.
+
+class Box1(items: Vec<i32>) {
+    fun first(): i32? = items.first().copied()
+}
+fun main() {
+    val s: String? = "abc".to_string()
+    val c = s?.chars().next()
+    println("${c:?}")
+    val b: Box1? = Box1(vec[3])
+    val f = b?.first()
+    println("${f:?}")
+    val n: i32? = b?.first()
+    println("${n:?}")
+}
