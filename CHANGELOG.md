@@ -65,6 +65,23 @@
 * Null checks unwrap in more places, as Kotlin's smart casts do: the `else` branch of
   `if (x == null)`, after `if (a == null || b == null) return`, and the right side of
   `x == null || x.len() > 3` and `x != null && x.len() < 3`.
+* Values put into a `Vec` or map of interface values (`push`, `insert`), assigned to an
+  interface-typed field of another value, or passed in `&[..]` to a `&[Shape]` parameter are
+  boxed, including values of implementing classes and enums and interface parameters (which
+  become `impl Shape + 'static`). Before, most of these failed with "expected `Box<dyn Shape>`".
+* Lambdas and function parameters pushed onto a `Vec<(A) -> B>` or assigned to a function-typed
+  field (also from outside the class) are boxed; a stored function parameter is
+  `impl Fn(..) + 'static`. `(field)()` works inside classes, and the `Box.new` fix around a
+  lambda is whole (it put `)` inside the braces).
+* An interface method whose parameter or result is an interface (`fun next(c: char): State`)
+  takes and returns `Box<dyn State>`, so implementations can return different classes. Before it
+  was `impl State`, which Rust doesn't allow there.
+* A boxed interface value reached any way (`shapes.first()`, `map.get(k)`, `it` in
+  `shapes.iter().for_each { describe(it) }`) is accepted for `Shape` and `&Shape` parameters:
+  Oxie implements each interface for `Box<T>` and `&T`. Before: "`&Box<dyn Shape>: Shape` is not
+  satisfied".
+* Extension functions on an interface (`fun Shape.describe()`) apply to every implementing type;
+  before they generated an invalid `impl Ext for Shape`.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.

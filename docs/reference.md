@@ -156,7 +156,8 @@ fun short(x: i32) = x * 2
 * **Function-typed parameters**: `f: (i32) -> i32` becomes `impl FnMut(i32) -> i32` (or
   `impl Fn` when the function is called from inside a closure); as a field, a return value
   stored in a variable, or a generic argument it becomes `Box<dyn Fn(i32) -> i32>`, and
-  lambdas passed to it are boxed automatically.
+  lambdas passed to it are boxed automatically. A parameter the function stores in a field or
+  list is `impl Fn(i32) -> i32 + 'static`.
 * `fun main() throws` prints the error with its causes and exits with status 1.
 
 ### Context parameters
@@ -222,7 +223,7 @@ fun main() {
 | `Int`, `Long`, `Short`, `Byte`, `UInt`, `ULong`, `Double`, `Float`, `Boolean`, `Char`, `Unit` | `i32`, `i64`, `i16`, `i8`, `u32`, `u64`, `f64`, `f32`, `bool`, `char`, `()` |
 | `T?` | `Option<T>` (`&T?` is `Option<&T>`) |
 | `(A, B) -> R` | `impl FnMut(A, B) -> R`, `Box<dyn Fn(A, B) -> R>` or `dyn Fn(..)` depending on position |
-| `Shape` (an interface used as a type) | `impl Shape` (parameters, returns), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, and returns of different classes) |
+| `Shape` (an interface used as a type) | `impl Shape` (parameters, returns; `impl Shape + 'static` for a parameter the function stores), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, returns of different classes, and parameters and results of interface methods) |
 | `&T`, `&mut T`, `[T]`, `[T; N]`, `(A, B)`, `Vec<T>`, `dyn T`, `impl T`, `*const T` | same |
 | `std.io.Error` | `std::io::Error` (dots or `::` in paths) |
 
@@ -243,7 +244,10 @@ fun main() = println("${unit().area()} ${pick(true).area()} ${pick(false).area()
 
 An element of a `Vec<Shape>` (or `Vec<Box<Shape>>`), a loop variable over one and an
 interface-typed field are lent to an `&Shape` parameter as the value inside the box
-(`describe(shapes[0])` → `describe(&*shapes[0])`).
+(`describe(shapes[0])` → `describe(&*shapes[0])`). Oxie also implements each interface for
+`Box<T>` and `&T` that forward to the value (`impl<T: Shape + ?Sized> Shape for Box<T>`, when its
+methods allow it), so a boxed value reached any other way (`shapes.first()`, `map.get(k)`, `it`
+in a lambda) is accepted where a `Shape` or `&Shape` is expected.
 
 The standard traits used as types the same way are `Display`, `Debug`, `Error`, `Iterator`,
 `IntoIterator`, `Read`, `Write`, `BufRead`, `Future`, `Any`, `ToString` and every interface
@@ -411,7 +415,8 @@ mut fun Vec<i32>.bump(by: i32) { for (x in self.iter_mut()) *x += by }
 
 Each becomes a trait with one method plus its `impl` for the receiver type; every file of the
 crate imports these traits automatically. Inside, `this`/`self` is the receiver; for Oxie
-classes their fields can be used directly.
+classes their fields can be used directly. An extension of an interface (`fun Shape.describe()`)
+applies to every type that implements it: `impl<T: Shape + ?Sized> ShapeDescribe for T`.
 
 ### Operators
 
@@ -490,8 +495,9 @@ the declared type of a variable, field, parameter or return value:
 * a string literal to `String` (`String::from("...")`), a `&str` value to a `String`
   parameter (`.into()`);
 * a value to `T?` (`Some(...)`, or `.into()` for variables), `null` to `None`;
-* a lambda to a function-typed field (`Box::new(...)`), a constructed value to an interface-typed
-  field or collection (`Box::new(...)`);
+* a lambda or function parameter to a function-typed field or list (`Box::new(...)`), a value of
+  an implementing class or enum (or an interface-typed parameter) to an interface-typed field or
+  collection, also when it is pushed or inserted (`Box::new(...)`);
 * a `vec[...]` to `Vec<T>` element by element.
 
 ## Strings
