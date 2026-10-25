@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+* The generated Rust reads more like hand-written Rust. Std items are named the way people write
+  them (`Rc<RefCell<..>>`, `impl fmt::Display`, `Result<T, E>`) with `use` lines at the top of
+  the file, unless something in the file could shadow the name. A shared class gets only the
+  getters and setters code calls (a library keeps those of its public fields), generated items
+  that are called lose `#[allow(dead_code)]`, and `a.count += 1` on a shared object no longer
+  goes through a temporary.
+* The docs site labels each example's Rust tab "Generated Rust": it is what `oxie emit` prints,
+  not a hand-written comparison.
+
 ## 0.3.0 - 2026-10-25
 
 Oxie 0.3.0 makes code look less like Rust. Lists and maps have short types, `[T]` and `[K: V]`,

@@ -1,0 +1,29 @@
+// Generated code names std items by their short names only where nothing in the file can
+// shadow them: here a class named `Hash` and a function named `process` keep std's full paths,
+// and a getter called only from Rust code is still generated.
+
+data class Hash(val digest: String)
+
+fun process(items: [i32]): i32 = items.sum()
+
+shared class Counter(var count: i32) {
+    var label: String = "clicks"
+
+    fun bump() {
+        count += 1
+    }
+}
+
+fun parse(text: String): i32 throws {
+    return text.parse::<i32>()?
+}
+
+fun main() throws {
+    val c = Counter(1)
+    val d = c
+    d.bump()
+    c.count += 2
+    val h = Hash("ab12")
+    println("${c.count} ${h.digest} ${process([1, 2, 3])} ${parse("7")?}")
+    println(rust { c.label() })
+}

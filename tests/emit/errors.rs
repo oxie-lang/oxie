@@ -5,6 +5,8 @@
 pub(crate) mod __oxie;
 #[allow(unused_imports)]
 use crate::__oxie::prelude::*;
+use std::error::Error;
+use std::{fmt, process};
 
 use std::num::ParseIntError;
 
@@ -15,7 +17,6 @@ pub(crate) struct Item {
 }
 
 impl Item {
-    #[allow(dead_code)]
     pub(crate) fn new(name: String, qty: u32) -> Self {
         Self {
             name,
@@ -30,17 +31,17 @@ pub(crate) enum StockError {
     Quantity(ParseIntError),
 }
 
-impl ::std::fmt::Display for StockError {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for StockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Format { line } => write!(f, "missing ':' in '{line}'"),
-            Self::Quantity(__0) => ::std::fmt::Display::fmt(__0, f),
+            Self::Quantity(__0) => fmt::Display::fmt(__0, f),
         }
     }
 }
 
-impl ::std::error::Error for StockError {
-    fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
+impl Error for StockError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Quantity(e) => Some(e),
             #[allow(unreachable_patterns)]
@@ -49,13 +50,13 @@ impl ::std::error::Error for StockError {
     }
 }
 
-impl ::std::convert::From<ParseIntError> for StockError {
+impl From<ParseIntError> for StockError {
     fn from(e: ParseIntError) -> Self {
         Self::Quantity(e)
     }
 }
 
-pub(crate) fn parse_item(line: &str) -> ::std::result::Result<Item, StockError> {
+pub(crate) fn parse_item(line: &str) -> Result<Item, StockError> {
     let (name, qty) = match crate::__oxie::Elvis::opt(line.split_once(':')) {
         Some(__oxie_v1) => __oxie_v1,
         None => return Err(StockError::Format { line: line.to_string() }.into()),
@@ -64,13 +65,13 @@ pub(crate) fn parse_item(line: &str) -> ::std::result::Result<Item, StockError> 
     Ok(Item::new(name.trim().to_string(), n))
 }
 
-fn __oxie_main() -> ::std::result::Result<(), crate::__oxie::AnyError> {
+fn __oxie_main() -> Result<(), AnyError> {
     let item = parse_item("apples: 3")?;
     println!("{} {}", item.name, item.qty);
     match '__oxie_try1: {
         match parse_item("plums 9") {
             Ok(__oxie_v2) => __oxie_v2,
-            Err(__oxie_e3) => break '__oxie_try1 Err(::std::convert::From::from(__oxie_e3)),
+            Err(__oxie_e3) => break '__oxie_try1 Err(From::from(__oxie_e3)),
         };
         Ok::<_, StockError>(())
     } {
@@ -85,6 +86,6 @@ fn __oxie_main() -> ::std::result::Result<(), crate::__oxie::AnyError> {
 fn main() {
     if let Err(err) = __oxie_main() {
         crate::__oxie::report(err);
-        ::std::process::exit(1);
+        process::exit(1);
     }
 }

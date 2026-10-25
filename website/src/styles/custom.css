@@ -58,7 +58,7 @@ starlight-theme-select:has(select:focus-visible) {
 	font-style: normal !important;
 }
 
-/* Examples: Oxie, Rust and Output tabs (radio buttons, styled as tabs) */
+/* Examples: Oxie, Generated Rust and Output tabs (radio buttons, styled as tabs) */
 .oxie-example {
 	margin-top: 1.25rem;
 }
@@ -110,6 +110,13 @@ starlight-theme-select:has(select:focus-visible) {
 .oxie-example:has(input[value='rust']:checked) .oxie-panel[data-panel='rust'],
 .oxie-example:has(input[value='output']:checked) .oxie-panel[data-panel='output'] {
 	display: block;
+}
+
+/* says the Rust tab is compiler output, not a hand-written comparison */
+.sl-markdown-content .oxie-panel-note {
+	margin: 0 0 0.5rem;
+	color: var(--sl-color-gray-3);
+	font-size: var(--sl-text-sm);
 }
 
 /* Commands in the banner: Starlight styles inline code only in page content, so give them the

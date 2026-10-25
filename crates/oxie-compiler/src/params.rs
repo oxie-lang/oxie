@@ -397,10 +397,11 @@ fn methods<'a>(file: usize, items: &'a [Item], module: &[String], k: &Crate, out
 
 /// The names of the functions and methods that Rust written in the items calls (in `rust { }`
 /// blocks and macro arguments, which Oxie doesn't lower): `name(` anywhere in that text.
-fn raw_calls(items: &[Item], out: &mut HashSet<String>) {
+pub(crate) fn raw_calls(items: &[Item], out: &mut HashSet<String>) {
     fn scan(text: &str, out: &mut HashSet<String>) {
         let b = text.as_bytes();
         let mut i = 0;
+        let mut prev: Option<(usize, usize)> = None;
         while i < b.len() {
             if b[i].is_ascii_alphabetic() || b[i] == b'_' {
                 let start = i;
@@ -413,7 +414,12 @@ fn raw_calls(items: &[Item], out: &mut HashSet<String>) {
                 }
                 if j < b.len() && b[j] == b'(' {
                     out.insert(text[start..i].to_string());
+                    // `Account::new(..)`: the constructor of `Account`
+                    if let Some((ps, pe)) = prev.filter(|(_, pe)| text[*pe..start].trim() == "::") {
+                        out.insert(format!("{}::{}", &text[ps..pe], &text[start..i]));
+                    }
                 }
+                prev = Some((start, i));
             } else {
                 i += 1;
             }

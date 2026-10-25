@@ -5,13 +5,15 @@
 pub(crate) mod __oxie;
 #[allow(unused_imports)]
 use crate::__oxie::prelude::*;
+use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 pub(crate) struct AccountData {
     pub(crate) balance: i64,
 }
 
 impl AccountData {
-    #[allow(dead_code)]
     pub(crate) fn new(balance: i64) -> Self {
         Self {
             balance,
@@ -23,52 +25,43 @@ impl AccountData {
     }
 }
 
-pub(crate) struct Account(pub(crate) ::std::rc::Rc<::std::cell::RefCell<AccountData>>);
+pub(crate) struct Account(pub(crate) Rc<RefCell<AccountData>>);
 
-impl ::std::clone::Clone for Account {
+impl Clone for Account {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
-impl ::std::cmp::PartialEq for Account {
+impl PartialEq for Account {
     fn eq(&self, other: &Self) -> bool {
-        ::std::rc::Rc::ptr_eq(&self.0, &other.0)
+        Rc::ptr_eq(&self.0, &other.0)
     }
 }
-impl ::std::cmp::Eq for Account {}
-impl ::std::hash::Hash for Account {
-    fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
-        (::std::rc::Rc::as_ptr(&self.0) as *const () as usize).hash(state)
+impl Eq for Account {}
+impl Hash for Account {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (Rc::as_ptr(&self.0) as *const () as usize).hash(state)
     }
 }
 
 impl Account {
-    #[allow(dead_code)]
     pub(crate) fn new(balance: i64) -> Self {
-        Self(::std::rc::Rc::new(::std::cell::RefCell::new(AccountData::new(balance))))
+        Self(Rc::new(RefCell::new(AccountData::new(balance))))
     }
 
-    #[allow(dead_code)]
     pub(crate) fn balance(&self) -> i64 {
-        ::std::clone::Clone::clone(&self.0.read().balance)
+        self.0.read().balance
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn set_balance(&self, value: i64) {
-        self.0.write().balance = value;
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn deposit(&self, n: i64) {
         self.0.write().deposit(n)
     }
-
 }
 
 fn main() {
     let a = Account::new(10);
     let b = a.clone();
     b.deposit(5);
-    { let __value = 1; a.0.write().balance += __value; };
+    a.0.write().balance += 1;
     println!("{}", a.balance());
 }

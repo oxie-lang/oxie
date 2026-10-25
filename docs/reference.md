@@ -228,7 +228,7 @@ fun main() {
 | `Int`, `Long`, `Short`, `Byte`, `UInt`, `ULong`, `Double`, `Float`, `Boolean`, `Char`, `Unit` | `i32`, `i64`, `i16`, `i8`, `u32`, `u64`, `f64`, `f32`, `bool`, `char`, `()` |
 | `T?` | `Option<T>` (`&T?` is `Option<&T>`) |
 | `[T]` | `Vec<T>`, a list; Rust's slice `[T]` right after `&`, `&mut`, `*const` and `*mut`, inside `Box`, `Rc`, `Arc`, `Cow` and `Weak`, in a trait's type arguments (`impl AsRef<[u8]>`), and as an `impl` block's type or an associated type (`type Target = [T]`) |
-| `[K: V]` | `HashMap<K, V>`, std's map (written `::std::collections::HashMap` unless the module imports it) |
+| `[K: V]` | `HashMap<K, V>`, std's map |
 | `(A, B) -> R` | `impl FnMut(A, B) -> R`, `Box<dyn Fn(A, B) -> R>` or `dyn Fn(..)` depending on position |
 | `Shape` (an interface used as a type) | `impl Shape` (parameters, returns), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, and returns of different classes) |
 | `&T`, `&mut T`, `&[T]`, `[T; N]`, `(A, B)`, `Vec<T>`, `HashMap<K, V>`, `dyn T`, `impl T`, `*const T` | same |
@@ -325,7 +325,7 @@ shared class Name(var a: A) : Interface { ... }   // Rc<RefCell<..>> handle
   and `Name`, a handle: `struct Name(Rc<RefCell<NameData>>)`.
 * The handle has the same constructor, one method per instance method that borrows the data
   for the call (`self.0.write().deposit(n)`), a getter `a()` and setter `set_a(v)` per
-  field, and implements the class's Oxie interfaces and `toString` (`Display`) by forwarding.
+  field that code uses (in a library, also those of public fields), and implements the class's Oxie interfaces and `toString` (`Display`) by forwarding.
 * Static methods and `companion object` functions are on the handle.
 * `Clone` copies the handle; `==` and `Hash` use identity (`Rc::ptr_eq`).
 * Using a shared variable or field by value copies the handle (`val b = a` → `a.clone()`), so

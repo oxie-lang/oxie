@@ -5,6 +5,7 @@
 pub(crate) mod __oxie;
 #[allow(unused_imports)]
 use crate::__oxie::prelude::*;
+use std::process;
 
 // argument_locals.oxi:2
 use std::collections::HashMap;
@@ -21,7 +22,6 @@ pub(crate) struct Ids {
 }
 
 impl Ids {
-    #[allow(dead_code)]
     pub(crate) fn new(next: usize) -> Self {
         Self {
             next,
@@ -40,7 +40,7 @@ impl Ids {
     }
 
     // argument_locals.oxi:14
-    pub(crate) fn checked_id(&mut self /* oxie: &mut self because it calls `next_id()`, which changes `this` */) -> ::std::result::Result<usize, String> {
+    pub(crate) fn checked_id(&mut self /* oxie: &mut self because it calls `next_id()`, which changes `this` */) -> Result<usize, String> {
         // argument_locals.oxi:15
         if self.next >= 10 {
             return Err("out of ids".into());
@@ -78,7 +78,7 @@ impl Ids {
     }
 
     // argument_locals.oxi:28
-    pub(crate) fn add_checked(&mut self /* oxie: &mut self because it calls `items.push()` */) -> ::std::result::Result<(), String> {
+    pub(crate) fn add_checked(&mut self /* oxie: &mut self because it calls `items.push()` */) -> Result<(), String> {
         // argument_locals.oxi:29
         let checked_id = self.checked_id()?; /* oxie: computed first because `checked_id()` changes `this` while `items` is borrowed for `.push()` */
         self.items.push(checked_id);
@@ -99,7 +99,7 @@ impl Ids {
 }
 
 // argument_locals.oxi:41
-fn __oxie_main() -> ::std::result::Result<(), String> {
+fn __oxie_main() -> Result<(), String> {
     // argument_locals.oxi:42
     let mut ids = Ids::new(0);
     // argument_locals.oxi:43
@@ -123,6 +123,6 @@ fn __oxie_main() -> ::std::result::Result<(), String> {
 fn main() {
     if let Err(err) = __oxie_main() {
         crate::__oxie::report(err);
-        ::std::process::exit(1);
+        process::exit(1);
     }
 }

@@ -12,7 +12,6 @@ pub(crate) struct Address {
 }
 
 impl Address {
-    #[allow(dead_code)]
     pub(crate) fn new(city: Option<String>) -> Self {
         Self {
             city,
@@ -27,7 +26,6 @@ pub(crate) struct User {
 }
 
 impl User {
-    #[allow(dead_code)]
     pub(crate) fn new(name: String, address: Option<Address>) -> Self {
         Self {
             name,

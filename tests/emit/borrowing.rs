@@ -35,7 +35,6 @@ pub(crate) struct Counter {
 }
 
 impl Counter {
-    #[allow(dead_code)]
     pub(crate) fn new(hits: Vec<i32>) -> Self {
         Self {
             hits,

@@ -1044,7 +1044,7 @@ impl<'a> Lowerer<'a> {
         if self.names_std(name) {
             name.to_string()
         } else {
-            format!("::std::collections::{}", name)
+            self.std_name(&format!("std::collections::{}", name))
         }
     }
 
@@ -1586,7 +1586,8 @@ impl<'a> Lowerer<'a> {
                     self.expr(x, P_LOWEST);
                     self.e.w(" {");
                     self.e.indent();
-                    self.e.w(&format!("\nOk({v}) => {v},\nErr({err}) => break '{label} Err(::std::convert::From::from({err})),"));
+                    let from = self.std_name("std::convert::From");
+                    self.e.w(&format!("\nOk({v}) => {v},\nErr({err}) => break '{label} Err({from}::from({err})),"));
                     self.e.dedent();
                     self.e.w("\n}");
                 } else {
@@ -2320,6 +2321,10 @@ impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ paths
 
     fn path_expr(&mut self, segs: &[String], generics: Option<&Vec<GenericArg>>, global: bool, span: Span) {
+        // `Account::balance` as a value
+        if let [_, .., last] = segs {
+            self.calls.insert(last.clone());
+        }
         let mut s = String::new();
         if global {
             s.push_str("::");
@@ -2639,9 +2644,9 @@ impl<'a> Lowerer<'a> {
                     // `mutableListOf<T>()`, `mapOf<K, V>()`: empty collections with explicit types
                     if let Some(g) = generics.as_ref().filter(|_| args.is_empty()) {
                         let ty = match name.as_str() {
-                            "listOf" | "mutableListOf" | "arrayListOf" | "vecOf" => Some("Vec"),
-                            "mapOf" | "mutableMapOf" | "hashMapOf" => Some("::std::collections::HashMap"),
-                            "setOf" | "mutableSetOf" | "hashSetOf" => Some("::std::collections::HashSet"),
+                            "listOf" | "mutableListOf" | "arrayListOf" | "vecOf" => Some("Vec".to_string()),
+                            "mapOf" | "mutableMapOf" | "hashMapOf" => Some(self.std_collection("HashMap")),
+                            "setOf" | "mutableSetOf" | "hashSetOf" => Some(self.std_collection("HashSet")),
                             _ => None,
                         };
                         if let Some(ty) = ty {
@@ -2656,6 +2661,7 @@ impl<'a> Lowerer<'a> {
                 }
                 if let Some(cls) = self.class_info(&name).cloned() {
                     if !cls.is_tuple && !cls.is_union {
+                        self.calls.insert(format!("{}::new", name));
                         let g = generics.as_ref().map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                         self.e.w(&format!("{}{}::new", esc(&name), g));
                         let params = cls.ctor_params();
@@ -2740,6 +2746,7 @@ impl<'a> Lowerer<'a> {
             }
             if let Some(c) = self.class_at(&owner).cloned() {
                 if last == "new" && !c.user_new {
+                    self.calls.insert(format!("{}::new", owner[owner.len() - 1]));
                     self.e.w(&path);
                     if let Some(g) = generics {
                         let gt = self.generic_args_text(g);
@@ -2758,6 +2765,7 @@ impl<'a> Lowerer<'a> {
             // `shapes.Circle(2.0)`: a class constructed through the module that declares it
             if let Some(c) = self.k.type_key_at(segs, &self.module).and_then(|key| self.k.classes.get(&key)).cloned() {
                 if !c.is_tuple && !c.is_union {
+                    self.calls.insert(format!("{}::new", segs[n - 1]));
                     let g = generics.map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                     self.e.w(&format!("{}{}::new", path, g));
                     let params = c.ctor_params();
@@ -2810,7 +2818,7 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("{}: ", esc(&name)));
                     match a {
                         Some(x) => self.coerce(x, &p.ty, TyPos::Field),
-                        None => self.e.w("::std::default::Default::default()"),
+                        None => self.e.w(&format!("{}::default()", self.std_name("std::default::Default"))),
                     }
                 }
                 self.e.w(" }");
@@ -3140,6 +3148,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn method_call(&mut self, recv: &Expr, name: &str, generics: Option<&Vec<GenericArg>>, args: &[Arg], span: Span) {
+        self.record_member(recv, name);
         // Kotlin scope function: x.let { ... }
         if name == "let" && args.len() == 1 {
             if let ExprKind::Lambda { params, body, .. } = &args[0].value.kind {
@@ -3438,7 +3447,15 @@ impl<'a> Lowerer<'a> {
                 _ => None,
             };
             match shared {
-                Some((name, _)) if i == seg.len() - 1 => self.e.w(&format!(".{}()", member(name))),
+                Some((name, _)) if i == seg.len() - 1 => {
+                    self.calls.insert(name.clone());
+                    if let ExprKind::Field { recv, .. } = &l.kind {
+                        if let Some(c) = self.optional_shared_class(recv) {
+                            self.calls.insert(format!("{}::{}", c, name));
+                        }
+                    }
+                    self.e.w(&format!(".{}()", member(name)));
+                }
                 Some((name, _)) => {
                     let write = matches!(&seg[i + 1].kind, ExprKind::MethodCall { name, .. } if crate::sema::MUTATING_METHODS.contains(&name.as_str()));
                     let access = if write { "write()" } else { "read()" };
@@ -3465,6 +3482,16 @@ impl<'a> Lowerer<'a> {
 
     /// Is `recv.field` (in a `?.` chain) a field of a shared class, reached through a `T?` or
     /// a reference? Returns whether the class is `@sync`.
+    /// The shared class of a value in a `?.` chain, through `T?` and references.
+    fn optional_shared_class(&self, recv: &Expr) -> Option<String> {
+        let mut t = self.chain_value_type(recv);
+        while let Some(Type::Option(inner) | Type::Ref { inner, .. }) = t {
+            t = Some(*inner);
+        }
+        let n = t.as_ref()?.single_name()?;
+        self.class_info(n).filter(|c| c.is_shared).map(|_| n.to_string())
+    }
+
     fn optional_shared_field(&self, recv: &Expr, field: &str) -> Option<bool> {
         let mut t = self.chain_value_type(recv);
         while let Some(Type::Option(inner) | Type::Ref { inner, .. }) = t {
@@ -4239,7 +4266,7 @@ impl<'a> Lowerer<'a> {
         let label = self.fresh("try");
         let err_ty = match catch.and_then(|c| c.ty.as_ref()) {
             Some(t) => self.ty(t, TyPos::Generic),
-            None => format!("{}::AnyError", RT),
+            None => self.rt_name("AnyError"),
         };
         let wrap = format!("Ok::<_, {}>", err_ty);
         let emit_block = |l: &mut Self, value: bool| {

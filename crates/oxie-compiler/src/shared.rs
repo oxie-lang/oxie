@@ -23,6 +23,10 @@
 
 use super::*;
 
+const COPY_TYPES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "bool", "char", "Int", "Long", "Double", "Float", "Boolean", "Char",
+];
+
 impl<'a> Lowerer<'a> {
     pub(crate) fn shared_data_name(name: &str) -> String {
         format!("{}Data", name)
@@ -36,12 +40,15 @@ impl<'a> Lowerer<'a> {
         let mvis = if self.members_pub { "pub " } else { "pub(crate) " };
         let data = format!("{}{}", Self::shared_data_name(&t.name), gn);
         let handle = format!("{}{}", t.name, gn);
-        let (cell, new_cell) = if sync {
-            (format!("::std::sync::Arc<::std::sync::Mutex<{}>>", data), "::std::sync::Arc::new(::std::sync::Mutex::new(".to_string())
-        } else {
-            (format!("::std::rc::Rc<::std::cell::RefCell<{}>>", data), "::std::rc::Rc::new(::std::cell::RefCell::new(".to_string())
-        };
-        let ptr = if sync { "::std::sync::Arc" } else { "::std::rc::Rc" };
+        let (ptr, inner) = if sync { (self.std_name("std::sync::Arc"), self.std_name("std::sync::Mutex")) } else { (self.std_name("std::rc::Rc"), self.std_name("std::cell::RefCell")) };
+        let (cell, new_cell) = (format!("{}<{}<{}>>", ptr, inner, data), format!("{}::new({}::new(", ptr, inner));
+        let (clone, partial_eq, eq, hash, hasher) = (
+            self.std_name("std::clone::Clone"),
+            self.std_name("std::cmp::PartialEq"),
+            self.std_name("std::cmp::Eq"),
+            self.std_name("std::hash::Hash"),
+            self.std_name("std::hash::Hasher"),
+        );
         // `read()` / `write()` (`__oxie::SharedCell`, `SharedLock`) explain a conflicting use
         let (read, write) = ("read()", "write()");
 
@@ -52,25 +59,24 @@ impl<'a> Lowerer<'a> {
 
         // Clone shares the object; equality and hashing use its identity
         self.e.nl();
-        self.e.w(&format!("impl{} ::std::clone::Clone for {}{} {{\n    fn clone(&self) -> Self {{\n        Self(self.0.clone())\n    }}\n}}", g, handle, wc));
+        self.e.w(&format!("impl{} {} for {}{} {{\n    fn clone(&self) -> Self {{\n        Self(self.0.clone())\n    }}\n}}", g, clone, handle, wc));
         self.e.nl();
-        self.e.w(&format!("impl{} ::std::cmp::PartialEq for {}{} {{\n    fn eq(&self, other: &Self) -> bool {{\n        {}::ptr_eq(&self.0, &other.0)\n    }}\n}}", g, handle, wc, ptr));
+        self.e.w(&format!("impl{} {} for {}{} {{\n    fn eq(&self, other: &Self) -> bool {{\n        {}::ptr_eq(&self.0, &other.0)\n    }}\n}}", g, partial_eq, handle, wc, ptr));
         self.e.nl();
-        self.e.w(&format!("impl{} ::std::cmp::Eq for {}{} {{}}", g, handle, wc));
+        self.e.w(&format!("impl{} {} for {}{} {{}}", g, eq, handle, wc));
         self.e.nl();
         self.e.w(&format!(
-            "impl{} ::std::hash::Hash for {}{} {{\n    fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {{\n        ({}::as_ptr(&self.0) as *const () as usize).hash(state)\n    }}\n}}",
-            g, handle, wc, ptr
+            "impl{} {} for {}{} {{\n    fn hash<H: {}>(&self, state: &mut H) {{\n        ({}::as_ptr(&self.0) as *const () as usize).hash(state)\n    }}\n}}",
+            g, hash, handle, wc, hasher, ptr
         ));
         self.e.nl();
-        if derives.iter().any(|d| d == "Debug") {
-            self.e.w(&format!("impl{} ::std::fmt::Debug for {}{} {{\n    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {{\n        ::std::fmt::Debug::fmt(&*self.0.{}, f)\n    }}\n}}", g, handle, wc, read));
-            self.e.nl();
-        }
         let has_display = t.members.iter().any(|m| matches!(&m.kind, ItemKind::Fun(f) if (f.name == "toString" || f.name == "to_string") && f.mods.is_override));
-        if has_display {
-            self.e.w(&format!("impl{} ::std::fmt::Display for {}{} {{\n    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {{\n        ::std::fmt::Display::fmt(&*self.0.{}, f)\n    }}\n}}", g, handle, wc, read));
-            self.e.nl();
+        for (tr, needed) in [("Debug", derives.iter().any(|d| d == "Debug")), ("Display", has_display)] {
+            if needed {
+                let (tr, formatter, result) = (self.std_name(&format!("std::fmt::{}", tr)), self.std_name("std::fmt::Formatter"), self.std_name("std::fmt::Result"));
+                self.e.w(&format!("impl{} {} for {}{} {{\n    fn fmt(&self, f: &mut {}<'_>) -> {} {{\n        {}::fmt(&*self.0.{}, f)\n    }}\n}}", g, tr, handle, wc, formatter, result, tr, read));
+                self.e.nl();
+            }
         }
 
         self.e.nl();
@@ -82,7 +88,8 @@ impl<'a> Lowerer<'a> {
         let args: Vec<String> = ctor.iter().map(|(f, _)| esc(&f.name)).collect();
         self.e.nl();
         self.e.w(&format!(
-            "#[allow(dead_code)]\n{}fn new({}) -> Self {{\n    Self({}{}::new({}))))\n}}",
+            "{}{}fn new({}) -> Self {{\n    Self({}{}::new({}))))\n}}",
+            self.unused_allowed(&format!("{}::new", t.name)),
             mvis,
             params.join(", "),
             new_cell,
@@ -97,26 +104,32 @@ impl<'a> Lowerer<'a> {
             let name = esc(&f.name);
             let fty = self.ty(ty, TyPos::Ret);
             let fvis = if f.vis == Vis::Private { "" } else { mvis };
-            if !method_names.contains(&f.name.as_str()) {
+            // another crate may call those of a library's public fields
+            let external = self.k.has_lib && vis.starts_with("pub ") && fvis.starts_with("pub ");
+            // kept where something may call it, without `#[allow(dead_code)]` where this class's is called
+            let keep = |l: &Self, name: &str| l.crate_calls.is_none() || external || l.crate_calls(name);
+            if !method_names.contains(&f.name.as_str()) && keep(self, &f.name) {
+                let allow = self.unused_allowed(&format!("{}::{}", t.name, f.name));
                 self.e.nl();
                 if self.is_cloneable(ty, &tparams) {
                     let bound = match ty.single_name() {
-                        Some(n) if tparams.iter().any(|p| p == n) => format!(" where {}: ::std::clone::Clone", n),
+                        Some(n) if tparams.iter().any(|p| p == n) => format!(" where {}: {}", n, clone),
                         _ => String::new(),
                     };
-                    self.e.w(&format!("#[allow(dead_code)]\n{}fn {}(&self) -> {}{} {{\n    ::std::clone::Clone::clone(&self.0.{}.{})\n}}", fvis, name, fty, bound, read, name));
+                    // numbers, references and the like are copied without `.clone()`
+                    let copy = matches!(ty, Type::Ref { mutable: false, .. }) || ty.single_name().is_some_and(|n| COPY_TYPES.contains(&n));
+                    let clone_call = if copy { "" } else { ".clone()" };
+                    self.e.w(&format!("{}{}fn {}(&self) -> {}{} {{\n    self.0.{}.{}{}\n}}", allow, fvis, name, fty, bound, read, name, clone_call));
                 } else if !sync {
-                    self.e.w(&format!(
-                        "#[allow(dead_code)]\n{}fn {}(&self) -> ::std::cell::Ref<'_, {}> {{\n    ::std::cell::Ref::map(self.0.read(), |d| &d.{})\n}}",
-                        fvis, name, fty, name
-                    ));
+                    let r = self.std_name("std::cell::Ref");
+                    self.e.w(&format!("{}{}fn {}(&self) -> {}<'_, {}> {{\n    {}::map(self.0.read(), |d| &d.{})\n}}", allow, fvis, name, r, fty, r, name));
                 }
                 self.e.nl();
             }
             let setter = format!("set_{}", f.name);
-            if !method_names.contains(&setter.as_str()) {
+            if !method_names.contains(&setter.as_str()) && keep(self, &setter) {
                 self.e.nl();
-                self.e.w(&format!("#[allow(dead_code)]\n{}fn {}(&self, value: {}) {{\n    self.0.{}.{} = value;\n}}", fvis, esc(&setter), self.ty(ty, TyPos::Field), write, name));
+                self.e.w(&format!("{}{}fn {}(&self, value: {}) {{\n    self.0.{}.{} = value;\n}}", self.unused_allowed(&format!("{}::{}", t.name, setter)), fvis, esc(&setter), self.ty(ty, TyPos::Field), write, name));
                 self.e.nl();
             }
         }
@@ -142,7 +155,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.e.dedent();
-        self.e.nl();
+        self.e.line_break();
         self.e.w("}");
         self.e.nl();
         // interfaces: the handle implements them too, forwarding to the data
@@ -167,7 +180,7 @@ impl<'a> Lowerer<'a> {
                 self.forwarder(m, f, recv, "", read, write);
             }
             self.e.dedent();
-            self.e.nl();
+            self.e.line_break();
             self.e.w("}");
             self.e.nl();
         }
@@ -200,12 +213,20 @@ impl<'a> Lowerer<'a> {
             args.push("self".into());
         }
         let access = if recv == Recv::RefMut { write } else { read };
-        self.e.w(&format!("#[allow(dead_code)]\n{}{}fn {}{}({})", vis, header, esc(&f.name), g, params));
+        // methods of trait impls are never unused
+        let owner = self.class.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+        let allow = if vis.is_empty() { String::new() } else { self.unused_allowed(&format!("{}::{}", owner, f.name)) };
+        self.e.w(&format!("{}{}{}fn {}{}({})", allow, vis, header, esc(&f.name), g, params));
         if let Some(r) = ret {
             self.e.w(&format!(" -> {}", r));
         }
         self.e.w(&format!("{} {{\n    self.0.{}.{}({})\n}}", wc, access, esc(&f.name), args.join(", ")));
         self.e.nl();
+    }
+
+    /// `#[allow(dead_code)]` for a generated item named `name`, unless the crate calls it.
+    pub(crate) fn unused_allowed(&self, name: &str) -> String {
+        if self.crate_calls(name) { String::new() } else { "#[allow(dead_code)]\n".into() }
     }
 
     /// Can a getter return a copy of a field of this type?
@@ -256,6 +277,25 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         Some(c.is_sync)
+    }
+
+    /// The shared class whose handle `recv` is or refers to.
+    pub(crate) fn shared_class_name(&self, recv: &Expr) -> Option<String> {
+        let t = self.infer_type(recv)?;
+        let name = match &t {
+            Type::Ref { inner, .. } => inner.single_name()?,
+            _ => t.single_name()?,
+        };
+        self.class_info(name).filter(|c| c.is_shared).map(|_| name.to_string())
+    }
+
+    /// Records a call of `member` (a method, getter or setter) on the handle `recv`: by name, and
+    /// as `Class::member` where Oxie knows the class.
+    pub(crate) fn record_member(&mut self, recv: &Expr, member: &str) {
+        self.calls.insert(member.to_string());
+        if let Some(c) = self.shared_class_name(recv) {
+            self.calls.insert(format!("{}::{}", c, member));
+        }
     }
 
     /// The shared class of an expression's value type (not of a reference to it).
@@ -318,6 +358,7 @@ impl<'a> Lowerer<'a> {
     fn borrowed_field(&mut self, obj: &Expr, field: &str, write: bool) -> Expr {
         let o = self.capture(obj, P_POSTFIX);
         if !write && self.cheap_field(obj, field) {
+            self.record_member(obj, field);
             return Expr::new(ExprKind::Raw(format!("{}.{}()", o, esc(field))), obj.span);
         }
         let access = if write { "write()" } else { "read()" };
@@ -355,6 +396,7 @@ impl<'a> Lowerer<'a> {
             // a plain read: the getter
             ExprKind::Field { recv, name, safe: false } => {
                 if self.shared_field(recv, name).is_some() {
+                    self.record_member(recv, name);
                     self.e.mark(e.span);
                     self.expr(recv, P_POSTFIX);
                     self.e.w(&format!(".{}()", esc(name)));
@@ -425,6 +467,7 @@ impl<'a> Lowerer<'a> {
         if let (None, ExprKind::Field { recv, name, safe: false }) = (op, &target.kind) {
             if self.shared_field(recv, name).is_some() {
                 let ty = self.assign_field_type(recv, name);
+                self.record_member(recv, &format!("set_{}", name));
                 self.expr(recv, P_POSTFIX);
                 self.e.w(&format!(".set_{}(", name));
                 match ty {
@@ -439,10 +482,22 @@ impl<'a> Lowerer<'a> {
         let Some((obj, field)) = self.shared_base(target) else { return false };
         let base = self.borrowed_field(&obj, &field, true);
         let place = self.rebase(target, &base);
+        let op_text = op.map(|o| format!("{}=", o.as_str())).unwrap_or_else(|| "=".into());
+        // a literal or a variable can't reach the object while it is borrowed
+        let simple = match &value.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Char(_) | ExprKind::Bool(_) | ExprKind::RawStr(_) => true,
+            ExprKind::Str(parts) => parts.iter().all(|p| matches!(p, crate::lexer::StrPart::Lit(_))),
+            _ => value.ident().is_some_and(|n| self.is_local(n)),
+        };
+        if simple {
+            self.expr_inner(&place);
+            self.e.w(&format!(" {} ", op_text));
+            self.expr(value, P_LOWEST);
+            return true;
+        }
         let v = self.capture(value, P_LOWEST);
         self.e.w(&format!("{{ let __value = {}; ", v));
         self.expr_inner(&place);
-        let op_text = op.map(|o| format!("{}=", o.as_str())).unwrap_or_else(|| "=".into());
         self.e.w(&format!(" {} __value; }}", op_text));
         true
     }

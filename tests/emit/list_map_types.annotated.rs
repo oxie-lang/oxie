@@ -5,20 +5,20 @@
 pub(crate) mod __oxie;
 #[allow(unused_imports)]
 use crate::__oxie::prelude::*;
+use std::collections::HashMap;
 
 // list_map_types.oxi:3
 pub(crate) struct Library {
     // list_map_types.oxi:4
-    pub(crate) shelves: ::std::collections::HashMap<String, Vec<String>>,
+    pub(crate) shelves: HashMap<String, Vec<String>>,
     // list_map_types.oxi:5
     pub(crate) log: Vec<String>,
 }
 
 impl Library {
-    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
-            shelves: ::std::collections::HashMap::new(),
+            shelves: HashMap::new(),
             log: vec![],
         }
     }

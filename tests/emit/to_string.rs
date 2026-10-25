@@ -5,6 +5,7 @@
 pub(crate) mod __oxie;
 #[allow(unused_imports)]
 use crate::__oxie::prelude::*;
+use std::fmt;
 
 pub(crate) struct Point {
     pub(crate) x: i32,
@@ -12,7 +13,6 @@ pub(crate) struct Point {
 }
 
 impl Point {
-    #[allow(dead_code)]
     pub(crate) fn new(x: i32, y: i32) -> Self {
         Self {
             x,
@@ -21,8 +21,8 @@ impl Point {
     }
 }
 
-impl ::std::fmt::Display for Point {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for Point {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "({}, {})", self.x, self.y)
     }
 }
@@ -33,7 +33,6 @@ pub(crate) struct Fraction {
 }
 
 impl Fraction {
-    #[allow(dead_code)]
     pub(crate) fn new(n: i32, f: i32) -> Self {
         Self {
             n,
@@ -42,8 +41,8 @@ impl Fraction {
     }
 }
 
-impl ::std::fmt::Display for Fraction {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for Fraction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.n, self.f)
     }
 }
@@ -53,7 +52,6 @@ pub(crate) struct Person {
 }
 
 impl Person {
-    #[allow(dead_code)]
     pub(crate) fn new(name: String) -> Self {
         Self {
             name,
@@ -61,8 +59,8 @@ impl Person {
     }
 }
 
-impl ::std::fmt::Display for Person {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for Person {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.name)
     }
 }
@@ -73,7 +71,6 @@ pub(crate) struct Size {
 }
 
 impl Size {
-    #[allow(dead_code)]
     pub(crate) fn new(w: i32, h: i32) -> Self {
         Self {
             w,
@@ -82,8 +79,8 @@ impl Size {
     }
 }
 
-impl ::std::fmt::Display for Size {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for Size {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}x{}", self.w, self.h)
     }
 }
@@ -93,7 +90,6 @@ pub(crate) struct History {
 }
 
 impl History {
-    #[allow(dead_code)]
     pub(crate) fn new(entries: Vec<String>) -> Self {
         Self {
             entries,
@@ -101,8 +97,8 @@ impl History {
     }
 }
 
-impl ::std::fmt::Display for History {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for History {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let __oxie_s: String = {
             let joined = self.entries.join("; ");
             format!("{} entries: {joined}", self.entries.len())
@@ -117,7 +113,6 @@ pub(crate) struct Report {
 }
 
 impl Report {
-    #[allow(dead_code)]
     pub(crate) fn new(title: String, items: Vec<String>) -> Self {
         Self {
             title,
@@ -126,8 +121,8 @@ impl Report {
     }
 }
 
-impl ::std::fmt::Display for Report {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let __oxie_s: String = '__oxie_text: {
             if self.items.is_empty() {
                 break '__oxie_text format!("{}: empty", self.title);
