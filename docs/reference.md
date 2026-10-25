@@ -529,8 +529,10 @@ the declared type of a variable, field, parameter or return value:
   (`val v: T? = ...`).
 * `a?.b`, `a?.m()`, `a?.b?.c` — **safe navigation** when `a` is optional: the result is
   `None` if `a` is. Chains flatten like Kotlin (`?.` on a `T?` property continues the chain;
-  `?.` after a non-optional property acts like `.`). Reading a field through a borrowed value
-  gives a reference (`Option<&T>`).
+  `?.` after a link that isn't optional, a property or a method like `trim()`, acts like `.`).
+  Reading a field through a borrowed value gives a reference (`Option<&T>`).
+* `a?.b = v` (also `+=`, ...) assigns only when `a` isn't null:
+  `if let Some(a) = a.as_mut() { a.b = v; }`.
 * When the left side is a `Result` (a call to a `throws` function, `.await`, `parse()`,
   `File::open(...)`, ...), `a?.b` is Rust's `?` followed by `.b`: the error is propagated.
   For a left side of unknown type, `?.` propagates errors inside functions that return
@@ -540,19 +542,25 @@ the declared type of a variable, field, parameter or return value:
   `return`, `throw`, `break`, `continue` or `panic(...)`. When `b` is a literal or a value that
   costs nothing to read (a constant, an enum variant, a variable, a field), `Option<&T> ?: b`
   yields `T` for a `Copy` `T` (`server?.encoding ?: Encoding.Utf16`), `Option<String> ?: "text"`
-  yields `String` and `Option<&String> ?: "text"` yields `&str`. So through a borrowed value (`u: &User`), `u.address?.city ?: "unknown"` is borrowed
-  text; where a `String` is needed, copy the field explicitly, as for any field read through a
+  yields `String` and `Option<&String> ?: "text"` yields `&str`. So through a borrowed value
+  (`u: &User`), `u.address?.city ?: "unknown"` is borrowed text; where a `String` is needed, copy the field explicitly, as for any field read through a
   reference: `u.address?.city.clone() ?: "unknown"`. The compiler error offers this fix.
-* `x!!` — unwrap.
+  When `b` is optional too, `a ?: b` is optional (`a.or(b)`, `a.or_else(|| f())` for a call),
+  so `a ?: b ?: 0` tries each in turn.
+* `x!!` — unwrap. On a variable or field followed by a method call (`name!!.len()`) it unwraps
+  a reference (`name.as_ref().unwrap()`), so `name` stays usable.
 * `if (val v = opt) { }` / `while (val v = opt)` — `if let Some(v)` / `while let Some(v)`;
   with a pattern (`if (val Ok(v) = r)`) the pattern is used as written, except a tuple, which
   unwraps an optional pair (`if (val (k, v) = split(s))`).
 * A null check unwraps a local variable or parameter whose type Oxie knows to be `T?`, when the
-  branch doesn't assign it: in `if (x != null) { }` (also as a part of an `&&` chain) `x` is the
-  value, `if let Some(x) = &x` (a reference; a `Copy` value is copied, and `&mut x` is used when
-  the branch changes it). After `if (x == null) return` (or `throw`, `continue`, `break`), `x` is
-  the value for the rest of the block: `let Some(x) = x else { return };`. Fields are not
-  unwrapped (unwrap them with `if (val v = &a.field)`).
+  branch doesn't assign it: in `if (x != null) { }` (also as a part of an `&&` chain) and in the
+  `else` of `if (x == null)`, `x` is the value, `if let Some(x) = &x` (a reference; a `Copy`
+  value is copied, and `&mut x` is used when the branch changes it). After
+  `if (x == null) return` or `if (a == null || b == null) return` (or `throw`, `continue`,
+  `break`), they are the values for the rest of the block: `let Some(x) = x else { return };`.
+  In `x == null || cond` and `x != null && cond`, `x` is the value in `cond`
+  (`x.as_ref().map_or(true, |x| cond)`). A check whose branch doesn't use `x` stays a check
+  (`x.is_some()`). Fields are not unwrapped (unwrap them with `if (val v = &a.field)`).
 
 ```oxie
 fun initial(name: String?): char {

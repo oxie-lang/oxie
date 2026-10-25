@@ -42,6 +42,29 @@
   fix), and a `when` arm with several `in` conditions and a guard applies the guard to all of
   them. Before, the guard applied only to the last.
 * Printing a value without a text form (`println(xs)`) suggests `println("${xs:?}")`.
+* Assigning a plain value to a `T?` field from outside its class (`p.age = 5`) and in
+  `copy(age = 7)` wraps it in `Some`, as in constructors.
+* `?.` after a link that gives a plain value (`p?.display()?.len()`, `s?.trim()?.len()`,
+  `n?.name?.len()`) works like Kotlin's. Before, it was a Rust type error, also when only another
+  class had an optional field of that name. `x?.let { if (c) it.len() else null }` gives a
+  `usize?`, not a `usize??`.
+* `a ?: b ?: c` with an optional `b` tries `a`, then `b`, then `c`; a call in the middle runs only
+  when needed. Before, it was an error whose fix used `.expect`, which panics.
+* `?.` on a method declared to return `&T?` and on `find_last` reads fields by reference. Before,
+  it was "can't take `__oxie_v2.name` out of a borrowed value"; error messages no longer show the
+  names Oxie generates.
+* `x!!.len()` on a variable or field reads through the value instead of moving it out, so `x`
+  stays usable (`email!!.split('@')` in a method, `o!!.len()` twice). `val e = o!!` still takes
+  the value.
+* A null check whose branch (or the rest of the block) doesn't use the variable stays a check
+  (`b.is_some()`). Before, it warned about an unused variable, and the offered fix broke the code.
+* Safe assignment: `books.get_mut(isbn)?.available = true` and `o?.inner?.n = 2` assign only when
+  the values aren't null. Before, it was "invalid left-hand side of assignment".
+* A method called on a `T?` that rustc calls private (`best.len()`) is explained as an optional
+  value, and rustc's `?` fix, which would read as `?.`, is no longer offered.
+* Null checks unwrap in more places, as Kotlin's smart casts do: the `else` branch of
+  `if (x == null)`, after `if (a == null || b == null) return`, and the right side of
+  `x == null || x.len() > 3` and `x != null && x.len() < 3`.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.
