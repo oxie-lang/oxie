@@ -259,6 +259,11 @@ pub struct Lowerer<'a> {
     /// Lambda parameters without a known type: (scope depth, name). Rust passes collection
     /// elements by reference, so comparisons of these with literals read the value first.
     pub(crate) lambda_params: Vec<(usize, String)>,
+    /// The parameters without types of lambdas kept in variables, like `lambda_params`: Rust
+    /// infers their types from their uses, which must not borrow them.
+    pub(crate) untyped_params: Vec<(usize, String)>,
+    /// The next lambda lowered is a variable's value (see `untyped_params`).
+    pub(crate) typed_by_body: bool,
     /// The next lambda lowered is a predicate whose parameters are element references.
     pub(crate) next_lambda_refs: bool,
     /// Span starts of `for` iterables that are used again after the loop, with the start of
@@ -370,6 +375,8 @@ impl<'a> Lowerer<'a> {
             crate_attrs_allowed: false,
             root_lints: Vec::new(),
             lambda_params: Vec::new(),
+            untyped_params: Vec::new(),
+            typed_by_body: false,
             next_lambda_refs: false,
             reused_iters: HashMap::new(),
             narrowed_types: Vec::new(),

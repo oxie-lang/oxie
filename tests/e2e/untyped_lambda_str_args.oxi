@@ -1,0 +1,9 @@
+// An untyped lambda parameter passed to a `&str` parameter takes that type, unborrowed.
+fun rules(src: &str, strict: bool): Vec<String> = src.split(' ').filter { strict || it.len() > 1 }.map { it.to_string() }.collect()
+
+fun main() {
+    val ts = { rules(it, false) }
+    println("${ts("let x = 10"):?}")
+    val both = { a, b -> rules(a, true).len() + rules(b, false).len() }
+    println(both("a b", "cc d"))
+}

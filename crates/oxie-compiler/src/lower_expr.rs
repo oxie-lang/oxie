@@ -309,6 +309,12 @@ impl<'a> Lowerer<'a> {
                 }
                 Some(t) => self.coerce(e, t, TyPos::Local),
                 None if self.is_shared_place(e) => self.shared_copy(e),
+                // a lambda in a variable: Rust infers its parameters' types from its body
+                None if matches!(e.kind, ExprKind::Lambda { .. }) => {
+                    self.typed_by_body = true;
+                    self.expr(e, P_LOWEST);
+                    self.typed_by_body = false;
+                }
                 None => self.expr(e, P_LOWEST),
             }
         }
@@ -958,7 +964,8 @@ impl<'a> Lowerer<'a> {
             ExprKind::Paren(x) => self.auto_borrow(x, mutable),
             _ if e.ident().is_some() => {
                 let n = e.ident().unwrap();
-                if self.is_untyped_lambda_param(n) {
+                // a lambda parameter without a type gets it from this use: `&it` would make it `str`
+                if self.is_untyped_lambda_param(n) || self.untyped_param(n) {
                     return false;
                 }
                 match self.local(n) {
@@ -977,6 +984,12 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Is `n` a lambda parameter without a type (and not shadowed by a later binding)?
+    fn untyped_param(&self, n: &str) -> bool {
+        let depth = self.scopes.iter().rposition(|s| s.contains_key(n));
+        self.untyped_params.iter().any(|(d, p)| Some(*d) == depth && p == n)
+    }
+
     /// An argument for a `&str` or `&[T]` parameter is lent unless it already is a reference:
     /// lending a reference (`&s.trim()`) is harmless, since `&&str` coerces to `&str`.
     fn lend_to_slice(&self, e: &Expr, inner: &Type) -> bool {
@@ -986,6 +999,8 @@ impl<'a> Lowerer<'a> {
         match &e.kind {
             ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Unary(UnOp::Ref | UnOp::RefMut, _) | ExprKind::Null | ExprKind::Lambda { .. } | ExprKind::SelfValue => false,
             ExprKind::Paren(x) => self.lend_to_slice(x, inner),
+            // a lambda parameter without a type gets it from this use: `&it` would make it `str`
+            _ if e.ident().is_some_and(|n| self.untyped_param(n)) => false,
             _ => match e.ident().and_then(|n| self.local(n)) {
                 Some(Some(t)) => !matches!(t, Type::Ref { .. } | Type::Ptr { .. }) && t.last_name() != Some("str"),
                 _ => true,
@@ -4171,6 +4186,7 @@ impl<'a> Lowerer<'a> {
             return;
         };
         let implicit_it = *braces && params.is_empty() && visit::uses_it(body);
+        let typed_by_body = std::mem::take(&mut self.typed_by_body);
         if *is_async {
             self.e.w("async ");
         }
@@ -4189,6 +4205,9 @@ impl<'a> Lowerer<'a> {
             if ty.is_none() && ref_params {
                 self.lambda_params.push((depth, "it".into()));
             }
+            if ty.is_none() && typed_by_body {
+                self.untyped_params.push((depth, "it".into()));
+            }
             self.bind_name("it", ty);
         }
         for (i, p) in params.iter().enumerate() {
@@ -4201,6 +4220,9 @@ impl<'a> Lowerer<'a> {
                 }
                 None => {
                     ps.push(pt);
+                    if let (true, Pat::Ident { name, sub: None, .. }) = (typed_by_body, &p.pat) {
+                        self.untyped_params.push((depth, name.clone()));
+                    }
                     if let (true, Pat::Ident { name, sub: None, .. }) = (ref_params, &p.pat) {
                         self.lambda_params.push((depth, name.clone()));
                     }
@@ -4246,6 +4268,7 @@ impl<'a> Lowerer<'a> {
         self.loops = saved_loops;
         self.fns.pop();
         self.lambda_params.retain(|(d, _)| *d != depth);
+        self.untyped_params.retain(|(d, _)| *d != depth);
         self.pop_scope();
     }
 
