@@ -15,6 +15,8 @@
 * A `when` guard that compares an arm's binding with a literal reads its value
   (`Click(x, y) if x < 0`), as predicates do, also when the subject is a reference. Before, it
   needed `*x`.
+* `if (val (k, v) = split(s))` and `while (val (a, b) = pairs.pop())` unwrap an optional pair,
+  as `if (val v = opt)` unwraps an optional value.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.

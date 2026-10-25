@@ -1,0 +1,13 @@
+// `if (val (a, b) = opt)` unwraps an optional pair, as `if (val v = opt)` does.
+
+fun split(s: &str): (String, String)? {
+    val i = s.find('=') ?: return null
+    (s[..i].to_string(), s[i + 1..].to_string())
+}
+
+fun main() {
+    if (val (k, v) = split("a=1")) println("$k -> $v")
+    if (val (k, v) = split("nothing")) println("$k -> $v") else println("no pair")
+    var pairs = vec[(1, 2), (3, 4)]
+    while (val (a, b) = pairs.pop()) println(a + b)
+}

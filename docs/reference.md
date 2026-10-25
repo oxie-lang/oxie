@@ -543,7 +543,8 @@ the declared type of a variable, field, parameter or return value:
   reference: `u.address?.city.clone() ?: "unknown"`. The compiler error offers this fix.
 * `x!!` — unwrap.
 * `if (val v = opt) { }` / `while (val v = opt)` — `if let Some(v)` / `while let Some(v)`;
-  with a pattern (`if (val Ok(v) = r)`) the pattern is used as written.
+  with a pattern (`if (val Ok(v) = r)`) the pattern is used as written, except a tuple, which
+  unwraps an optional pair (`if (val (k, v) = split(s))`).
 * A null check unwraps a local variable or parameter whose type Oxie knows to be `T?`, when the
   branch doesn't assign it: in `if (x != null) { }` (also as a part of an `&&` chain) `x` is the
   value, `if let Some(x) = &x` (a reference; a `Copy` value is copied, and `&mut x` is used when

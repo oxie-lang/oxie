@@ -2500,7 +2500,7 @@ impl<'a> Parser<'a> {
                 let pat = self.pattern()?;
                 self.expect_punct("=")?;
                 let expr = self.expr()?;
-                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. });
+                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. } | Pat::Tuple(_));
                 return Ok(Cond::Let { pat, expr, implicit_some });
             }
             return Ok(Cond::Expr(self.expr()?));
@@ -2513,7 +2513,7 @@ impl<'a> Parser<'a> {
                 let pat = self.pattern()?;
                 self.expect_punct("=")?;
                 let expr = self.cmp_expr()?;
-                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. });
+                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. } | Pat::Tuple(_));
                 parts.push(Cond::Let { pat, expr, implicit_some });
             } else {
                 parts.push(Cond::Expr(self.cmp_expr()?));
