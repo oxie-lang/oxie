@@ -1993,6 +1993,8 @@ impl<'a> Lowerer<'a> {
                 self.class.as_ref().and_then(|c| if c.is_static { None } else { c.fields.get(n).cloned() })
             }
             ExprKind::Field { recv, name, .. } if matches!(recv.kind, ExprKind::SelfValue) => self.class.as_ref().and_then(|c| c.fields.get(name).cloned()),
+            // a field of a value of a known class (`p.age = 5`)
+            ExprKind::Field { safe: false, .. } => self.infer_type(target),
             _ => None,
         }
         .filter(|t| *t != Type::Infer)
@@ -3113,9 +3115,15 @@ impl<'a> Lowerer<'a> {
             self.e.w(&format!("{{ let mut {} = ", v));
             self.expr(recv, P_POSTFIX);
             self.e.w(".clone();");
+            let class = self.infer_type(recv).and_then(|t| self.type_owner(&t)).and_then(|o| self.class_at(&o)).filter(|c| !c.has_generics);
             for a in args {
-                self.e.w(&format!(" {}.{} = ", v, esc(a.name.as_ref().unwrap())));
-                self.expr(&a.value, P_LOWEST);
+                let field = a.name.as_ref().unwrap();
+                self.e.w(&format!(" {}.{} = ", v, esc(field)));
+                // a `T?` field takes a plain value as `Some(..)`, as in the constructor
+                match class.as_ref().and_then(|c| c.fields.iter().find(|f| f.name == *field)).map(|f| f.ty.clone()).filter(|t| *t != Type::Infer) {
+                    Some(t) => self.coerce(&a.value, &t, TyPos::Local),
+                    None => self.expr(&a.value, P_LOWEST),
+                }
                 self.e.w(";");
             }
             self.e.w(&format!(" {} }}", v));

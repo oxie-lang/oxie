@@ -135,6 +135,11 @@ impl<'a> Lowerer<'a> {
                     _ => None,
                 }
             }
+            // a data class's `copy(field = value)`
+            MethodCall { recv, name, args, .. } if name == "copy" && !args.is_empty() && args.iter().all(|a| a.name.is_some()) => match self.infer_type(recv)? {
+                Type::Ref { inner, .. } => Some(*inner),
+                t => Some(t),
+            },
             MethodCall { recv, name, .. } => {
                 if matches!(recv.kind, SelfValue) {
                     if let Some(m) = self.class.as_ref().and_then(|c| c.methods.get(name)) {

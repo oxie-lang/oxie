@@ -1,0 +1,22 @@
+data class P(var age: i32?, var name: String?)
+data class Team(var lead: P, var size: i32?)
+shared class Counter(var best: i32?)
+fun main() {
+    var p = P(null, null)
+    p.age = 5
+    p.name = "x".to_string()
+    p.name = null
+    val q = p.copy(age = 7)
+    val r = q.copy(name = "ada".to_string(), age = null)
+    val other: i32? = Some(3)
+    val s = r.copy(age = other)
+    println("${p:?} ${q:?} ${r:?} ${s:?}")
+    var t = Team(p, null)
+    t.lead.age = 9
+    t.size = 2
+    t.size = other
+    println("${t:?}")
+    val c = Counter(null)
+    c.best = 4
+    println("${c.best:?}")
+}
