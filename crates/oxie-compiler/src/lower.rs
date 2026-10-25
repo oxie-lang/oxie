@@ -2634,6 +2634,17 @@ impl<'a> Lowerer<'a> {
     }
 
     fn error_enum_impls(&mut self, t: &TypeDecl, g: &str, self_ty: &str, wc: &str) {
+        // text and numbers show as they are, other values as `Debug` (every error is `Debug`)
+        fn field_spec(t: &Type) -> &'static str {
+            let t = match t {
+                Type::Ref { inner, .. } => inner,
+                t => t,
+            };
+            match t.single_name() {
+                Some(n) if crate::lower::PRIMITIVES.contains(&n) || matches!(n, "String" | "str") => "{}",
+                _ => "{:?}",
+            }
+        }
         // which variants wrap a source error
         let wraps_error = |ty: &Type| ty.last_name().is_some_and(|n| n.ends_with("Error") && n != "AnyError");
         let mut from_counts: HashMap<String, usize> = HashMap::new();
@@ -2668,7 +2679,7 @@ impl<'a> Lowerer<'a> {
                     let parts: Vec<String> = (0..ts.len())
                         .map(|i| {
                             let n = format!("__{}", i);
-                            if used.contains(&n) || (v.message.is_none() && ts.len() == 1) {
+                            if used.contains(&n) || v.message.is_none() {
                                 self.bind_name(&n, None);
                                 n
                             } else {
@@ -2681,7 +2692,7 @@ impl<'a> Lowerer<'a> {
                 VariantFields::Named(fs) => {
                     let mut parts: Vec<String> = Vec::new();
                     for f in fs {
-                        if used.contains(&f.name) {
+                        if used.contains(&f.name) || v.message.is_none() {
                             // a field named `f` is bound as `__f`, so it doesn't hide the formatter
                             let name = if f.name == "f" { "__f" } else { &f.name };
                             self.bind_name(name, None);
@@ -2707,6 +2718,17 @@ impl<'a> Lowerer<'a> {
                 }
                 None => match &v.fields {
                     VariantFields::Tuple(ts) if ts.len() == 1 => self.e.w("::std::fmt::Display::fmt(__0, f)"),
+                    // the values of the fields follow the case's name: "too many (count: 5, max: 3)"
+                    VariantFields::Tuple(ts) => {
+                        let specs: Vec<&str> = ts.iter().map(field_spec).collect();
+                        let args: Vec<String> = (0..ts.len()).map(|i| format!("__{}", i)).collect();
+                        self.e.w(&format!("write!(f, \"{} ({})\", {})", humanize(&v.name), specs.join(", "), args.join(", ")));
+                    }
+                    VariantFields::Named(fs) if !fs.is_empty() => {
+                        let specs: Vec<String> = fs.iter().map(|x| format!("{}: {}", x.name, field_spec(&x.ty))).collect();
+                        let args: Vec<String> = fs.iter().map(|x| if x.name == "f" { "__f".to_string() } else { esc(&x.name) }).collect();
+                        self.e.w(&format!("write!(f, \"{} ({})\", {})", humanize(&v.name), specs.join(", "), args.join(", ")));
+                    }
                     _ => self.e.w(&format!("f.write_str(\"{}\")", humanize(&v.name))),
                 },
             }
@@ -2728,14 +2750,19 @@ impl<'a> Lowerer<'a> {
             .variants
             .iter()
             .filter_map(|v| {
-                let explicit = v.attrs.iter().any(|a| a.name() == "from" || a.name() == "source");
+                // `@from` alone converts from any type; only an error is a source
+                let explicit = v.attrs.iter().any(|a| a.name() == "source");
                 match &v.fields {
-                    VariantFields::Tuple(ts) if ts.len() == 1 && (explicit || wraps_error(&ts[0])) => Some((format!("Self::{}(e)", v.name), "e".to_string())),
+                    // a case without a message shows its error's text, so its causes are that error's
+                    VariantFields::Tuple(ts) if ts.len() == 1 && (explicit || wraps_error(&ts[0])) && v.message.is_none() => {
+                        Some((format!("Self::{}(e)", v.name), "::std::error::Error::source(e)".to_string()))
+                    }
+                    VariantFields::Tuple(ts) if ts.len() == 1 && (explicit || wraps_error(&ts[0])) => Some((format!("Self::{}(e)", v.name), "Some(e)".to_string())),
                     VariantFields::Named(fs) => fs
                         .iter()
                         .find(|f| f.name == "source" || f.name == "cause")
                         .filter(|f| f.ty.last_name().is_some_and(|n| n != "AnyError" && n != "Box"))
-                        .map(|f| (format!("Self::{} {{ {}: e, .. }}", v.name, esc(&f.name)), "e".to_string())),
+                        .map(|f| (format!("Self::{} {{ {}: e, .. }}", v.name, esc(&f.name)), "Some(e)".to_string())),
                     _ => None,
                 }
             })
@@ -2755,7 +2782,7 @@ impl<'a> Lowerer<'a> {
             self.e.indent();
             for (p, b) in &sources {
                 self.e.nl();
-                self.e.w(&format!("{} => Some({}),", p, b));
+                self.e.w(&format!("{} => {},", p, b));
             }
             self.e.nl();
             self.e.w("#[allow(unreachable_patterns)]\n_ => None,");

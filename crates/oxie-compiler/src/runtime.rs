@@ -628,10 +628,16 @@ impl<T> Context<T> for ::std::option::Option<T> {
 /// Prints an error and its causes to stderr (used by `fun main() throws`).
 pub fn report<E: Into<AnyError>>(err: E) {
     let err: AnyError = err.into();
-    eprintln!("error: {}", err);
+    let mut last = err.to_string();
+    eprintln!("error: {}", last);
     let mut source = err.source();
     while let Some(s) = source {
-        eprintln!("  caused by: {}", s);
+        // a wrapper that shows its cause's text adds nothing
+        let text = s.to_string();
+        if text != last {
+            eprintln!("  caused by: {}", text);
+        }
+        last = text;
         source = s.source();
     }
 }

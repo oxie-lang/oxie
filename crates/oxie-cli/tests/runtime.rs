@@ -33,6 +33,17 @@ fn panics_point_at_the_oxi_source() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn errors_from_main_show_each_cause_once() {
+    let src = "error enum AppError {\n    BadNumber(std::num::ParseIntError)\n}\n\nfun parse(s: &str): i32 throws AppError {\n    val n: i32 = s.parse()?\n    n\n}\n\nfun main() throws {\n    parse(\"x\")\n}\n";
+    let dir = script("report.oxi", src);
+    let out = oxie().args(["run", "report.oxi"]).current_dir(&dir).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("error: invalid digit found in string"), "{stderr}");
+    assert!(!stderr.contains("caused by"), "{stderr}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 // backtrace frames on Windows have no column (`at C:\..\main.rs:3`), so they aren't rewritten
 #[cfg(not(windows))]
 #[test]
