@@ -1433,10 +1433,11 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                 changed = true;
             }
         }
-        // the first `&mut self` implementation (or default body) of an interface method spreads to the others
+        // the first `&mut self` implementation (or default body) of an interface method spreads to the
+        // others; not a shared class's, whose handle changes the data behind `&self`
         for m in &methods {
             if let Some(t) = &m.implements {
-                if decided[&(m.owner.clone(), m.fun.name.clone())] == Recv::RefMut {
+                if decided[&(m.owner.clone(), m.fun.name.clone())] == Recv::RefMut && !k.classes.get(&m.owner).is_some_and(|c| c.is_shared) {
                     trait_mut.entry((t.clone(), m.fun.name.clone())).or_insert_with(|| m.owner.clone());
                 }
             }

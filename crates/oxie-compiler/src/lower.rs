@@ -2114,6 +2114,29 @@ impl<'a> Lowerer<'a> {
         }
         // trait impls
         for (tr, members) in impl_traits.iter().zip(members_by_trait.iter()) {
+            if t.shared && self.data_changes_behind_ref(&t.name, tr, members) {
+                // the data's methods change it where the interface takes `&self`: only the handle
+                // implements the interface, the data has the methods
+                self.e.nl();
+                self.e.w(&format!("impl{} {}{} {{", g, self_ty, wc));
+                self.e.indent();
+                let info = tr.last_name().and_then(|n| self.k.traits.get(n)).cloned();
+                for m in members {
+                    self.e.nl();
+                    match &m.kind {
+                        ItemKind::Fun(f) => {
+                            let recv = self.recv_of(&t.name, f);
+                            self.pending_trait_ret = trait_ret(tr, info.as_ref(), &f.name);
+                            self.method(m, f, recv, true, None);
+                        }
+                        _ => self.assoc_item(m, true),
+                    }
+                }
+                self.e.dedent();
+                self.e.w("}");
+                self.e.nl();
+                continue;
+            }
             self.trait_impl_block(tr, members, &g, &self_ty, &wc);
         }
         // error class
@@ -2472,6 +2495,16 @@ impl<'a> Lowerer<'a> {
             },
             _ => RetLt::Other,
         }
+    }
+
+    /// Does a method of shared class `owner` that implements interface `tr` change the data
+    /// where the interface's method takes `&self` (the handle changes it through a lock)?
+    pub(crate) fn data_changes_behind_ref(&self, owner: &str, tr: &Type, members: &[&Item]) -> bool {
+        let Some(info) = tr.last_name().and_then(|n| self.k.traits.get(n)) else { return false };
+        members.iter().any(|m| match &m.kind {
+            ItemKind::Fun(f) => self.recv_of(owner, f) == Recv::RefMut && info.methods.get(&f.name).is_some_and(|mi| mi.recv == Recv::Ref),
+            _ => false,
+        })
     }
 
     /// The cases of enum `name` with the types of their fields (for bound inference).
