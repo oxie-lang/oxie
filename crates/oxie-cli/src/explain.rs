@@ -1187,7 +1187,7 @@ fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str
 /// A method of `T` called on a `T?` (rustc: "no method named `trim` found for enum `Option<T>`",
 /// or "method `len` is private", which `Option` has too).
 fn is_optional_receiver(d: &MappedDiag) -> bool {
-    d.message.contains("`Option<") || d.notes.iter().any(|n| n.contains("Option::expect"))
+    d.message.contains("`Option<") || d.notes.iter().any(|n| n.contains("Option::expect") || n.contains("propagating an `Option::None`"))
 }
 
 /// Explains a method of `T` called on a `T?`. A null check unwraps a local variable or
@@ -1207,8 +1207,13 @@ fn optional_receiver(d: &mut MappedDiag, lines: &[&str], method: &str) {
     }
     let ty = d.notes.iter().find_map(|n| between(n, "exists on the type `", "`")).map(|t| format!("`{}?`", t)).unwrap_or_else(|| "optional".into());
     rewrite(d, format!("`{}` is {}, so it has no `{}()` until it is unwrapped", recv, if ty == "optional" { ty.clone() } else { format!("optional ({})", ty) }, method));
-    d.notes.retain(|n| !n.contains("Option::expect") && !n.contains("exists on the type"));
-    d.suggestions.retain(|s| !s.replacement.starts_with(".expect("));
+    if d.label.as_deref() == Some("private method") {
+        // `Option` has a private `len`
+        d.label = Some(format!("`{}` may be null here", recv));
+    }
+    d.notes.retain(|n| !n.contains("Option::expect") && !n.contains("exists on the type") && !n.contains("propagating an `Option::None`"));
+    // rustc's `?` before the `.` would read as Oxie's `?.`
+    d.suggestions.retain(|s| !s.replacement.starts_with(".expect(") && s.replacement != "?");
     let plain = recv.chars().all(is_ident_char);
     let short = recv.rsplit('.').next().unwrap_or(&recv).to_string();
     for l in (0..=d.line).rev().take(40) {
@@ -2131,6 +2136,8 @@ fn rustc_fixes(d: &mut MappedDiag, lines: &[&str]) {
             "&mut " => "pass a mutable reference (`&mut`)".to_string(),
             "move " => "make it a `move` lambda".to_string(),
             "*" => "use the value (`*`)".to_string(),
+            // `?` before a `.` would make Oxie's `?.`, which reads the member only when there is a value
+            "?" if lines.get(s.line as usize).is_some_and(|l| l.chars().nth(s.end_col as usize) == Some('.')) => continue,
             "?" => "pass the error on (`?`)".to_string(),
             _ if r.starts_with('.') && r.ends_with(')') && !r.contains("::") && !r.contains('|') => format!("use `{}`", r),
             _ if !r.is_empty() && r.chars().all(|c| c.is_alphanumeric() || c == '_') && s.line == s.end_line && d.fixes.is_empty() => {

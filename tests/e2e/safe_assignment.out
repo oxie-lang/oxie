@@ -1,0 +1,3 @@
+Some(Book { title: "Dune", available: true, loans: 1, note: None })
+Some(Book { title: "Emma", available: true, loans: 2, note: Some("signed") }) None
+Some(Outer { inner: Some(Inner { n: 10 }) }) Some(Outer { inner: None })

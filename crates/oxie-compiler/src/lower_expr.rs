@@ -686,6 +686,11 @@ impl<'a> Lowerer<'a> {
             return true;
         }
         match &e.kind {
+            // `a?.b = v` is an `if let`
+            ExprKind::Assign(_, target, _) if has_safe_link(target) && matches!(self.resolve_question_dots(target).kind, ExprKind::Field { safe: true, .. }) => {
+                self.expr(e, P_LOWEST);
+                true
+            }
             ExprKind::If { cond, then, else_ } => {
                 self.if_expr(cond, then, else_.as_deref(), None);
                 true
@@ -1533,6 +1538,10 @@ impl<'a> Lowerer<'a> {
                 );
                 self.expr(target, P_LOWEST);
             }
+            Assign(op, target, value) if has_safe_link(target) && matches!(self.resolve_question_dots(target).kind, Field { safe: true, .. }) => {
+                let target = self.resolve_question_dots(target);
+                self.safe_assign(*op, &target, value);
+            }
             Assign(op, target, value) => {
                 let target_ty = self.assign_target_type(target);
                 self.expr(target, P_LOWEST + 1);
@@ -2077,6 +2086,60 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.e.w(")");
+    }
+
+    /// `a?.b = v` assigns only when `a` isn't null: `if let Some(x) = a.as_mut() { x.b = v; }`,
+    /// with an `if let` for each `?.` (`a?.b?.c = v`).
+    fn safe_assign(&mut self, op: Option<BinOp>, target: &Expr, value: &Expr) {
+        let ExprKind::Field { recv, name, .. } = &target.kind else { return };
+        let (base, links) = chain_links(recv);
+        let (prefix, segs) = Self::split_segments(&links);
+        let mut opened = 0;
+        // the value before the first `?.`, borrowed mutably when it is a variable or field
+        let mut v = self.fresh("v");
+        self.e.w(&format!("if let Some({}) = ", v));
+        match prefix.last() {
+            Some(l) => self.expr(l, P_POSTFIX),
+            None => self.expr(base, P_POSTFIX),
+        }
+        if self.is_place(base) && prefix.iter().all(|x| matches!(x.kind, ExprKind::Field { .. } | ExprKind::Index(..))) {
+            self.e.w(".as_mut()");
+        }
+        self.open_block();
+        opened += 1;
+        for seg in &segs {
+            let next = self.fresh("v");
+            self.e.w(&format!("if let Some({}) = {}", next, v));
+            self.segment_links(seg);
+            if matches!(seg.last().unwrap().kind, ExprKind::Field { .. } | ExprKind::Index(..)) {
+                self.e.w(".as_mut()");
+            }
+            self.open_block();
+            opened += 1;
+            v = next;
+        }
+        self.e.w(&format!("{}.{}", v, esc(name)));
+        match op {
+            Some(o) => self.e.w(&format!(" {}= ", o.as_str())),
+            None => self.e.w(" = "),
+        }
+        let field_ty = self.link_recv_type(recv, true).and_then(|t| self.class_info(t.single_name()?)?.fields.iter().find(|f| &f.name == name).map(|f| f.ty.clone())).filter(|t| *t != Type::Infer);
+        match (op, field_ty) {
+            (None, Some(t)) => self.coerce(value, &t, TyPos::Local),
+            _ => self.expr(value, P_LOWEST),
+        }
+        self.e.w(";");
+        for _ in 0..opened {
+            self.e.dedent();
+            self.e.nl();
+            self.e.w("}");
+        }
+    }
+
+    fn open_block(&mut self) {
+        self.e.w(" {");
+        self.e.indent();
+        self.e.nl();
     }
 
     fn assign_target_type(&self, target: &Expr) -> Option<Type> {
