@@ -1,4 +1,7 @@
-// A loop that changes its elements through a class's own method gets a fix to loop over `&mut`.
+// A loop that changes its elements in a way Oxie doesn't see gets a fix to loop over `&mut`
+// (`it.bump()`, a method that changes its object, is seen: see tests/e2e/loop_element_methods).
+import std::ops::AddAssign
+
 class Item(var qty: i32) {
     fun bump() {
         qty += 1
@@ -7,7 +10,12 @@ class Item(var qty: i32) {
 
 fun main() {
     var items = vec[Item(1)]
-    for (it in items) it.bump() // error: 10: fix: loop over `&mut items`: `for (it in &mut items) it.bump()`
-    for (it in items.iter()) it.qty += 1 // error: 11: fix: use `iter_mut()`: `for (it in items.iter_mut()) it.qty += 1`
-    println(items.len())
+    for (it in items) it.qty.add_assign(1) // error: 13: fix: loop over `&mut items`: `for (it in &mut items) it.qty.add_assign(1)`
+    for (it in items.iter()) it.qty += 1 // error: 14: fix: use `iter_mut()`: `for (it in items.iter_mut()) it.qty += 1`
+    // in a loop over an element of an outer loop, the outer loop lends it for changing
+    var grid = vec[vec[Item(1)]]
+    for (row in grid) { // error: 18: fix: loop over `&mut grid`: `for (row in &mut grid) {`
+        for (it in row) it.qty.add_assign(1)
+    }
+    println("${items.len()} ${grid.len()}")
 }

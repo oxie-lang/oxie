@@ -502,6 +502,18 @@ fn loop_over_mut(d: &mut MappedDiag, lines: &[&str], name: &str) -> bool {
         if list.is_empty() || !line[start + list.len()..].starts_with(')') || list.ends_with('.') {
             return false;
         }
+        // `for (row in grid) { for (x in row) ... }`: `row` is an element the outer loop lends,
+        // so that loop must lend it for changing
+        if !list.contains('.') && list != name {
+            let mut outer = MappedDiag { line: l, ..d.clone() };
+            outer.notes.clear();
+            outer.fixes.clear();
+            if loop_over_mut(&mut outer, lines, &list) && !outer.fixes.is_empty() {
+                d.notes.extend(outer.notes);
+                d.fixes.extend(outer.fixes);
+                return true;
+            }
+        }
         let col = line[..start].chars().count() as u32;
         d.notes.push(help(&format!("the loop reads the elements of `{}`; to change them, loop over `&mut {}`.", list, list)));
         d.fixes.push(Fix { title: format!("loop over `&mut {}`", list), edits: vec![edit(l, col, col, "&mut ")] });

@@ -1340,6 +1340,29 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                     Some((f.name.clone(), callable_recvs(&key, &decided, &supers)))
                 })
                 .collect();
+            // the methods callable on the elements of fields that are collections of Oxie classes
+            // or interfaces (`for (c in counters) c.bump()`)
+            let elem_recvs: HashMap<String, HashMap<String, Recv>> = k
+                .classes
+                .get(&m.owner)
+                .into_iter()
+                .flat_map(|c| c.fields.iter().map(move |f| (c, f)))
+                .filter_map(|(c, f)| {
+                    let Type::Path { segs, .. } = &f.ty else { return None };
+                    let [seg] = segs.as_slice() else { return None };
+                    if !matches!(seg.name.as_str(), "Vec" | "VecDeque" | "LinkedList") {
+                        return None;
+                    }
+                    let Some([GenericArg::Type(Type::Path { segs, .. })]) = seg.generics.as_deref() else { return None };
+                    let path: Vec<String> = segs.iter().map(|s| s.name.clone()).collect();
+                    let key = match k.type_key_at(&path, &c.module).filter(|key| k.classes.get(key).is_some_and(|c| !c.is_shared)) {
+                        Some(key) => key,
+                        None if path.len() == 1 && k.traits.contains_key(&path[0]) => path[0].clone(),
+                        None => return None,
+                    };
+                    Some((f.name.clone(), callable_recvs(&key, &decided, &supers)))
+                })
+                .collect();
             let mut_params = if k.same_named_funs.is_empty() {
                 &mut_params
             } else {
@@ -1355,7 +1378,7 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                     here
                 })
             };
-            let facts = analyze_fun_with(m.fun, &fields, &recvs, mut_params, &field_recvs);
+            let facts = analyze_fun_with(m.fun, &fields, &recvs, mut_params, &field_recvs, &elem_recvs);
             let name = m.owner.rsplit("::").next().unwrap_or(&m.owner);
             let returns_self = m.fun.ret.as_ref().is_some_and(|t| t.single_name() == Some("Self") || t.single_name() == Some(name));
             // implementations of an interface method that is `&mut self` stay `&mut self`
@@ -1438,14 +1461,22 @@ fn callable_recvs(owner: &str, decided: &HashMap<(String, String), Recv>, supers
 }
 
 pub fn analyze_fun(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap<String, Recv>) -> BodyFacts {
-    analyze_fun_with(f, fields, methods, &HashMap::new(), &HashMap::new())
+    analyze_fun_with(f, fields, methods, &HashMap::new(), &HashMap::new(), &HashMap::new())
 }
 
 /// Like `analyze_fun`, also knowing which parameters of callable functions are `&mut`
 /// (passing a field there borrows it mutably: `fill(items)` becomes `fill(&mut self.items)`)
-/// and the receivers of methods on fields of Oxie class types.
-pub fn analyze_fun_with(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap<String, Recv>, mut_params: &HashMap<String, Vec<usize>>, field_recvs: &HashMap<String, HashMap<String, Recv>>) -> BodyFacts {
-    let mut w = Walker { fields, methods, mut_params, field_recvs, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
+/// and the receivers of methods on fields of Oxie class types and on the elements of fields that
+/// hold them.
+pub fn analyze_fun_with(
+    f: &FunDecl,
+    fields: &HashSet<String>,
+    methods: &HashMap<String, Recv>,
+    mut_params: &HashMap<String, Vec<usize>>,
+    field_recvs: &HashMap<String, HashMap<String, Recv>>,
+    elem_recvs: &HashMap<String, HashMap<String, Recv>>,
+) -> BodyFacts {
+    let mut w = Walker { fields, methods, mut_params, field_recvs, elem_recvs, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
     for p in &f.params {
         w.bind(&p.pat);
     }
@@ -1459,7 +1490,7 @@ pub fn analyze_fun_with(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap
 
 pub fn analyze_block(b: &Block, fields: &HashSet<String>, methods: &HashMap<String, Recv>) -> BodyFacts {
     let none = HashMap::new();
-    let mut w = Walker { fields, methods, mut_params: &none, field_recvs: &HashMap::new(), scopes: vec![HashSet::new()], facts: BodyFacts::default() };
+    let mut w = Walker { fields, methods, mut_params: &none, field_recvs: &HashMap::new(), elem_recvs: &HashMap::new(), scopes: vec![HashSet::new()], facts: BodyFacts::default() };
     w.block(b);
     w.facts
 }
@@ -1471,6 +1502,8 @@ struct Walker<'a> {
     mut_params: &'a HashMap<String, Vec<usize>>,
     /// Field name -> the receivers of the methods of its Oxie class.
     field_recvs: &'a HashMap<String, HashMap<String, Recv>>,
+    /// Field name -> the receivers of the methods of the Oxie class or interface of its elements.
+    elem_recvs: &'a HashMap<String, HashMap<String, Recv>>,
     scopes: Vec<HashSet<String>>,
     facts: BodyFacts,
 }
@@ -1728,8 +1761,14 @@ impl<'a> Walker<'a> {
                 // `for (x in items) x.qty += 1` over a field borrows it mutably (see `lower_expr`)
                 let field = matches!(&iter.kind, Path { .. }) || matches!(&iter.kind, Field { recv, .. } if matches!(recv.kind, SelfValue));
                 if field && self.rooted_in_self(iter) {
+                    let elems = match &iter.kind {
+                        Field { name, .. } => Some(name.as_str()),
+                        _ => iter.ident(),
+                    }
+                    .and_then(|f| self.elem_recvs.get(f));
+                    let changes = |m: &str| elems.and_then(|r| r.get(m)) == Some(&Recv::RefMut);
                     if let Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } = pat {
-                        if crate::visit::writes_through(body, name) {
+                        if crate::visit::writes_through(body, name, &changes) {
                             let why = format!("it changes the elements of `{}`", self.self_field(iter));
                             self.mutates(iter.span, why);
                         }

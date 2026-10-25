@@ -589,6 +589,9 @@ impl<'a> Lowerer<'a> {
             ExprKind::Path { .. } => {
                 let n = iter.ident()?;
                 match self.local(n) {
+                    // a shared reference is copied into the loop; a `&mut` one is reborrowed
+                    Some(Some(Type::Ref { mutable: false, .. })) => return None,
+                    Some(Some(Type::Ref { mutable: true, inner, .. })) if self.reused_iters.contains_key(&iter.span.start) => (**inner).clone(),
                     Some(t) if self.reused_iters.contains_key(&iter.span.start) => t.clone()?,
                     Some(_) => return None,
                     None if of_self() => return None,
@@ -614,8 +617,11 @@ impl<'a> Lowerer<'a> {
             }
             _ => return None,
         };
+        if let Type::Slice(t) = &ty {
+            return Some(self.copy_elem(t));
+        }
         let Type::Path { segs, .. } = &ty else { return None };
-        let [seg] = segs.as_slice() else { return None };
+        let Some(seg) = segs.last().filter(|_| segs.len() == 1 || segs[0].name == "std") else { return None };
         match seg.name.as_str() {
             "Vec" | "VecDeque" | "LinkedList" | "HashSet" | "BTreeSet" | "BinaryHeap" => {}
             "HashMap" | "BTreeMap" => return Some(false),
@@ -625,6 +631,17 @@ impl<'a> Lowerer<'a> {
             Some([GenericArg::Type(t)]) => self.copy_elem(t),
             _ => false,
         })
+    }
+
+    /// The methods of the Oxie class or interface `t` names that change their object (`&mut self`).
+    pub(crate) fn changing_methods(&self, t: Option<&Type>) -> std::collections::HashSet<String> {
+        let Some(n) = t.and_then(|t| t.single_name()) else { return Default::default() };
+        let methods = match self.class_info(n) {
+            Some(c) if !c.is_shared => Some(&c.methods),
+            Some(_) => None,
+            None => self.k.traits.get(n).filter(|_| self.is_trait_name(n)).map(|t| &t.methods),
+        };
+        methods.into_iter().flatten().filter(|(_, m)| m.recv == crate::sema::Recv::RefMut).map(|(n, _)| n.clone()).collect()
     }
 
     /// Is a collection element of type `t` bound by value in a loop that borrows the collection?
@@ -1717,8 +1734,18 @@ impl<'a> Lowerer<'a> {
                 let borrows = self.loop_borrow(iter);
                 // the body changes the elements: borrowed mutably (for a field, sema makes the
                 // method `&mut self` by the same rule)
-                let writes_elements = borrows.is_some()
-                    && matches!(pat, Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } if visit::writes_through(body, name));
+                let changing = self.changing_methods(self.elem_type(iter).as_ref());
+                let changes = |m: &str| changing.contains(m);
+                let writes_elements = borrows.is_some() && {
+                    let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
+                    let mut names = Vec::new();
+                    if plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)) {
+                        pat.bindings(&mut names);
+                    }
+                    names.iter().any(|n| visit::writes_through(body, n, &changes))
+                };
+                // a `&mut` reference used again after the loop is reborrowed, not moved into it
+                let reborrow = iter.ident().is_some_and(|n| matches!(self.local(n), Some(Some(Type::Ref { mutable: true, .. }))));
                 // an element of a list of interface values is a box: `Box<dyn Shape>`, or a
                 // reference to one when the loop borrows the list
                 let boxed = match pat {
@@ -1740,12 +1767,13 @@ impl<'a> Lowerer<'a> {
                     // when the body changes the elements (`for (x in xs) x.qty += 1`)
                     Some(copy) => {
                         let by_value = copy && (plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)));
+                        let (shared, unique) = if reborrow { ("&*", "&mut *") } else { ("&", "&mut ") };
                         if writes_elements {
-                            self.e.w(&format!("for {} in &mut ", p));
+                            self.e.w(&format!("for {} in {}", p, unique));
                         } else if by_value {
-                            self.e.w(&format!("for &{} in &", p));
+                            self.e.w(&format!("for &{} in {}", p, shared));
                         } else {
-                            self.e.w(&format!("for {} in &", p));
+                            self.e.w(&format!("for {} in {}", p, shared));
                         }
                         self.expr(iter, P_POSTFIX);
                         self.loop_borrow_decision(iter);
@@ -1756,7 +1784,12 @@ impl<'a> Lowerer<'a> {
                         self.expr(iter, P_LOWEST);
                     }
                     None => {
-                        self.e.w(&format!("for {} in ", p));
+                        // an element taken out of a local collection and changed is a `mut` variable
+                        let owned = iter.ident().and_then(|n| self.local(n)).is_some_and(|t| {
+                            matches!(t, Some(Type::Path { segs, .. }) if segs.len() == 1 && matches!(segs[0].name.as_str(), "Vec" | "VecDeque" | "LinkedList"))
+                        });
+                        let changed = owned && matches!(pat, Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } if visit::writes_through(body, name, &changes));
+                        self.e.w(&format!("for {}{} in ", if changed { "mut " } else { "" }, p));
                         let needs_parens = contains_struct_lit(iter);
                         if needs_parens {
                             self.e.w("(");
@@ -2198,7 +2231,8 @@ impl<'a> Lowerer<'a> {
                 Some((x, inner)) => {
                     let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
                     let by_value = crate::sema::is_copy_simple(&inner, &copy);
-                    let mutable = !by_value && visit::writes_through(then, x);
+                    let changing = self.changing_methods(Some(&inner));
+                    let mutable = !by_value && visit::writes_through(then, x, &|m| changing.contains(m));
                     let var = Expr::new(ExprKind::Path { segs: vec![x.to_string()], generics: None, global: false }, p.span);
                     let expr = if by_value { var } else { Expr::new(ExprKind::Unary(if mutable { UnOp::RefMut } else { UnOp::Ref }, Box::new(var)), p.span) };
                     let ty = if by_value { inner } else { Type::Ref { lifetime: None, mutable, inner: Box::new(inner) } };

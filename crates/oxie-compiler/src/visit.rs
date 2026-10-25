@@ -437,8 +437,10 @@ pub fn return_values(b: &FunBody) -> Vec<Expr> {
 }
 
 /// Does `body` change what the loop variable `name` refers to: assign to a place inside it
-/// (`x.qty += 1`, `x[0] = 1`) or call a mutating method on it (`x.tags.push(t)`)?
-pub fn writes_through(body: &Block, name: &str) -> bool {
+/// (`x.qty += 1`, `x[0] = 1`), take `&mut` of one, call a mutating method on it
+/// (`x.tags.push(t)`, or one `changes` names, like an Oxie class's `&mut self` methods), or
+/// change the elements in a loop over it?
+pub fn writes_through(body: &Block, name: &str, changes: &dyn Fn(&str) -> bool) -> bool {
     fn root(e: &Expr) -> Option<&str> {
         match &e.kind {
             ExprKind::Field { recv, safe: false, .. } | ExprKind::Index(recv, _) | ExprKind::Paren(recv) | ExprKind::Unary(UnOp::Deref, recv) => root(recv),
@@ -450,6 +452,14 @@ pub fn writes_through(body: &Block, name: &str) -> bool {
         match &e.kind {
             ExprKind::Assign(_, place, _) if place.ident().is_none() && root(place) == Some(name) => found = true,
             ExprKind::MethodCall { recv, name: m, safe: false, .. } if crate::sema::MUTATING_METHODS.contains(&m.as_str()) && root(recv) == Some(name) => found = true,
+            ExprKind::MethodCall { recv, name: m, safe: false, .. } if recv.ident() == Some(name) && changes(m) => found = true,
+            ExprKind::Unary(UnOp::RefMut, place) if root(place) == Some(name) => found = true,
+            // a loop over it that changes its elements (`for (x in row) *x += 1`)
+            ExprKind::For { pat, iter, body, .. } if root(iter) == Some(name) => {
+                let mut names = Vec::new();
+                pat.bindings(&mut names);
+                found = names.iter().any(|n| writes_through(body, n, &|_| false));
+            }
             _ => {}
         }
         !found
