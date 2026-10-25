@@ -559,6 +559,8 @@ pub fn reused_loop_iters(outer: Vec<String>, body: &Block) -> std::collections::
     struct Walk {
         scopes: Vec<Scope>,
         uses: Vec<(String, u32)>,
+        /// The field read at each use of a variable that is a field's receiver (`t` in `t.name`).
+        fields: std::collections::HashMap<u32, String>,
         found: std::collections::HashMap<u32, Option<u32>>,
     }
     impl Walk {
@@ -624,7 +626,13 @@ pub fn reused_loop_iters(outer: Vec<String>, body: &Block) -> std::collections::
                 For { pat, iter, body, .. } => {
                     self.expr(iter);
                     if let Some(n) = iter.ident() {
-                        self.check(n, iter.span.start, x.span.end);
+                        self.check(n, None, iter.span.start, x.span.end);
+                    }
+                    // a field of a variable (`t.members`): a later use of another field doesn't count
+                    if let Field { recv, name, safe: false } = &iter.kind {
+                        if let Some(n) = recv.ident() {
+                            self.check(n, Some(name), iter.span.start, x.span.end);
+                        }
                     }
                     let mut names = Vec::new();
                     pat.bindings(&mut names);
@@ -682,24 +690,31 @@ pub fn reused_loop_iters(outer: Vec<String>, body: &Block) -> std::collections::
             false
         }
         /// A loop at `[_, end)` iterating over `name`: is the variable used again?
-        fn check(&mut self, name: &str, start: u32, end: u32) {
+        fn check(&mut self, name: &str, field: Option<&str>, start: u32, end: u32) {
             let Some(d) = self.scopes.iter().rposition(|s| s.names.iter().any(|n| n == name)) else { return };
             let in_loop = self.scopes[d + 1..].iter().any(|s| s.is_loop);
             let scope_end = self.scopes[d].end;
-            let later = self.uses.iter().filter(|(n, p)| n == name && *p >= end && *p < scope_end).map(|(_, p)| *p).min();
+            let other_field = |p: &u32| field.is_some_and(|f| self.fields.get(p).is_some_and(|g| g != f));
+            let later = self.uses.iter().filter(|(n, p)| n == name && *p >= end && *p < scope_end && !other_field(p)).map(|(_, p)| *p).min();
             if in_loop || later.is_some() {
                 self.found.insert(start, later);
             }
         }
     }
     let mut uses = Vec::new();
+    let mut fields = std::collections::HashMap::new();
     walk_block(body, &mut |x| {
         if let Some(n) = x.ident() {
             uses.push((n.to_string(), x.span.start));
         }
+        if let ExprKind::Field { recv, name, .. } = &x.kind {
+            if recv.ident().is_some() {
+                fields.insert(recv.span.start, name.clone());
+            }
+        }
         true
     });
-    let mut w = Walk { scopes: vec![Scope { names: outer, end: u32::MAX, is_loop: false }], uses, found: Default::default() };
+    let mut w = Walk { scopes: vec![Scope { names: outer, end: u32::MAX, is_loop: false }], uses, fields, found: Default::default() };
     w.block(body, false, Vec::new());
     w.found
 }

@@ -71,6 +71,8 @@ fn kind_in<'a>(ty: &Type, stage: &Stage<'a>, module: &[String]) -> Option<(Kind,
     match (s.name.as_str(), s.generics.as_deref()) {
         (n, _) if k.class_in(n, module).is_some() => class(n).map(|c| (Kind::Class, Some(c))),
         ("Box", Some([GenericArg::Type(t)])) => Some((Kind::Boxed, t.single_name().and_then(class))),
+        // a `Vec` the source analysis kept: a loop over it may only read elements of a class
+        ("Vec", Some([GenericArg::Type(_)])) => Some((Kind::Vec, None)),
         _ => None,
     }
 }
@@ -90,6 +92,16 @@ fn chain_text(e: &Expr) -> String {
     match &e.kind {
         ExprKind::Field { recv, name, .. } => format!("{}.{}", chain_text(recv), name),
         _ => e.ident().unwrap_or("this").to_string(),
+    }
+}
+
+/// The element type of a collection a `for` loop can borrow (`Vec<T>`, `HashSet<T>`, ...).
+fn loop_elem(t: &Type) -> Option<&Type> {
+    let Type::Path { segs, .. } = t else { return None };
+    let [s] = segs.as_slice() else { return None };
+    match (s.name.as_str(), s.generics.as_deref()) {
+        ("Vec" | "VecDeque" | "LinkedList" | "HashSet" | "BTreeSet" | "BinaryHeap", Some([GenericArg::Type(t)])) => Some(t),
+        _ => None,
     }
 }
 
@@ -383,6 +395,10 @@ struct Cand<'a> {
     index: usize,
     kind: Kind,
     name: &'a str,
+    /// Its type (for a loop variable, the element type).
+    ty: Type,
+    /// The module of the function.
+    module: Vec<String>,
     body: Block,
     /// The class of the value a class or `Box` parameter lends, when it is an Oxie class.
     class: Option<&'a ClassInfo>,
@@ -471,7 +487,7 @@ impl<'a> Analysis<'a> {
                 if drops.is_none() {
                     alive.insert((f.name.clone(), i));
                 }
-                cands.push(Cand { file: *file, fun: f, index: i, kind, name: name.as_str(), body: body.clone(), class, drops });
+                cands.push(Cand { file: *file, fun: f, index: i, kind, name: name.as_str(), ty: p.ty.clone(), module: module.clone(), body: body.clone(), class, drops });
             }
         }
         let mut a = Analysis { decls, cands, alive, stage };
@@ -569,6 +585,14 @@ impl<'a> Analysis<'a> {
                 ExprKind::Index(a, _) => {
                     ok.extend(read_at(a, whole_compares));
                 }
+                // a loop over the `Vec` (or a collection field of the value) that only reads the
+                // elements: it goes over the borrowed collection
+                ExprKind::For { pat, iter, body, .. } => {
+                    let (at, coll) = if is_p(iter) { (iter.span.start, Some(c.ty.clone())) } else { (chain_root(iter, name).unwrap_or(u32::MAX), self.chain_type(c, iter)) };
+                    if (c.kind == Kind::Vec || !is_p(iter)) && coll.as_ref().and_then(loop_elem).is_some_and(|t| self.elems_only_read(c, t, pat, body)) {
+                        ok.insert(at);
+                    }
+                }
                 ExprKind::Call { callee, args } => {
                     if let Some(f) = callee.ident() {
                         for (pos, a) in args.iter().enumerate() {
@@ -599,6 +623,26 @@ impl<'a> Analysis<'a> {
             true
         });
         uses.into_iter().filter(|u| !ok.contains(u)).chain(captured).min()
+    }
+
+    /// Does the body of a loop over a collection of `elem`s only read the element `pat` binds,
+    /// so the loop can go over the borrowed collection? `Copy` elements are bound by value.
+    fn elems_only_read(&self, c: &Cand, elem: &Type, pat: &Pat, body: &Block) -> bool {
+        let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
+        let copy = match &self.stage {
+            Stage::Types { copy, .. } => is_copy_simple(elem, copy),
+            Stage::Text => is_copy_simple(elem, &HashSet::new()),
+        };
+        if matches!(pat, Pat::Wild) || copy && (plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain))) {
+            return true;
+        }
+        let Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } = pat else { return false };
+        let Some((kind, class)) = kind_in(elem, &self.stage, &c.module) else { return false };
+        if rebinds(body, name) {
+            return false;
+        }
+        let elem = Cand { file: c.file, fun: c.fun, index: c.index, kind, name, ty: elem.clone(), module: c.module.clone(), body: body.clone(), class, drops: None };
+        self.first_owned_use(&elem).is_none()
     }
 
     /// Does calling `m` on a class or `Box` parameter only read it: a method of its class that
@@ -711,6 +755,7 @@ fn kept_use(c: &Cand, at: u32) -> (Span, String) {
         what = match &e.kind {
             ExprKind::Lambda { is_move: true, .. } | ExprKind::Async { .. } if e.span.start == at => Some(format!("a `move` lambda captures `{}`", name)),
             ExprKind::Return(Some(x)) if is_at(x) => Some(format!("it returns `{}`", name)),
+            ExprKind::For { iter, .. } if is_at(iter) => Some(format!("a loop takes the elements out of `{}`", name)),
             ExprKind::Call { callee, args } if args.iter().any(|a| is_at(&a.value)) => match callee.ident() {
                 Some(f) => Some(format!("it passes `{}` to `{}`, which takes it by value", name, f)),
                 None => Some(format!("it passes `{}` to a function that takes it by value", name)),

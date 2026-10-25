@@ -580,29 +580,40 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Should `for (x in iter)` borrow `iter`? Yes for an owned collection in a local variable that
-    /// is used after the loop, and for a collection field (moving it out of `&self` is an error).
+    /// is used after the loop, for a collection field (moving it out of `&self` is an error), and
+    /// for a collection field of a local that is a reference or is used after the loop.
     /// `Some(true)` when the elements are `Copy`, so the loop can still bind them by value.
     fn loop_borrow(&self, iter: &Expr) -> Option<bool> {
+        let of_self = || self.self_by_value || self.class.as_ref().is_none_or(|c| c.is_static);
         let ty = match &iter.kind {
             ExprKind::Path { .. } => {
                 let n = iter.ident()?;
                 match self.local(n) {
                     Some(t) if self.reused_iters.contains_key(&iter.span.start) => t.clone()?,
                     Some(_) => return None,
+                    None if of_self() => return None,
                     None => {
                         self.implicit_field(n)?;
                         self.class.as_ref()?.fields.get(n)?.clone()
                     }
                 }
             }
-            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => self.class.as_ref()?.fields.get(name)?.clone(),
+            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => {
+                if of_self() {
+                    return None;
+                }
+                self.class.as_ref()?.fields.get(name)?.clone()
+            }
+            ExprKind::Field { recv, name, safe: false } => {
+                let root = field_root(iter)?;
+                let by_ref = matches!(self.local(root)?, Some(Type::Ref { .. }));
+                if !by_ref && !self.reused_iters.contains_key(&iter.span.start) || self.shared_field(recv, name).is_some() {
+                    return None;
+                }
+                self.infer_type(iter)?
+            }
             _ => return None,
         };
-        if matches!(iter.kind, ExprKind::Field { .. }) || self.local(iter.ident()?).is_none() {
-            if self.self_by_value || self.class.as_ref()?.is_static {
-                return None;
-            }
-        }
         let Type::Path { segs, .. } = &ty else { return None };
         let [seg] = segs.as_slice() else { return None };
         match seg.name.as_str() {
@@ -610,23 +621,56 @@ impl<'a> Lowerer<'a> {
             "HashMap" | "BTreeMap" => return Some(false),
             _ => return None,
         }
-        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
         Some(match seg.generics.as_deref() {
-            Some([GenericArg::Type(t)]) => crate::sema::is_copy_simple(t, &copy),
+            Some([GenericArg::Type(t)]) => self.copy_elem(t),
             _ => false,
         })
+    }
+
+    /// Is a collection element of type `t` bound by value in a loop that borrows the collection?
+    fn copy_elem(&self, t: &Type) -> bool {
+        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+        crate::sema::is_copy_simple(t, &copy)
+    }
+
+    /// For `for (x in xs)` over a `Vec` parameter that Oxie lends as `&[T]`: the element type,
+    /// and whether it is `Copy` (bound by value, as before the parameter was lent).
+    fn lent_elems(&self, iter: &Expr) -> Option<(Type, bool)> {
+        let n = iter.ident()?;
+        if !self.lent.iter().any(|l| l == n) {
+            return None;
+        }
+        let Some(Type::Ref { inner, .. }) = self.local(n)? else { return None };
+        let t = match &**inner {
+            Type::Slice(t) => (**t).clone(),
+            // an element of such a parameter, in a loop over it
+            Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Vec" => match segs[0].generics.as_deref() {
+                Some([GenericArg::Type(t)]) => t.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let copy = self.copy_elem(&t);
+        Some((t, copy))
     }
 
     /// Why `for (x in iter)` borrows `iter` (just written): it is used after the loop, a loop
     /// around this one uses it again, or it is a field of `this`.
     fn loop_borrow_decision(&mut self, iter: &Expr) {
-        let name = match &iter.kind {
-            ExprKind::Field { name, .. } => name.clone(),
+        let root = match &iter.kind {
+            ExprKind::Field { recv, .. } if !matches!(recv.kind, ExprKind::SelfValue) => field_root(iter),
+            _ => None,
+        };
+        let name = match (&iter.kind, root) {
+            (ExprKind::Field { .. }, Some(_)) => field_text(iter),
+            (ExprKind::Field { name, .. }, None) => name.clone(),
             _ => iter.ident().unwrap_or_default().to_string(),
         };
+        let used = root.map_or(name.as_str(), |r| r).to_string();
         let (why, cause) = match self.reused_iters.get(&iter.span.start) {
-            Some(Some(at)) if self.local(&name).is_some() => (format!("`{}` is used after the loop", name), Some(Span::new(*at as usize, *at as usize + name.len()))),
-            Some(None) if self.local(&name).is_some() => (format!("the loop around this one uses `{}` again", name), None),
+            _ if root.is_some_and(|r| matches!(self.local(r), Some(Some(Type::Ref { .. })))) => (format!("`{}` is a reference", used), None),
+            Some(Some(at)) if self.local(&used).is_some() => (format!("`{}` is used after the loop", used), Some(Span::new(*at as usize, *at as usize + used.len()))),
+            Some(None) if self.local(&used).is_some() => (format!("the loop around this one uses `{}` again", used), None),
             _ => (format!("`{}` belongs to `this`", name), None),
         };
         self.e.decide(iter.span, format!("&{}", name), why, cause);
@@ -1688,11 +1732,13 @@ impl<'a> Lowerer<'a> {
                     }
                     _ => None,
                 };
+                let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
+                let lent = if borrows.is_none() { self.lent_elems(iter) } else { None };
+                let lent_copy = lent.as_ref().is_some_and(|(_, copy)| *copy) && (plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)));
                 match borrows {
                     // a collection used again after the loop is borrowed, not consumed; mutably
                     // when the body changes the elements (`for (x in xs) x.qty += 1`)
                     Some(copy) => {
-                        let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
                         let by_value = copy && (plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)));
                         if writes_elements {
                             self.e.w(&format!("for {} in &mut ", p));
@@ -1703,6 +1749,11 @@ impl<'a> Lowerer<'a> {
                         }
                         self.expr(iter, P_POSTFIX);
                         self.loop_borrow_decision(iter);
+                    }
+                    // a `Vec` parameter that Oxie lends still gives its `Copy` elements by value
+                    None if lent_copy => {
+                        self.e.w(&format!("for &{} in ", p));
+                        self.expr(iter, P_LOWEST);
                     }
                     None => {
                         self.e.w(&format!("for {} in ", p));
@@ -1723,6 +1774,7 @@ impl<'a> Lowerer<'a> {
                     (Pat::Ident { by_ref: false, sub: None, .. }, Some(copy)) => {
                         self.elem_type(iter).map(|t| if copy && !writes_elements { t } else { Type::Ref { lifetime: None, mutable: writes_elements, inner: Box::new(t) } })
                     }
+                    (Pat::Ident { by_ref: false, sub: None, .. }, None) if lent.is_some() => lent.clone().map(|(t, copy)| if lent_copy && copy { t } else { Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) } }),
                     (Pat::Ident { by_ref: false, sub: None, .. }, None) if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
                     _ => None,
                 };
@@ -1730,9 +1782,18 @@ impl<'a> Lowerer<'a> {
                 if let Some((name, t)) = boxed {
                     self.bind_name(&name, Some(t));
                 }
+                // the elements of a lent parameter are lent too (`for (row in grid) for (x in row)`)
+                let lent_elem = match pat {
+                    Pat::Ident { name, by_ref: false, sub: None, .. } if lent.is_some() && !lent_copy => Some(name.clone()),
+                    _ => None,
+                };
+                self.lent.extend(lent_elem.clone());
                 self.loops.push(LoopCtx { dowhile_label: None });
                 self.block_stmt(body);
                 self.loops.pop();
+                if lent_elem.is_some() {
+                    self.lent.pop();
+                }
                 self.pop_scope();
             }
             Lambda { .. } => self.lambda(e, None, None),
@@ -4366,6 +4427,22 @@ fn type_mentions(t: &Type, names: &[String]) -> bool {
     }
     let text = crate::symbols::type_text(t);
     text.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| names.iter().any(|n| n == w))
+}
+
+/// The variable a field chain starts from: `t` for `t.team.members`.
+fn field_root(e: &Expr) -> Option<&str> {
+    match &e.kind {
+        ExprKind::Field { recv, safe: false, .. } => field_root(recv),
+        _ => e.ident(),
+    }
+}
+
+/// `t.team.members`, for a field chain.
+fn field_text(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Field { recv, name, .. } => format!("{}.{}", field_text(recv), name),
+        _ => e.ident().unwrap_or("this").to_string(),
+    }
 }
 
 fn strip_paren(e: &Expr) -> &Expr {

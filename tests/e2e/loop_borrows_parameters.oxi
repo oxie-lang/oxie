@@ -1,0 +1,72 @@
+// A loop that only reads a parameter's elements borrows it, so callers keep their value.
+data class Todo(title: String, done: Boolean)
+class TodoList(name: String, items: Vec<Todo>) {
+    fun count(): usize = items.len()
+}
+class Team(name: String, members: Vec<String>)
+
+fun show(xs: Vec<String>) { for (x in xs) println(x) }
+fun show_team(t: &Team) { for (m in t.members) println(m) }
+fun print_list(list: TodoList) {
+    for (t in list.items) println("${list.name}: ${t.title} ${t.done}")
+}
+fun titles(xs: Vec<Todo>): usize {
+    var n = 0
+    for (t in xs) n += t.title.len()
+    return n
+}
+// `Copy` elements of a lent `Vec` are still values
+fun total(xs: Vec<i32>): i32 {
+    var s = 0
+    for (x in xs) { val y: i32 = x; s += y }
+    return s
+}
+fun pairs(xs: Vec<(i32, i32)>): i32 {
+    var s = 0
+    for ((a, b) in xs) s += a * b
+    return s
+}
+fun grid_sum(g: Vec<Vec<i32>>): i32 {
+    var s = 0
+    for (row in g) for (x in row) { val v: i32 = x; s += v }
+    return s
+}
+fun has(xs: Vec<String>, who: String): Boolean {
+    for (x in xs) if (x == who) return true
+    return false
+}
+// takes the elements: stays owned
+fun keep(xs: Vec<String>): Vec<String> {
+    var out: Vec<String> = vec[]
+    for (x in xs) out.push(x)
+    return out
+}
+
+fun main() {
+    val xs = vec["a".to_string(), "b".to_string()]
+    show(xs)
+    println(xs.len())
+    val t = Team("c", xs.clone())
+    show_team(t)
+    // a field of a local used after the loop is borrowed too
+    for (m in t.members) print("$m ")
+    println(t.members.len())
+    // one whose other fields are used later is moved, as in Rust
+    for (m in t.members) print("$m ")
+    println(t.name)
+    val l = TodoList("home", vec[Todo("dishes", true), Todo("laundry", false)])
+    print_list(l)
+    println(l.count())
+    println(titles(l.items))
+    val ns = vec[1, 2, 3]
+    println(total(ns))
+    println(ns.len())
+    println(pairs(vec[(1, 2), (3, 4)]))
+    val g = vec[vec[1, 2], vec[3]]
+    println(grid_sum(g))
+    println(g.len())
+    val who = "b".to_string()
+    println(has(xs, who))
+    println(who)
+    println(keep(xs).len())
+}
