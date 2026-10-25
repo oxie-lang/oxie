@@ -33,8 +33,10 @@ Contents: [Lexical structure](#lexical-structure) · [Declarations](#declaration
 
 * **Identifiers** are Rust identifiers. Rust keywords that Oxie does not reserve (`type`,
   `match`, `loop`, ...) can be field and method names; `r#name` works as in Rust.
-* **Numbers**: Rust literals (`1_000`, `0xff`, `1e-3`, `8.`, `5u8`, `2.0f32`) plus Kotlin's `10L` (`i64`).
-* **Characters**: `'a'`, `'\n'`, `'\u{1F600}'`, byte `b'a'`.
+* **Numbers**: Rust literals (`1_000`, `0xff`, `1e-3`, `8.`, `5u8`, `2.0f32`) plus Kotlin's `10L`
+  (`i64`) and `1.5f` (`f32`). Kotlin's type names work in paths: `Int.MAX`, `Long.MAX_VALUE`
+  (`i64::MAX`), `Double.POSITIVE_INFINITY`.
+* **Characters**: `'a'`, `'\n'`, `'\u{1F600}'`, byte `b'a'`. Kotlin's `\b` escape is accepted too.
 * **Strings**: see [Strings](#strings). Raw strings `r"..."`, `r#"..."#` and byte strings
   `b"..."` are Rust's.
 
@@ -46,11 +48,12 @@ Contents: [Lexical structure](#lexical-structure) · [Declarations](#declaration
 | `var x = 1` | `let mut x = 1;` |
 | `val x: T = v` | `let x: T = v;` |
 | `val (a, b) = pair` | `let (a, b) = pair;` |
+| `val (a: i32, b: String) = pair` | `let (a, b): (i32, String) = pair;` |
 | `var (a, b) = pair` | `let (mut a, mut b) = pair;` |
 | `val (x, y) = point` (a data class) | `let Point { x, y } = point;` (fields in constructor order) |
 | `let`/`let mut` (Rust style) | unchanged |
 | `val Some(x) = opt else { return }` | `let Some(x) = opt else { return };` |
-| top-level `const NAME = 1` / `val NAME = 1` | `const NAME: i32 = 1;` (type inferred from literals) |
+| top-level `const NAME = 1` / `val NAME = 1` | `const NAME: i32 = 1;` (type inferred from literals; the value must be computable while compiling, so no `vec[...]` or templates: use a function or `static NAME: LazyLock<T>`) |
 | `static NAME: T = v` / `static var NAME: T = v` | `static` / `static mut` |
 | `typealias Name = T` / `type Name = T` | `type Name = T;` |
 
@@ -88,10 +91,13 @@ fun short(x: i32) = x * 2
   | `a.cmp(b)`, `a.max(b)` | `Ord` |
   | `a + b`, `a * b`, ... with both `T` | `Add<Output = T> + Copy`, ... |
   | `a += b` | `AddAssign`, ... |
-  | `x.clone()` | `Clone` |
-  | a key of a `HashSet`/`HashMap` variable | `Eq + Hash` |
+  | `x.clone()`, `xs.clone()`, `this.copy(...)` | `Clone` |
+  | `"${xs:?}"` on a `Vec<T>` | `Debug` |
+  | `xs.contains(x)` / `xs.iter().max()`, `xs.sort()` on a `Vec<T>` | `PartialEq` / `Ord` |
+  | a key of a `HashSet`/`HashMap` variable or field | `Eq + Hash` |
 
-  Bounds already written (or implied, like `Ord` for `PartialOrd`) are not repeated.
+  Bounds already written (or implied, like `Ord` for `PartialOrd`) are not repeated. In a
+  generic class, the bounds of `toString`, operators and overrides go on their `impl` block.
   Interface methods keep the interface's signature.
 * **Automatic borrowing**: an argument for a `&T` or `&mut T` parameter of a function or method
   declared in Oxie is borrowed: `total(v)` → `total(&v)`, `add_one(v)` → `add_one(&mut v)`.
@@ -312,6 +318,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
   [Context parameters](#context-parameters).
 * `object Name { ... }` is a namespace (a Rust module) of constants and functions:
   `Name.function()`.
+* Constants in a class body, its `companion object` or an `impl` block are used without
+  `Self.` inside the class (`w * SIZE` → `w * Self::SIZE`).
 * Classes, enums and interfaces declared inside a class body are placed next to the class;
   refer to them as `Inner` or `Outer.Inner`.
 
@@ -377,7 +385,10 @@ enum Shape : Display {
 * `Shape.Circle(1.0)` or `Circle(1.0)` (when the name is unique, or declared in the same file)
   constructs; named-field variants accept positional or named arguments.
 * In patterns, `Circle(r)` matches named-field variants positionally (→ `Circle { radius: r }`),
-  and a bare `Circle` matches any `Circle`.
+  and a bare `Circle` matches any `Circle`. A bare case name is a case of the matched value's
+  enum when Oxie knows its type, even if another enum or a class has that name. A capitalized
+  name that matches nothing is an error: Oxie has no type tests (`is Int`), so match on an enum.
+* `enum class Color { ... }` (Kotlin) is accepted as `enum`.
 * Enums derive `Debug`, `Clone`, `PartialEq` (and `Copy`, `Eq`, `Hash` when possible).
 * `error enum` — see [Errors](#errors).
 
@@ -394,7 +405,8 @@ interface Named : Display {
 }
 ```
 
-* `interface` (or `trait`) → `trait`. Methods take `&self` unless declared otherwise (or their
+* `interface` (or `trait`) → `trait`; an interface without members may omit `{}`. Interfaces
+  have no properties: declare `fun name(): String` and implement it in each class. Methods take `&self` unless declared otherwise (or their
   default body or an implementation needs `&mut self`). Its supertypes may include a lifetime
   bound: `interface Ext : IntoElement + 'static`.
 * A class lists interfaces after `:` and implements methods with `override fun`; the
@@ -439,7 +451,8 @@ the right-hand side (`impl Mul<f64> for Vec2` for `operator fun times(k: f64)`).
 
 * Variable declarations (see [Declarations](#declarations)).
 * Expressions, including assignments `a = b`, `a += b` (all compound operators).
-* Local `fun`, `class`, `enum`, ... declarations.
+* Local `fun`, `class`, `data class`, `enum`, ... declarations (local classes get constructors,
+  receivers and derives like top-level ones).
 * `return`, `break ['label] [value]`, `continue ['label]`, `throw e`.
 * Attributes on a statement: `@cfg(debug_assertions) println("debug")`,
   `#[allow(unused_variables)] val x = 1`.
@@ -456,6 +469,7 @@ the right-hand side (`impl Mul<f64> for Vec2` for `operator fun times(k: f64)`).
 | `x is Pattern` / `x !is Pattern` | `matches!(x, Pattern)` / `!matches!(..)` |
 | `a to b` | `(a, b)` |
 | `a until b`, `a downTo b`, `r step n` | `a..b`, `(b..=a).rev()`, `r.step_by(n)` |
+| `x in a downTo b` | `b <= x && x <= a` |
 | `a..b`, `a..=b`, `a..<b` | `a..b`, `a..=b`, `a..b` |
 | `x as T` | `x as T` |
 | `x as T < y`, `x as T << n` | `(x as T) < y`, `(x as T) << n` |
@@ -522,7 +536,10 @@ the declared type of a variable, field, parameter or return value:
   a template is spliced directly into the format string (no extra allocation).
 * A string literal passed to these with extra arguments is a Rust format string:
   `println("{} items", n)`.
-* `println(a, b)` prints both separated by a space; `println(x)` prints any `Display` value.
+* `println(a, b)` prints both separated by a space (also `println("total:", n)`, a literal without
+  `{}`); `println(x)` prints any `Display` value.
+* A `var` holding a text literal that is later appended to (`var acc = ""`, `acc += x`) starts
+  as a `String`.
 
 ## Null safety
 
@@ -618,9 +635,9 @@ match x { Some(v) => v, None => 0 } // Rust match syntax works too
 for (item in items) { }             // also `for item in items { }`
 for ((i, x) in xs.iter().enumerate()) { }
 while (cond) { }
-do { } while (cond)
+do { } while (cond)                 // also `do x += 1 while (cond)`
 loop { }
-'outer: for (...) { break 'outer }
+'outer: for (...) { break 'outer } // or Kotlin's `outer@ for`, `break@outer`
 val v = 'found: { if (c) break 'found 1; 0 }   // labeled block with a value
 val n = const { SIZE * 2 }                      // evaluated at compile time
 ```
@@ -661,7 +678,7 @@ x => x * 2
 move { ... }                    // capture by value
 { [counter, tx] -> ... }        // capture list: moves in clones of `counter` and `tx`
 { [n = items.len()] x -> ... }  // a computed capture, then parameters
-f(x) { trailing lambda }        // last argument outside the parentheses
+f(x) { trailing lambda }        // the last parameter, outside the parentheses
 ```
 
 * A brace lambda without `->` has no parameters, or `it` if it uses `it`. Closures with an

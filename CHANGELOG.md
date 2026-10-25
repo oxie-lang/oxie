@@ -82,6 +82,64 @@
   satisfied".
 * Extension functions on an interface (`fun Shape.describe()`) apply to every implementing type;
   before they generated an invalid `impl Ext for Shape`.
+* Type names in all capitals (`class DB`, `enum HTTP`, `class V8`) are types: `DB.open()`,
+  `HTTP.GET`, `V2 { x: 1 }` and boxing `V8()` into an interface work. Before, they were taken for
+  constants. `oxie from-rust` keeps such code as Oxie instead of `rust { }`.
+* A bare case name in a pattern (`Circle(r)`, `Number(n)`) is a case of the matched value's enum,
+  even when a class or another enum has the same name. `is Int` and other names that match
+  nothing are reported instead of silently matching everything.
+* Constants of a class, enum or companion object can be used unqualified inside it
+  (`w * SIZE`). A `var` in an `object`, a companion object or at the top level gets a clear error.
+* `@from` works on cases wrapping any type, not only errors. `main() throws` shows each cause
+  once. Error cases without a message show their fields (`too many (count: 5, max: 3)`) instead
+  of warning that the fields are never read.
+* Generic classes and enums get the bounds their `toString`, operators and overrides need
+  (`impl<T> Display for P<T> where T: Display`), and the bounds that cloning, printing,
+  searching or sorting a `Vec<T>` field and using a `HashMap<K, V>` field need. An override
+  without a result type in `class Mem : Repo<String>` returns `Vec<String>`.
+* A method returning part of a reference field (`class Parser(input: &str)`,
+  `fun next_word(): &str = &input[s..pos]`) returns it with the field's lifetime, so callers can
+  keep the result while using the object.
+* `when (state)` on a field inside a method borrows the field when an arm takes a value out of
+  it (`Done(r) -> Done(r.clone())`), as `for` does.
+* A `shared class` implementing an interface no longer makes its methods `&mut self`: the handle
+  changes its data behind `&self`, so `fun fill(s: &Store) = s.put(..)` works.
+* An enum's `operator fun` is emitted once (no more "method `plus` is never used" warning).
+* Kotlin habits get Oxie errors instead of confusing rustc ones: extending a class
+  (`: Base(name)`), properties in interfaces, `override` without an interface, overrides using a
+  class's contexts, and top-level or object `val`s that allocate (`vec[...]`, `Point(0, 0)`).
+  `open class` warns. `enum class` and `interface Marker` without braces are accepted.
+* Char literals and nested strings containing `"`, `{` or `}` work inside `${...}`
+  (`"${s.trim_matches('{')}"`), and `${x?:0}` is an Elvis expression, not a format spec.
+  `oxie fmt` handles them too; before, it stopped formatting at such a template.
+* A trailing lambda goes to the last parameter, past parameters with defaults:
+  `with_opts(1) { it * 2 }`. Before: "missing argument".
+* An `if` without `else` in a `when` arm no longer takes the next `else ->` arm as its else.
+* A `///` doc comment before a local `val`/`var` is a plain comment. Before, it turned the local
+  into a `const`, or failed.
+* Classes, data classes and enums declared inside function bodies get constructors, inferred
+  receivers and automatic derives.
+* `String()`, `String.with_capacity(n)` and `format(..)` are known to be `String`s, so `s += a`
+  and `when (format(..)) { "ab" -> }` work; `var acc = ""` that is later appended to starts as a
+  `String`.
+* Text arms in `when` work on `&String` loop variables (`for (s in &list)`) and tuple fields
+  (`t.0`), and `Some("hi") ->` arms on a `String?` match with `as_deref()`.
+* Lambdas passed where an alias of a function type is expected
+  (`typealias Handler = (i32) -> String`) are boxed. Error notes say `{lambda}` instead of a
+  generated file's path.
+* `x in a downTo b` is checked as `b <= x && x <= a`.
+* Files with Windows line endings: multi-line strings and `\` line continuations compile, and
+  `oxie fmt` keeps CRLF line endings.
+* `var (x, y) = ...` makes only the parts that change mutable.
+* Kotlin's `Int.MAX`, `Long.MAX_VALUE`, `Double.POSITIVE_INFINITY` work, as do `1.5f`, `\b`,
+  labels written `outer@ for` / `break@outer`, `do x += 1 while (c)` without braces, and typed
+  destructuring `val (a: Int, b: String) = ...`. `n++` and `return@label` get Oxie errors that
+  say what to write.
+* `println("total:", n)` prints `total: 3` when the text has no `{}`, and `name + n` with a
+  `String` and a number or `char` builds a `String`.
+* A non-exhaustive `when` says which cases it doesn't handle and suggests `else ->`; `xs.size`
+  and `s.length` point at the field and offer `len()`; Kotlin's `joinToString` maps to
+  `join_to_string`.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.
