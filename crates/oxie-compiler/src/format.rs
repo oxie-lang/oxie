@@ -3,6 +3,7 @@
 //! Only whitespace is changed: indentation follows bracket depth (4 spaces), continuation
 //! lines (`.method()`, `?:`, `&&`, ...) get one extra level, spacing around commas, colons and
 //! unambiguous operators is normalized, trailing whitespace and repeated blank lines are removed.
+//! The spaces before a trailing `//` comment are kept, so aligned comments stay aligned.
 //! Strings and comments are never touched. If the result does not lex to the same tokens as the
 //! input, the input is returned unchanged.
 
@@ -306,16 +307,22 @@ fn space_code(code: &str, prev_tail: Option<&str>, next_head: Option<&str>, flag
         // remove spaces that shouldn't be there
         // `class A : Base` keeps its space; `x : Int` becomes `x: Int`
         let colon_tight = t == ":" && !matches!(prev.as_deref(), Some(")") | Some(">") | Some("?"));
-        let no_space_before = matches!(t, "," | ";" | ")" | "]" | "?." | "!!" | "::" | "?") || colon_tight;
-        let after_opener = matches!(prev.as_deref(), Some("(") | Some("[") | Some("::") | Some("!") | Some("@") | Some("#") | Some("?.") | Some("."));
+        // `x?` and `T?` are tight, `T: ?Sized` is not
+        let postfix_q = t == "?" && prev.as_deref().and_then(|p| p.chars().last()).is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | ')' | ']' | '}' | '>' | '"' | '\''));
+        let no_space_before = matches!(t, "," | ";" | ")" | "]" | "?." | "!!" | "::") || postfix_q || colon_tight;
+        // `name!` of a macro and the `@` of a binding (`x @ 1..=9`) keep the space after them as written
+        let prev_idx = toks[..idx].iter().rposition(|x| !is_space(x));
+        let spaced_as_written = prev_idx.is_some_and(|p| match toks[p].as_str() {
+            "!" => p > 0 && is_word(&toks[p - 1]),
+            "@" => toks[..p].iter().rev().find(|x| !is_space(x)).is_some_and(|x| is_word(x)),
+            _ => false,
+        });
+        let after_opener = matches!(prev.as_deref(), Some("(") | Some("[") | Some("::") | Some("!") | Some("@") | Some("#") | Some("?.") | Some(".")) && !spaced_as_written;
         if had_space && (no_space_before || after_opener) && !out.is_empty() {
-            if t == "?" {
-                // `a ?: b` written as `a ? : b` is not a thing; keep as is
-            }
             out.pop();
         }
         let need_space_before = SPACED_OPS.contains(&t)
-            || (t == "{" && prev.as_deref().is_some_and(|p| !matches!(p, "(" | "[" | "{" | "$" | "!" | "#" | "::")))
+            || (t == "{" && prev.as_deref().is_some_and(|p| !matches!(p, "(" | "[" | "{" | "$" | "!" | "#" | "::" | "&")))
             || (t == "(" && matches!(prev.as_deref(), Some("if") | Some("for") | Some("while") | Some("when") | Some("catch")));
         let has_space_now = out.last().map_or(prev_tail.is_none_or(|p| p.is_empty() || p.ends_with(' ')), |x| is_space(x));
         if need_space_before && !has_space_now && (!out.is_empty() || prev_tail.is_some()) {
@@ -325,8 +332,8 @@ fn space_code(code: &str, prev_tail: Option<&str>, next_head: Option<&str>, flag
         // space after
         let next = toks[idx + 1..].iter().find(|x| !is_space(x)).map(|s| s.as_str()).or(next_head);
         let next_is_space = toks.get(idx + 1).is_some_and(|x| is_space(x));
-        let want_after = (matches!(t, "," | ";") && !matches!(next, Some(")") | Some("]") | Some("}") | None))
-            || (t == ":" && next.is_some() && !matches!(next, Some(":")))
+        let want_after = (matches!(t, "," | ";") && !matches!(next, Some(")") | Some("]") | Some("}") | None) && !repetition_op(&toks[idx + 1..]))
+            || (t == ":" && next.is_some() && !matches!(next, Some(":")) && !macro_fragment(&toks[..idx]))
             || SPACED_OPS.contains(&t)
             || (t == "{" && !matches!(next, Some("}") | None) && !flags.import);
         let want_before_close = t != "{" && next == Some("}") && !matches!(t, "{" | "$") && !flags.import;
@@ -343,6 +350,21 @@ fn space_code(code: &str, prev_tail: Option<&str>, next_head: Option<&str>, flag
         s.push_str(&t);
     }
     s
+}
+
+fn is_word(t: &str) -> bool {
+    t.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Whether the tokens before a `:` end with a macro metavariable, as in `$x:expr`.
+fn macro_fragment(before: &[String]) -> bool {
+    matches!(before, [.., d, w] if d == "$" && is_word(w))
+}
+
+/// Whether the tokens after a separator are a macro repetition operator, as in `$(..),*`.
+fn repetition_op(after: &[String]) -> bool {
+    matches!(after.first().map(|s| s.as_str()), Some("*" | "+" | "?"))
+        && after.get(1).is_none_or(|s| is_space(s) || matches!(s.as_str(), ")" | "]" | "}" | "=>" | ";"))
 }
 
 pub fn format_source(src: &str) -> String {
@@ -396,6 +418,9 @@ fn ends_with_continuation(code: &str) -> bool {
         && !t.ends_with("<=")
         && !t.ends_with(">=")
         && !t.ends_with("..")
+        // a glob import, `import a::*` or `import a.*`
+        && !t.ends_with("::*")
+        && !t.ends_with(".*")
 }
 
 fn starts_with_continuation(code: &str) -> bool {
@@ -406,25 +431,26 @@ fn starts_with_continuation(code: &str) -> bool {
 fn format_inner(src: &str) -> String {
     let lines = split(src);
     let mut out: Vec<String> = Vec::new();
-    // line index that opened each currently open bracket
-    let mut open: Vec<usize> = Vec::new();
+    // the indentation level of the line that opened each currently open bracket
+    let mut open: Vec<i32> = Vec::new();
+    // level of the last line at each bracket depth, for `else` lines
+    let mut depth_level: Vec<i32> = Vec::new();
     let mut prev_continues = false;
     let mut prev_open = false;
+    let mut level = 0;
     for line in &lines {
         let text: String = line.segs.iter().map(|(_, s)| s.as_str()).collect();
         if line.raw {
             out.push(text.trim_end_matches('\r').to_string());
             let ct = code_text(line);
             prev_continues = !ct.trim().is_empty() && ends_with_continuation(&ct);
-            // brackets inside the verbatim continuation don't count, but a string ending here may be followed by code
-            let mut in_verbatim = true;
+            // brackets inside the verbatim continuation don't count, but a string ending here may
+            // be followed by code: its brackets belong to the statement's level
             for (k, s) in &line.segs {
                 if *k == Seg::Code {
-                    in_verbatim = false;
-                    track(&mut open, s, out.len());
+                    track(&mut open, s, level);
                 }
             }
-            let _ = in_verbatim;
             continue;
         }
         let trimmed_first = text.trim_start();
@@ -446,9 +472,20 @@ fn format_inner(src: &str) -> String {
             }
         }
         let first_seg_code = line.segs.iter().find(|(_, s)| !s.trim().is_empty()).is_none_or(|(k, _)| *k == Seg::Code);
-        let cont = (first_seg_code && starts_with_continuation(trimmed_first)) || (prev_continues && lead_close == 0);
-        let still_open = &open[..open.len().saturating_sub(lead_close as usize)];
-        let level = distinct(still_open) + if cont { 1 } else { 0 };
+        let starts_else = first_seg_code && trimmed_first.split(|c: char| !c.is_alphanumeric() && c != '_').next() == Some("else");
+        let cont = (first_seg_code && starts_with_continuation(trimmed_first)) || (prev_continues && lead_close == 0 && !starts_else);
+        let depth = open.len().saturating_sub(lead_close);
+        level = if lead_close > 0 {
+            // a closer goes back to the level of the line that opened it
+            open.get(depth).copied().unwrap_or(0)
+        } else if starts_else && depth < depth_level.len() {
+            // `else` lines up with its `if` (or the previous `else if`)
+            depth_level[depth]
+        } else {
+            depth.checked_sub(1).map_or(0, |d| open[d] + 1) + if cont { 1 } else { 0 }
+        };
+        depth_level.resize(depth, 0);
+        depth_level.push(level);
         // drop a blank line right before a closing bracket
         if lead_close > 0 && out.last().is_some_and(|l| l.trim().is_empty()) {
             out.pop();
@@ -467,11 +504,14 @@ fn format_inner(src: &str) -> String {
                     let prev_tail = if body.is_empty() { None } else { Some(body.as_str()) };
                     let next_head = line.segs.get(idx + 1).map(|(_, x)| x.as_str());
                     let mut formatted = space_code(s2, prev_tail, next_head, flags);
-                    if idx + 1 < n && line.segs[idx + 1].1.starts_with("//") && !formatted.ends_with(' ') && !formatted.is_empty() {
-                        formatted.push(' ');
+                    if idx + 1 < n && line.segs[idx + 1].1.starts_with("//") && !formatted.trim().is_empty() {
+                        // keep the spaces before a trailing comment: they often align comments
+                        let gap = &s[s.trim_end().len()..];
+                        let gap = if gap.is_empty() || gap.contains('\t') { " " } else { gap };
+                        formatted = format!("{}{}", formatted.trim_end(), gap);
                     }
                     body.push_str(&formatted);
-                    track(&mut open, s, out.len());
+                    track(&mut open, s, level);
                 }
             }
             if !s.trim().is_empty() {
@@ -504,43 +544,18 @@ fn code_text(line: &Line) -> String {
         .collect()
 }
 
-/// Updates the open-bracket stack with the brackets of `code` (opened on line `line`).
-fn track(open: &mut Vec<usize>, code: &str, line: usize) {
+/// Updates the open-bracket stack with the brackets of `code`, opened on a line indented
+/// `level`: what they enclose is indented one more, so a line opening `({` indents once.
+fn track(open: &mut Vec<i32>, code: &str, level: i32) {
     for c in code.chars() {
         match c {
-            '{' | '(' | '[' => open.push(line),
+            '{' | '(' | '[' => open.push(level),
             '}' | ')' | ']' => {
                 open.pop();
             }
             _ => {}
         }
     }
-}
-
-/// Number of distinct lines among the open brackets: a line opening `({` indents once.
-fn distinct(open: &[usize]) -> i32 {
-    let mut n = 0;
-    let mut last = None;
-    for &l in open {
-        if Some(l) != last {
-            n += 1;
-            last = Some(l);
-        }
-    }
-    n
-}
-
-#[allow(dead_code)]
-fn bracket_delta(code: &str) -> i32 {
-    let mut d = 0;
-    for c in code.chars() {
-        match c {
-            '{' | '(' | '[' => d += 1,
-            '}' | ')' | ']' => d -= 1,
-            _ => {}
-        }
-    }
-    d
 }
 
 #[cfg(test)]
@@ -557,7 +572,7 @@ mod tests {
     #[test]
     fn continuation_and_comments() {
         let src = "fun f() {\n  val v = xs\n  .iter()   // comment\n  .map { it * 2 }\n}\n";
-        let want = "fun f() {\n    val v = xs\n        .iter() // comment\n        .map { it * 2 }\n}\n";
+        let want = "fun f() {\n    val v = xs\n        .iter()   // comment\n        .map { it * 2 }\n}\n";
         assert_eq!(format_source(src), want);
     }
 
@@ -565,6 +580,28 @@ mod tests {
     fn keeps_strings() {
         let src = "val s = \"\"\"\n   keep   this\n\"\"\"\nval t = \"a  {b}  ${ x }\"\n";
         assert_eq!(format_source(src), src);
+    }
+
+    #[test]
+    fn glob_imports_do_not_continue() {
+        let src = "import std::collections::*\n\nenum Op { Add, Sub }\n\nfun main() {\n    import Op::*\n    println(\"x\")\n}\n";
+        assert_eq!(format_source(src), src);
+    }
+
+    #[test]
+    fn else_lines_up_with_if() {
+        let src = "fun f(a: i32): i32 =\n  if (a == 1) 1\nelse if (a == 2) 2\n      else 3\n\nfun g(a: bool): i32 =\nif (a) {\n1\n} else {\n2\n}\n";
+        let want = "fun f(a: i32): i32 =\n    if (a == 1) 1\n    else if (a == 2) 2\n    else 3\n\nfun g(a: bool): i32 =\n    if (a) {\n        1\n    } else {\n        2\n    }\n";
+        assert_eq!(format_source(src), want);
+        assert_eq!(format_source(want), want);
+    }
+
+    #[test]
+    fn keeps_spacing_of_patterns_macros_and_bounds() {
+        let src = "fun k<T: ?Sized>(x: &T) {\n    when (3) {\n        x @ 1..=9 -> println(\"a\")   // aligned\n        n @ &_ -> println(\"b\")       // comments\n    }\n    val r = &{ n: i32 -> n + 1 }\n}\n\nmacro_rules! square {\n    ($($x:expr),*) => { 0 $(+ $x * $x)* }\n}\n";
+        assert_eq!(format_source(src), src);
+        let tight = src.replace("T: ?Sized", "T:?Sized").replace("x @ 1", "x @  1").replace("rules! square", "rules!  square");
+        assert_eq!(format_source(&tight), src);
     }
 
     #[test]
