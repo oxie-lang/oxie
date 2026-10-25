@@ -463,7 +463,9 @@ impl Printer<'_> {
             syn::Expr::Binary(b) => format!("{} {} {}", self.operand(&b.left), tok(&b.op), self.expr(&b.right)),
             syn::Expr::Block(b) => {
                 let label = b.label.as_ref().map(|l| format!("{}: ", l.name)).unwrap_or_default();
-                let run = if self.info.run_shadowed { "'block: " } else { "run " };
+                // a function, method or variable named `run` hides Oxie's `run { }` block
+                let shadowed = self.info.run_shadowed || self.cx.bound.contains("run") || self.cx.class.as_ref().is_some_and(|c| c.methods.contains("run")) || self.cx.type_fns.contains("run");
+                let run = if shadowed { "'block: " } else { "run " };
                 if ctx.throws_tail && label.is_empty() {
                     return format!("{}{}", run, self.block(&b.block, ctx));
                 }
