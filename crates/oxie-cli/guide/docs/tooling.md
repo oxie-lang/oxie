@@ -127,7 +127,7 @@ fixes:
 | no method `size`, `toUpperCase`, ... (E0599) | the Rust name (`len`, `to_uppercase`) |
 | no method `is_not_empty` on text, where rustc suggests `is_empty` (E0599) | `!value.is_empty()`: a name that means the opposite of the one called is never the fix |
 | a list operation on text (E0599) | says it is one of Oxie's list operations, instead of suggesting to implement the runtime's `ListOps` |
-| a list operation on an iterator (E0599) | call it on the list (`xs.map_indexed { }` for `xs.iter().map_indexed { }`), or collect the iterator into a list first (`s.chars().collect::<Vec<_>>().join_to_string("")`) when its items aren't references into a list; never rustc's similar name (`is_sorted` for `sorted`) |
+| a list operation on an iterator (E0599) | call it on the list (`xs.map_indexed { }` for `xs.iter().map_indexed { }`), or collect the iterator into a list first (`s.chars().to_list().join_to_string("")`) when its items aren't references into a list; never rustc's similar name (`is_sorted` for `sorted`) |
 | trait / type not imported (E0599, E0433, E0412) | `import` the suggested path |
 | unused `var` | declare it with `val` |
 | an ignored error, from a call that can fail used as a statement in a function that doesn't throw | add `throws` to the function, or `.unwrap()` |

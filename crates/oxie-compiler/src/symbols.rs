@@ -42,6 +42,10 @@ pub struct Symbol {
 
 pub fn type_text(t: &Type) -> String {
     match t {
+        Type::Path { segs, .. } if t.is_map() => match segs[0].generics.as_deref() {
+            Some([k, v]) => format!("[{}: {}]", generic_arg_text(k), generic_arg_text(v)),
+            _ => "HashMap".into(),
+        },
         Type::Path { global, segs, .. } => {
             let mut s = if *global { "::".to_string() } else { String::new() };
             let parts: Vec<String> = segs

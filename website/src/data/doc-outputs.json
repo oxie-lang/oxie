@@ -12,7 +12,7 @@
   {
     "file": "docs/cheatsheet.md",
     "output": "1 names\n[\"ada\", \"bob\"] [\"ada\", \"bob\"]\n",
-    "source": "fun show(names: &Vec<String>) = println(\"${names.len()} names\")\n\nfun main() {\n    var names = vec[\"ada\".to_string()]\n    show(&names)              // lend\n    names.push(\"bob\".to_string())\n    val copy = names.clone()  // explicit copy\n    val moved = names         // `names` is moved\n    println(\"${copy:?} ${moved:?}\")\n}\n"
+    "source": "fun show(names: [String]) = println(\"${names.len()} names\")\n\nfun main() {\n    var names: [String] = [\"ada\"]\n    show(names)               // lends it: show(&names)\n    names.push(\"bob\".to_string())\n    val copy = names.clone()  // explicit copy\n    val moved = names         // `names` is moved\n    println(\"${copy:?} ${moved:?}\")\n}\n"
   },
   {
     "file": "docs/cheatsheet.md",
@@ -72,7 +72,7 @@
   {
     "file": "docs/guide.md",
     "output": "5\n49\n9\nHello, Ada!\nHi, Bob!\n",
-    "source": "fun add(a: i32, b: i32): i32 {\n    return a + b\n}\n\n// expression body; the return type is inferred when it is obvious\nfun square(x: i32) = x * x\n\n// the last expression of a block is its value, like Rust\nfun max(a: i32, b: i32): i32 {\n    if (a > b) a else b\n}\n\n// default and named arguments\nfun greet(name: &str, greeting: &str = \"Hello\"): String = \"$greeting, $name!\"\n\nfun main() {\n    println(add(2, 3))\n    println(square(7))\n    println(max(4, 9))\n    println(greet(\"Ada\"))\n    println(greet(name = \"Bob\", greeting = \"Hi\"))\n}\n"
+    "source": "fun add(a: i32, b: i32): i32 {\n    return a + b\n}\n\n// expression body; the return type is inferred when it is obvious\nfun square(x: i32) = x * x\n\n// the last expression of a block is its value, like Rust\nfun max(a: i32, b: i32): i32 {\n    if (a > b) a else b\n}\n\n// default and named arguments\nfun greet(name: String, greeting: String = \"Hello\"): String = \"$greeting, $name!\"\n\nfun main() {\n    println(add(2, 3))\n    println(square(7))\n    println(max(4, 9))\n    println(greet(\"Ada\"))\n    println(greet(name = \"Bob\", greeting = \"Hi\"))\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -92,12 +92,12 @@
   {
     "file": "docs/guide.md",
     "output": "[10, 6, 16, 2] 2 17 [1, 3, 5, 8]\nada is 36\na: 3\n5 8\n",
-    "source": "import std::collections::HashMap\n\nfun main() {\n    val nums = listOf(5, 3, 8, 1)              // Vec<i32>; `vec[5, 3, 8, 1]` is the same\n    val doubled = nums.map { it * 2 }          // a new list: [10, 6, 16, 2]\n    val big = nums.count { it > 3 }\n    val sum = nums.iter().fold(0) { acc, x -> acc + x }\n    println(\"${doubled:?} $big $sum ${nums.sorted():?}\")\n\n    val ages = mapOf(\"ada\" to 36, \"bob\" to 25)  // HashMap\n    println(\"ada is ${ages[\"ada\"]}\")\n\n    var counts = HashMap()\n    for (word in \"a b a c a\".split(' ')) {\n        *counts.entry(word).or_insert(0) += 1\n    }\n    println(\"a: ${counts[\"a\"]}\")\n\n    val add = (a: i32, b: i32) => a + b        // TypeScript-style arrow function\n    val twice = { x: i32 -> x * 2 }            // Kotlin-style lambda\n    println(\"${add(2, 3)} ${twice(4)}\")\n}\n"
+    "source": "fun main() {\n    val nums: [i32] = [5, 3, 8, 1]             // a list (Rust's Vec<i32>)\n    val doubled = nums.map { it * 2 }          // a new list: [10, 6, 16, 2]\n    val big = nums.count { it > 3 }\n    val sum = nums.iter().fold(0) { acc, x -> acc + x }\n    println(\"${doubled:?} $big $sum ${nums.sorted():?}\")\n\n    val ages: [String: i32] = [\"ada\": 36, \"bob\": 25]   // a map (Rust's HashMap<String, i32>)\n    println(\"ada is ${ages[\"ada\"]}\")\n\n    var counts = [:]\n    for (word in \"a b a c a\".split(' ')) {\n        *counts.entry(word).or_insert(0) += 1\n    }\n    println(\"a: ${counts[\"a\"]}\")\n\n    val add = (a: i32, b: i32) => a + b        // TypeScript-style arrow function\n    val twice = { x: i32 -> x * 2 }            // Kotlin-style lambda\n    println(\"${add(2, 3)} ${twice(4)}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
     "output": "Ada, Grace\ntotal age 109, oldest Grace\nLinus < Ada < Grace\nLondon: 2\n",
-    "source": "data class User(name: String, age: u32, city: String)\n\nfun main() {\n    val users = vec[User(\"Ada\", 36, \"London\"), User(\"Linus\", 28, \"Helsinki\"), User(\"Grace\", 45, \"London\")]\n    println(users.filter { it.age > 30 }.map { it.name.clone() }.join_to_string(\", \"))\n    println(\"total age ${users.sum_of { it.age }}, oldest ${users.max_by_key { it.age }?.name ?: \"-\"}\")\n    println(users.sorted_by { it.age }.join_with(\" < \") { it.name.as_str() })\n    val by_city = users.group_by { it.city.clone() }\n    println(\"London: ${by_city[\"London\"].len()}\")\n}\n"
+    "source": "data class User(name: String, age: u32, city: String)\n\nfun main() {\n    val users: [User] = [User(\"Ada\", 36, \"London\"), User(\"Linus\", 28, \"Helsinki\"), User(\"Grace\", 45, \"London\")]\n    println(users.filter { it.age > 30 }.map { it.name.clone() }.join_to_string(\", \"))\n    println(\"total age ${users.sum_of { it.age }}, oldest ${users.max_by_key { it.age }?.name ?: \"-\"}\")\n    println(users.sorted_by { it.age }.join_with(\" < \") { it.name.as_str() })\n    val by_city = users.group_by { it.city.clone() }\n    println(\"London: ${by_city[\"London\"].len()}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -107,17 +107,17 @@
   {
     "file": "docs/guide.md",
     "output": "10 [5, 10]\n10\nPoint { x: 3.0, y: 4.0 } 5 true\n",
-    "source": "class Counter(var count: i32 = 0, step: i32 = 1) {\n    var history: Vec<i32> = vec[]\n\n    fun increment() {              // changes fields, so it takes `&mut self` automatically\n        count += step\n        history.push(count)\n    }\n\n    fun current(): i32 = count     // only reads: `&self`\n\n    companion object {\n        fun starting_at(n: i32): Counter = Counter(n)   // static\n    }\n}\n\ndata class Point(x: f64, y: f64) {\n    fun distance_to(other: Point): f64 = ((x - other.x).powi(2) + (y - other.y).powi(2)).sqrt()\n}\n\nfun main() {\n    var c = Counter(step = 5)\n    c.increment()\n    c.increment()\n    println(\"${c.current()} ${c.history:?}\")\n    println(Counter.starting_at(10).current())\n\n    val p = Point(0.0, 0.0)\n    val q = p.copy(x = 3.0, y = 4.0)\n    println(\"${q:?} ${p.distance_to(q)} ${p == Point(0.0, 0.0)}\")\n}\n"
+    "source": "class Counter(var count: i32 = 0, step: i32 = 1) {\n    var history: [i32] = []\n\n    fun increment() {              // changes fields, so it takes `&mut self` automatically\n        count += step\n        history.push(count)\n    }\n\n    fun current(): i32 = count     // only reads: `&self`\n\n    companion object {\n        fun starting_at(n: i32): Counter = Counter(n)   // static\n    }\n}\n\ndata class Point(x: f64, y: f64) {\n    fun distance_to(other: Point): f64 = ((x - other.x).powi(2) + (y - other.y).powi(2)).sqrt()\n}\n\nfun main() {\n    var c = Counter(step = 5)\n    c.increment()\n    c.increment()\n    println(\"${c.current()} ${c.history:?}\")\n    println(Counter.starting_at(10).current())\n\n    val p = Point(0.0, 0.0)\n    val q = p.copy(x = 3.0, y = 4.0)\n    println(\"${q:?} ${p.distance_to(q)} ${p == Point(0.0, 0.0)}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
     "output": "55 [50, 5] true\n",
-    "source": "shared class Account(var owner: String, var balance: i64 = 0) {\n    var history: Vec<i64> = vec[]\n\n    fun deposit(amount: i64) {\n        balance += amount\n        history.push(amount)\n    }\n}\n\nfun main() {\n    val a = Account(\"Ada\")\n    val b = a                  // the same account\n    b.deposit(50)\n    a.balance += 5             // fields can be read and changed through any handle\n    a.history.push(5)\n    println(\"${a.balance} ${b.history:?} ${a == b}\")\n}\n"
+    "source": "shared class Account(var owner: String, var balance: i64 = 0) {\n    var history: [i64] = []\n\n    fun deposit(amount: i64) {\n        balance += amount\n        history.push(amount)\n    }\n}\n\nfun main() {\n    val a = Account(\"Ada\")\n    val b = a                  // the same account\n    b.deposit(50)\n    a.balance += 5             // fields can be read and changed through any handle\n    a.history.push(5)\n    println(\"${a.balance} ${b.history:?} ${a == b}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
     "output": "6\n",
-    "source": "@sync shared class Stats(var hits: i32 = 0)\n\nfun main() {\n    val stats = Stats()\n    val workers = (1..=3).map { n -> std.thread.spawn { [stats] -> stats.hits += n } }.collect::<Vec<_>>()\n    for (w in workers) w.join().unwrap()\n    println(stats.hits)   // 6\n}\n"
+    "source": "@sync shared class Stats(var hits: i32 = 0)\n\nfun main() {\n    val stats = Stats()\n    val workers = (1..=3).map { n -> std.thread.spawn { [stats] -> stats.hits += n } }.to_list()\n    for (w in workers) w.join().unwrap()\n    println(stats.hits)   // 6\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -127,7 +127,7 @@
   {
     "file": "docs/guide.md",
     "output": "Dog says woof\nTom says meow\n",
-    "source": "interface Animal {\n    fun name(): String\n    fun sound(): String\n    fun speak(): String = \"${name()} says ${sound()}\"    // default method\n}\n\nclass Dog : Animal {\n    override fun name() = \"Dog\"\n    override fun sound() = \"woof\"\n}\n\nclass Cat(name: String) : Animal {\n    override fun name() = name.clone()\n    override fun sound() = \"meow\"\n}\n\nfun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`\n\nfun main() {\n    val zoo: Vec<Box<Animal>> = vec[Box.new(Dog()), Box.new(Cat(\"Tom\".to_string()))]\n    for (a in &zoo) introduce(a)                          // lends the boxed value\n}\n"
+    "source": "interface Animal {\n    fun name(): String\n    fun sound(): String\n    fun speak(): String = \"${name()} says ${sound()}\"    // default method\n}\n\nclass Dog : Animal {\n    override fun name() = \"Dog\"\n    override fun sound() = \"woof\"\n}\n\nclass Cat(name: String) : Animal {\n    override fun name() = name.clone()\n    override fun sound() = \"meow\"\n}\n\nfun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`\n\nfun main() {\n    val zoo: [Animal] = [Dog(), Cat(\"Tom\")]\n    for (a in &zoo) introduce(a)                          // lends the boxed value\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -142,7 +142,7 @@
   {
     "file": "docs/guide.md",
     "output": "7\n[1, 2, 3, 1] [1, 2, 3, 1]\n",
-    "source": "fun total(xs: &[i32]): i32 = xs.iter().sum()\nfun add_one(xs: &mut Vec<i32>) = xs.push(1)\n\nfun main() {\n    var v = vec[1, 2, 3]\n    add_one(v)            // the parameter is `&mut`, so `v` is lent mutably: add_one(&mut v)\n    println(total(v))     // ... and here lent for reading: total(&v)\n    val w = v.clone()     // explicit copy\n    val moved = v         // `v` can't be used after this\n    println(\"${w:?} ${moved:?}\")\n}\n"
+    "source": "fun total(xs: &[i32]): i32 = xs.iter().sum()\nfun add_one(xs: &mut Vec<i32>) = xs.push(1)\n\nfun main() {\n    var v: [i32] = [1, 2, 3]\n    add_one(v)            // the parameter is `&mut`, so `v` is lent mutably: add_one(&mut v)\n    println(total(v))     // ... and here lent for reading: total(&v)\n    val w = v.clone()     // explicit copy\n    val moved = v         // `v` can't be used after this\n    println(\"${w:?} ${moved:?}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -152,12 +152,12 @@
   {
     "file": "docs/guide.md",
     "output": "[1, 2]\n",
-    "source": "class Ids {\n    var items: Vec<usize> = vec[]\n    var next: usize = 0\n\n    fun next_id(): usize {\n        next += 1\n        return next\n    }\n\n    // let next_id = self.next_id(); self.items.push(next_id);\n    fun add() = items.push(next_id())\n}\n\nfun main() {\n    var ids = Ids()\n    ids.add()\n    ids.add()\n    println(\"${ids.items:?}\")\n}\n"
+    "source": "class Ids {\n    var items: [usize] = []\n    var next: usize = 0\n\n    fun next_id(): usize {\n        next += 1\n        return next\n    }\n\n    // let next_id = self.next_id(); self.items.push(next_id);\n    fun add() = items.push(next_id())\n}\n\nfun main() {\n    var ids = Ids()\n    ids.add()\n    ids.add()\n    println(\"${ids.items:?}\")\n}\n"
   },
   {
     "file": "docs/guide.md",
     "output": "1: apple\n2: pear\n",
-    "source": "class Inventory(var items: Vec<String>) {\n    var count = 0\n\n    // fn note(item: &str, count: &mut i32) { *count += 1; ... }\n    fun note(item: &str) {\n        count += 1\n        println(\"$count: $item\")\n    }\n\n    // Self::note(&item, &mut self.count)\n    fun scan() {\n        for (item in items) { note(item) }\n    }\n}\n\nfun main() {\n    var inv = Inventory(vec[\"apple\".to_string(), \"pear\".to_string()])\n    inv.scan()\n}\n"
+    "source": "class Inventory(var items: [String]) {\n    var count = 0\n\n    // fn note(item: &str, count: &mut i32) { *count += 1; ... }\n    fun note(item: &str) {\n        count += 1\n        println(\"$count: $item\")\n    }\n\n    // Self::note(&item, &mut self.count)\n    fun scan() {\n        for (item in items) { note(item) }\n    }\n}\n\nfun main() {\n    var inv = Inventory([\"apple\", \"pear\"])\n    inv.scan()\n}\n"
   },
   {
     "file": "docs/guide.md",
@@ -177,7 +177,7 @@
   {
     "file": "docs/reference.md",
     "output": "added pen, 1 item\n",
-    "source": "class Log(var lines: Vec<String> = vec[]) {\n    fun add(line: String) = lines.push(line)\n}\n\n// every call passes the `log` where it is made\ncontext(log: &mut Log)\nfun record(line: &str) = log.add(line.to_string())\n\n// each method takes the contexts it uses\ncontext(log: &mut Log)\nclass Cart(var items: Vec<String> = vec[]) {\n    fun add(item: &str) {\n        items.push(item.to_string())\n        record(\"added $item\")              // passes its own `log`\n    }\n    fun count(): usize = items.len()       // takes none\n}\n\nfun main() {\n    var log = Log()\n    var cart = Cart()\n    cart.add(\"pen\")                        // cart.add(\"pen\", &mut log)\n    record(\"${cart.count()} item\")\n    println(log.lines.join(\", \"))\n}\n"
+    "source": "class Log(var lines: [String] = []) {\n    fun add(line: String) = lines.push(line)\n}\n\n// every call passes the `log` where it is made\ncontext(log: &mut Log)\nfun record(line: &str) = log.add(line.to_string())\n\n// each method takes the contexts it uses\ncontext(log: &mut Log)\nclass Cart(var items: [String] = []) {\n    fun add(item: &str) {\n        items.push(item.to_string())\n        record(\"added $item\")              // passes its own `log`\n    }\n    fun count(): usize = items.len()       // takes none\n}\n\nfun main() {\n    var log = Log()\n    var cart = Cart()\n    cart.add(\"pen\")                        // cart.add(\"pen\", &mut log)\n    record(\"${cart.count()} item\")\n    println(log.lines.join(\", \"))\n}\n"
   },
   {
     "file": "docs/reference.md",
@@ -187,7 +187,7 @@
   {
     "file": "docs/reference.md",
     "output": "root has 1 child\n",
-    "source": "shared class Node(name: String, var children: Vec<Node> = vec[], var parent: Node? = null) {\n    fun add(child: Node) {\n        child.parent = this          // the handle\n        children.push(child)\n    }\n}\n\nfun main() {\n    val root = Node(\"root\")\n    val leaf = Node(\"leaf\")\n    root.add(leaf.clone())\n    println(\"${leaf.parent?.name ?: \"-\"} has ${root.children.len()} child\")\n}\n"
+    "source": "shared class Node(name: String, var children: [Node] = [], var parent: Node? = null) {\n    fun add(child: Node) {\n        child.parent = this          // the handle\n        children.push(child)\n    }\n}\n\nfun main() {\n    val root = Node(\"root\")\n    val leaf = Node(\"leaf\")\n    root.add(leaf.clone())\n    println(\"${leaf.parent?.name ?: \"-\"} has ${root.children.len()} child\")\n}\n"
   },
   {
     "file": "docs/reference.md",
@@ -206,8 +206,8 @@
   },
   {
     "file": "docs/reference.md",
-    "output": "5 1\n",
-    "source": "import std::collections::HashMap\n\nfun main() {\n    var stock: HashMap<String, i32> = HashMap()\n    stock[\"pen\"] = 3                          // stock.insert(String::from(\"pen\"), 3)\n    for (item in [\"pen\", \"ink\", \"pen\"]) *stock.entry(item.to_string()).or_default() += 1\n    println(\"${stock[\"pen\"]} ${stock[\"ink\"]}\")\n}\n"
+    "output": "5 1\n[\"Dune\"] [1, 2, 3] [\"b\", \"a\"]\n",
+    "source": "fun main() {\n    var stock: [String: i32] = [:]\n    stock[\"pen\"] = 3                          // stock.insert(String::from(\"pen\"), 3)\n    for (item in [\"pen\", \"ink\", \"pen\"]) *stock.entry(item.to_string()).or_default() += 1\n    println(\"${stock[\"pen\"]} ${stock[\"ink\"]}\")\n\n    val shelves: [String: [String]] = [\"new\": [\"Dune\"], \"old\": []]\n    var seen = [1, 2]\n    seen.push(3)                              // a list: `vec![1, 2]`\n    val words = \"b a\".split(' ').to_list()    // [T] of the iterator's items\n    println(\"${shelves[\"new\"]:?} ${seen:?} ${words:?}\")\n}\n"
   },
   {
     "file": "docs/rust-interop.md",

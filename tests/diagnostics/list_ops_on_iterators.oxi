@@ -16,13 +16,13 @@ fun main() {
     // rustc suggests `is_sorted`, which returns whether it is sorted
     val words = "pear apple fig".split(' ').sorted()
     // error: 17: `std::str::Split<'a, P>` is an iterator
-    // error: 17: fix: collect the iterator into a list first: `val words = "pear apple fig".split(' ').collect::<Vec<_>>().sorted()`
+    // error: 17: fix: collect the iterator into a list first: `val words = "pear apple fig".split(' ').to_list().sorted()`
     // not: 17: is_sorted
     val text = "abc"
     val spaced = text.chars().join_to_string(" ")
-    // error: 22: fix: collect the iterator into a list first: `val spaced = text.chars().collect::<Vec<_>>().join_to_string(" ")`
+    // error: 22: fix: collect the iterator into a list first: `val spaced = text.chars().to_list().join_to_string(" ")`
     val small = xs.clone().into_iter().filter_not { it > 2 }
-    // error: 24: fix: collect the iterator into a list first: `val small = xs.clone().into_iter().collect::<Vec<_>>().filter_not { it > 2 }`
+    // error: 24: fix: collect the iterator into a list first: `val small = xs.clone().into_iter().to_list().filter_not { it > 2 }`
     // not: 24: means the opposite
     // the items of `map` aren't known, and rustc says the `iter()` before it would have `sorted`
     val doubled = xs.iter().map { it * 2 }.sorted()

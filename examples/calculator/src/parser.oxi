@@ -15,7 +15,7 @@ error enum ParseError {
 }
 
 /// Recursive-descent parser with operator precedence.
-class Parser(tokens: Vec<Token>, var pos: usize = 0) {
+class Parser(tokens: [Token], var pos: usize = 0) {
     fun parse(): Expr throws ParseError {
         val e = expression()?
         if (pos < tokens.len()) throw ParseError.Unexpected("${tokens[pos]:?}")

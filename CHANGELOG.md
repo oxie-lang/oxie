@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+* Lists and maps have short types: `[T]` is a list (Rust's `Vec<T>`) and `[K: V]` a map (std's
+  `HashMap<K, V>`), so `var log: [String] = []` and `val ages: [String: i32] = ["ada": 36]`
+  replace `Vec<String>` and `HashMap<String, i32>`. After `&`, in `Box`, `Rc` and `Arc` and in a
+  trait's arguments `[T]` is still Rust's slice (`&[T]`, `impl AsRef<[u8]>`). A list or map literal
+  takes the declared type, element by element (`["a", "b"]` for a `[String]` makes `String`s),
+  also for a `HashSet`, `BTreeMap` or `VecDeque`; `[:]` is an empty map, a `var` array that the
+  code after it grows (`xs.push(3)`) is a list, and `iter.to_list()` collects an iterator.
+  `Vec<T>`, `HashMap<K, V>`, `vec[...]` and `mapOf(...)` keep working.
+* Methods borrow the parameters they only read, as functions did: `fun has(name: String)` takes
+  `&str`, `fun total(items: [Item])` takes `&[Item]`, and callers keep their values. A method
+  keeps its parameters' types when Oxie can't resolve every call to it (a receiver of unknown
+  type, `?.`, a method used as a value, Rust code calling it), and when it implements an
+  interface method. Maps and sets (`&HashMap<K, V>`) and `PathBuf` (`&Path`) parameters are
+  borrowed too, and in a program (`main.oxi` without `lib.oxi`) so are `pub` functions and
+  methods; a library's keep the types they declare.
+* A parameter stored through a field written without its value (`Point { x, y }`) or named in a
+  `rust { }` block is no longer borrowed. Before, the generated Rust didn't compile.
+* A method call whose result Oxie knows is a value (`describe(Point.origin())`) is lent to a `&T`
+  parameter, as function calls already were.
+* `oxie from-rust` writes `[T]` and `[K: V]` (for std's `HashMap`), `[a, b]` and `[]` for a
+  declared list, `[k: v]` and `[:]` for maps, and `.to_list()` for `.collect::<Vec<_>>()`.
+  `Vec<T>` stays where Oxie reads `[T]` as a slice (`&mut Vec<T>`, `Arc<Vec<T>>`), and an item with
+  a slice type Oxie can't write (`type Bytes = [u8]`) stays Rust.
 * `oxie new` and `oxie init` also write a `CLAUDE.md` with the line `@AGENTS.md`, so Claude Code
   reads the notes for agents that the other agents read in `AGENTS.md`. A crate's own `CLAUDE.md`
   is kept. The documentation has a page on [AI coding agents](docs/ai-agents.md): setting up

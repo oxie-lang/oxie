@@ -233,7 +233,7 @@ fn compare_contexts(orig: &facts::Facts, got: &facts::Facts, krate: &contexts::C
     let mut changed = false;
     let class_of = |ty: &str| ty.split('<').next().unwrap_or("").rsplit("::").next().unwrap_or("").to_string();
     for (k, ps) in &orig.params {
-        if got.params.get(k).is_some_and(|g| g != ps) && k.1.is_empty() && krate.takes(&class_of(&k.0), &k.2).is_some() {
+        if got.params.get(k).is_some_and(|g| !same_params(g, ps)) && k.1.is_empty() && krate.takes(&class_of(&k.0), &k.2).is_some() {
             changed |= fixes.ctx_clause.insert(k.clone());
         }
     }
@@ -246,6 +246,21 @@ fn compare_contexts(orig: &facts::Facts, got: &facts::Facts, krate: &contexts::C
         }
     }
     changed
+}
+
+/// Are the parameter types Oxie gave a method (`got`, as `facts` writes them) the Rust's
+/// (`orig`), up to the borrowing of those its body only reads (`String` as `&str`, `Vec<T>` as
+/// `&[T]`, `PathBuf` as `&Path`, `Box<T>` and other values as `&T`)?
+fn same_params(got: &[String], orig: &[String]) -> bool {
+    let lent = |g: &str, o: &str| {
+        let Some(inner) = g.strip_prefix('&') else { return false };
+        inner == o
+            || (o == "String" && inner == "str")
+            || (o == "PathBuf" && inner == "Path")
+            || o.strip_prefix("Vec<").and_then(|t| t.strip_suffix('>')).is_some_and(|t| inner == format!("[{}]", t))
+            || o.strip_prefix("Box<").and_then(|t| t.strip_suffix('>')).is_some_and(|t| inner == t)
+    };
+    got.len() == orig.len() && got.iter().zip(orig).all(|(g, o)| g == o || lent(g, o))
 }
 
 /// The identifiers in a source text.
@@ -362,7 +377,42 @@ fn collect_info(file: &syn::File) -> Info {
             info.fns.remove(&n);
         }
     }
+    info.std_collections = std_collections(&file.items);
     info
+}
+
+/// The std collections the items import by their own names: `use std::collections::HashMap`,
+/// `use std::collections::{HashMap, HashSet}`, `use std::collections::*`.
+fn std_collections(items: &[syn::Item]) -> HashSet<String> {
+    fn walk(t: &syn::UseTree, path: &mut Vec<String>, out: &mut HashSet<String>) {
+        let in_std = |p: &[String]| p.len() >= 2 && p[0] == "std" && p[1] == "collections";
+        match t {
+            syn::UseTree::Path(p) => {
+                path.push(p.ident.to_string());
+                walk(&p.tree, path, out);
+                path.pop();
+            }
+            syn::UseTree::Name(n) if in_std(path) => {
+                out.insert(n.ident.to_string());
+            }
+            syn::UseTree::Glob(_) if path.len() == 2 && in_std(path) => {
+                out.extend(["HashMap", "HashSet", "BTreeMap", "BTreeSet", "VecDeque", "BinaryHeap", "LinkedList"].map(String::from));
+            }
+            syn::UseTree::Group(g) => {
+                for t in &g.items {
+                    walk(t, path, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = HashSet::new();
+    for it in items {
+        if let syn::Item::Use(u) = it {
+            walk(&u.tree, &mut Vec::new(), &mut out);
+        }
+    }
+    out
 }
 
 fn collect_items(items: &[syn::Item], info: &mut Info, fn_counts: &mut HashMap<String, usize>) {

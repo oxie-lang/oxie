@@ -13,6 +13,7 @@ pub type AnyError = ::std::boxed::Box<dyn ::std::error::Error + ::std::marker::S
 pub mod prelude {
     pub use super::AnyError;
     pub use super::Context as _;
+    pub use super::IterOps as _;
     pub use super::ListOps as _;
     pub use super::SharedCell as _;
     pub use super::SharedLock as _;
@@ -562,6 +563,16 @@ impl<'a, T: 'a> ListOps<'a, T> for [T] {
         !self.is_empty()
     }
 }
+
+/// `to_list()` on an iterator: `collect::<Vec<_>>()`.
+pub trait IterOps: Iterator + Sized {
+    #[inline]
+    fn to_list(self) -> Vec<Self::Item> {
+        self.collect()
+    }
+}
+
+impl<I: Iterator> IterOps for I {}
 
 /// An error with a message wrapped around its cause. Created by `.context("...")`.
 #[derive(Debug)]

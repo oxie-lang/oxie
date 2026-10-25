@@ -337,6 +337,21 @@ impl Type {
     pub fn simple(name: &str) -> Type {
         Type::Path { global: false, segs: vec![PathSeg::plain(name)], span: Span::default() }
     }
+    /// `[T]` where a value is: a list, `Vec<T>`.
+    pub fn list(elem: Type, span: Span) -> Type {
+        Type::Path { global: false, segs: vec![PathSeg { name: "Vec".into(), generics: Some(vec![GenericArg::Type(elem)]), fn_sugar: None }], span }
+    }
+    /// `[K: V]`, std's `HashMap<K, V>`. Its path starts at the crate root (`::HashMap`), which no
+    /// Rust type can (it would name a crate), so the lowering names std's map whatever the
+    /// module imports.
+    pub fn map(key: Type, value: Type, span: Span) -> Type {
+        let generics = Some(vec![GenericArg::Type(key), GenericArg::Type(value)]);
+        Type::Path { global: true, segs: vec![PathSeg { name: "HashMap".into(), generics, fn_sugar: None }], span }
+    }
+    /// Was the type written `[K: V]`?
+    pub fn is_map(&self) -> bool {
+        matches!(self, Type::Path { global: true, segs, .. } if segs.len() == 1 && segs[0].name == "HashMap")
+    }
     /// The last path segment name, if a plain path type.
     pub fn last_name(&self) -> Option<&str> {
         match self {

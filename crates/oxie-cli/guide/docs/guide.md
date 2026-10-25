@@ -56,7 +56,7 @@ fun max(a: i32, b: i32): i32 {
 }
 
 // default and named arguments
-fun greet(name: &str, greeting: &str = "Hello"): String = "$greeting, $name!"
+fun greet(name: String, greeting: String = "Hello"): String = "$greeting, $name!"
 
 fun main() {
     println(add(2, 3))
@@ -67,7 +67,9 @@ fun main() {
 }
 ```
 
-Parameters are written `name: Type`, the return type after `:` (Rust's `->` also works).
+Parameters are written `name: Type`, the return type after `:` (Rust's `->` also works). A
+parameter that the function only reads is borrowed: `greet` takes `&str` in the generated Rust,
+so `greet(name)` doesn't use up `name` (see [Ownership](#ownership)).
 
 A value that many functions pass along, such as a configuration, a logger or GPUI's `window` and
 `cx`, can be a *context parameter*: each call passes the variable of that name where it is made,
@@ -171,19 +173,17 @@ written in parentheses as in Kotlin; Rust's style without them works too.
 ## Collections and lambdas
 
 ```oxie
-import std::collections::HashMap
-
 fun main() {
-    val nums = listOf(5, 3, 8, 1)              // Vec<i32>; `vec[5, 3, 8, 1]` is the same
+    val nums: [i32] = [5, 3, 8, 1]             // a list (Rust's Vec<i32>)
     val doubled = nums.map { it * 2 }          // a new list: [10, 6, 16, 2]
     val big = nums.count { it > 3 }
     val sum = nums.iter().fold(0) { acc, x -> acc + x }
     println("${doubled:?} $big $sum ${nums.sorted():?}")
 
-    val ages = mapOf("ada" to 36, "bob" to 25)  // HashMap
+    val ages: [String: i32] = ["ada": 36, "bob": 25]   // a map (Rust's HashMap<String, i32>)
     println("ada is ${ages["ada"]}")
 
-    var counts = HashMap()
+    var counts = [:]
     for (word in "a b a c a".split(' ')) {
         *counts.entry(word).or_insert(0) += 1
     }
@@ -194,6 +194,13 @@ fun main() {
     println("${add(2, 3)} ${twice(4)}")
 }
 ```
+
+`[T]` is a list and `[K: V]` a map, Rust's `Vec<T>` and `HashMap<K, V>` (which work too). A
+literal takes the type you declare: `[5, 3, 8, 1]` is `vec![5, 3, 8, 1]` for a `[i32]`, and the
+strings in `["ada": 36]` become `String`s for a `[String: i32]`. Without a declared type, `[1, 2]`
+is a fixed-size array, unless the code after a `var` grows it (`xs.push(3)`): then it is a list.
+`[:]` is an empty map, and `iter.to_list()` collects an iterator into a list. After `&`, `[T]`
+is Rust's slice, so `fun total(xs: &[i32])` takes any list or array.
 
 A lambda without parameters can use `it`. A lambda as the last argument goes outside the
 parentheses (`xs.fold(0) { acc, x -> ... }`).
@@ -209,7 +216,7 @@ For longer pipelines, Rust's iterators are there too: `nums.iter().filter { it >
 data class User(name: String, age: u32, city: String)
 
 fun main() {
-    val users = vec[User("Ada", 36, "London"), User("Linus", 28, "Helsinki"), User("Grace", 45, "London")]
+    val users: [User] = [User("Ada", 36, "London"), User("Linus", 28, "Helsinki"), User("Grace", 45, "London")]
     println(users.filter { it.age > 30 }.map { it.name.clone() }.join_to_string(", "))
     println("total age ${users.sum_of { it.age }}, oldest ${users.max_by_key { it.age }?.name ?: "-"}")
     println(users.sorted_by { it.age }.join_with(" < ") { it.name.as_str() })
@@ -260,7 +267,7 @@ fun main() {
 
 ```oxie
 class Counter(var count: i32 = 0, step: i32 = 1) {
-    var history: Vec<i32> = vec[]
+    var history: [i32] = []
 
     fun increment() {              // changes fields, so it takes `&mut self` automatically
         count += step
@@ -310,7 +317,7 @@ TypeScript:
 
 ```oxie
 shared class Account(var owner: String, var balance: i64 = 0) {
-    var history: Vec<i64> = vec[]
+    var history: [i64] = []
 
     fun deposit(amount: i64) {
         balance += amount
@@ -349,7 +356,7 @@ one:
 
 fun main() {
     val stats = Stats()
-    val workers = (1..=3).map { n -> std.thread.spawn { [stats] -> stats.hits += n } }.collect::<Vec<_>>()
+    val workers = (1..=3).map { n -> std.thread.spawn { [stats] -> stats.hits += n } }.to_list()
     for (w in workers) w.join().unwrap()
     println(stats.hits)   // 6
 }
@@ -404,7 +411,7 @@ class Cat(name: String) : Animal {
 fun introduce(a: &Animal) = println(a.speak())           // `&dyn Animal`
 
 fun main() {
-    val zoo: Vec<Box<Animal>> = vec[Box.new(Dog()), Box.new(Cat("Tom".to_string()))]
+    val zoo: [Animal] = [Dog(), Cat("Tom")]
     for (a in &zoo) introduce(a)                          // lends the boxed value
 }
 ```
@@ -488,7 +495,7 @@ fun total(xs: &[i32]): i32 = xs.iter().sum()
 fun add_one(xs: &mut Vec<i32>) = xs.push(1)
 
 fun main() {
-    var v = vec[1, 2, 3]
+    var v: [i32] = [1, 2, 3]
     add_one(v)            // the parameter is `&mut`, so `v` is lent mutably: add_one(&mut v)
     println(total(v))     // ... and here lent for reading: total(&v)
     val w = v.clone()     // explicit copy
@@ -497,15 +504,19 @@ fun main() {
 }
 ```
 
+`&[i32]` is Rust's slice: any list or array, read-only. A function that adds to the caller's
+list takes `&mut Vec<i32>`, since `&mut [i32]` can change the elements but not their number.
+
 What Oxie removes is the bookkeeping around it:
 
 * arguments for `&T` and `&mut T` parameters of Oxie functions are borrowed for you (writing
   `&v` yourself works too);
-* a `String` or `Vec<T>` parameter that a function only reads becomes `&str` or `&[T]`, so
-  `greet(name)` lends `name` instead of giving it away (for functions that aren't `pub`, and for
-  a `Vec` only when dropping its elements just frees memory: a `Vec` of mutex guards is still
-  dropped, and unlocked, when the function returns), and a class or `Box<T>` parameter becomes
-  `&T` the same way (below);
+* a `String` or list parameter that a function or method only reads becomes `&str` or `&[T]`,
+  so `greet(name)` lends `name` instead of giving it away (for a list only when dropping its
+  elements just frees memory: a list of mutex guards is still dropped, and unlocked, when the
+  function returns). A map or set becomes `&HashMap<K, V>`, a `PathBuf` `&Path`, and a class or
+  `Box<T>` parameter `&T` the same way (below). A library's `pub` functions and methods keep the
+  types they declare, since other crates call them;
 * lifetimes are filled in when Rust can't infer them (a function returning a reference gets one
   lifetime tied to its reference parameters, a class holding a `&str` gets a lifetime
   parameter, and so does a reference inside an `impl Trait` parameter);
@@ -540,7 +551,7 @@ would by hand in Rust:
 
 ```oxie
 class Ids {
-    var items: Vec<usize> = vec[]
+    var items: [usize] = []
     var next: usize = 0
 
     fun next_id(): usize {
@@ -568,7 +579,7 @@ other fields, Oxie gives it those fields instead of `self`, which is what you wo
 hand:
 
 ```oxie
-class Inventory(var items: Vec<String>) {
+class Inventory(var items: [String]) {
     var count = 0
 
     // fn note(item: &str, count: &mut i32) { *count += 1; ... }
@@ -584,7 +595,7 @@ class Inventory(var items: Vec<String>) {
 }
 
 fun main() {
-    var inv = Inventory(vec["apple".to_string(), "pear".to_string()])
+    var inv = Inventory(["apple", "pear"])
     inv.scan()
 }
 ```

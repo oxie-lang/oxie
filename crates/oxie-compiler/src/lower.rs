@@ -125,7 +125,7 @@ fn operator_trait(name: &str) -> Option<(&'static str, &'static str, bool, bool)
     })
 }
 
-fn kotlin_alias(name: &str) -> Option<&'static str> {
+pub(crate) fn kotlin_alias(name: &str) -> Option<&'static str> {
     Some(match name {
         "Int" => "i32",
         "Long" => "i64",
@@ -297,6 +297,11 @@ pub struct Lowerer<'a> {
     /// Names imported inside the blocks being lowered (`import nucleo_matcher::Config` in a
     /// function), with the paths they stand for.
     pub(crate) local_imports: Vec<(String, Vec<String>)>,
+    /// The methods called where Oxie can't tell which method the call reaches (on a value of
+    /// unknown type, after `?.`, through a path it can't follow): such a call passes its
+    /// arguments as written, so methods of these names keep their parameters' types (see
+    /// `params::borrow_method_params`).
+    pub unresolved: HashSet<String>,
 }
 
 /// The `#[cfg(..)]` attributes among `attrs`, each followed by a space.
@@ -390,6 +395,7 @@ impl<'a> Lowerer<'a> {
             local_funs: Vec::new(),
             aliases: HashSet::new(),
             local_imports: Vec::new(),
+            unresolved: HashSet::new(),
         }
     }
 
@@ -879,6 +885,11 @@ impl<'a> Lowerer<'a> {
     }
 
     fn path_ty(&self, global: bool, segs: &[PathSeg], pos: TyPos) -> String {
+        // `[K: V]`: std's map, by its short name where the module imports it
+        if global && segs.len() == 1 && segs[0].name == "HashMap" {
+            let map = self.seg(&segs[0], TyPos::Generic);
+            return if self.names_std("HashMap") { map } else { format!("::std::collections::{}", map) };
+        }
         if segs.len() > 1 && self.k.nested.get(&segs[0].name).is_some_and(|inner| inner.contains(&segs[1].name)) {
             return self.path_ty(global, &segs[1..], pos);
         }
@@ -913,6 +924,29 @@ impl<'a> Lowerer<'a> {
             s.push_str(&self.seg(seg, TyPos::Generic));
         }
         s
+    }
+
+    /// Does `name` name std's collection of that name (`HashMap`) here: imported by name or with
+    /// `std::collections::*`, and no type of the module's own is called that?
+    pub(crate) fn names_std(&self, name: &str) -> bool {
+        let is_std = |path: &[String]| {
+            let path: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+            matches!(path.as_slice(), ["std", "collections", n] | ["std", "collections", _, n] if *n == name)
+        };
+        if let Some((_, path)) = self.local_imports.iter().rev().find(|(n, _)| n == name) {
+            return is_std(path);
+        }
+        if self.class_info(name).is_some() || self.enum_info(name).is_some() || self.aliases.contains(name) {
+            return false;
+        }
+        if let Some(path) = self.k.imports.get(&(self.module.clone(), name.to_string())) {
+            return is_std(path);
+        }
+        let collections = |g: &Vec<String>| {
+            let g: Vec<&str> = g.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+            g == ["std", "collections"]
+        };
+        self.local_imports.iter().any(|(n, g)| n == "*" && collections(g)) || self.k.globs.get(&self.module).into_iter().flatten().any(collections)
     }
 
     /// The type behind `&` or `*`: `dyn A + B` needs parentheses there (`&(dyn Error + 'static)`).

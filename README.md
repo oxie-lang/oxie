@@ -137,12 +137,13 @@ Kotlin and TypeScript developers already know:
 | `data class Point(x: f64, y: f64)` | struct + constructor + `#[derive(Debug, Clone, Copy, PartialEq)]` |
 | `"Hello, $name! ${x + 1}"` | `format!("Hello, {name}! {}", x + 1)` |
 | `String?`, `null`, `a?.b ?: c` | `Option<String>`, `None`, `map`/`and_then`/`unwrap_or` |
+| `var log: [String] = []`, `val ages: [String: i32] = ["ada": 36]` | `Vec<String>`, `HashMap<String, i32>`, `vec![]`, `HashMap::from([(String::from("ada"), 36)])` |
 | `fun f(): T throws`, `throw e` | `-> Result<T, AnyError>`, `return Err(e.into())` |
 | `try { ... } catch (e) { ... }` | a labeled block with `?` turned into `break` |
 | `error enum E { NotFound(p: String) = "no $p" }` | enum + `Display` + `Error` + `From` impls |
 | `when (x) { 1, 2 -> a; in 3..=9 -> b; else -> c }` | `match` |
 | `xs.filter { it > 2 }.sum_of { it.price }` | `xs.iter().filter(..).cloned().collect()`, `iter().map(..).sum()` |
-| `total(nums)` with `fun total(xs: &[i32])` | `total(&nums)` (arguments are borrowed for you) |
+| `total(nums)` with `fun total(xs: [i32])` | `fn total(xs: &[i32])` and `total(&nums)`: a parameter that is only read is borrowed |
 | `fun show<T>(x: T) = "<$x>"` | `fn show<T>(x: T) -> String where T: Display` |
 | `shared class Node(var next: Node?)` | `Rc<RefCell<..>>` handle with getters, setters and forwarding methods |
 | `interface Shape { fun area(): f64 }` | `trait Shape { fn area(&self) -> f64; }` |

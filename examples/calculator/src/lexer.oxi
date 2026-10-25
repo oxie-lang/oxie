@@ -12,9 +12,9 @@ error enum LexError {
 }
 
 /// Splits `input` into tokens.
-fun tokenize(input: &str): Vec<Token> throws LexError {
-    var tokens = vec[]
-    val chars: Vec<char> = input.chars().collect()
+fun tokenize(input: String): [Token] throws LexError {
+    var tokens = []
+    val chars = input.chars().to_list()
     var i = 0
     while (i < chars.len()) {
         val c = chars[i]

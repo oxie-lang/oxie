@@ -76,6 +76,8 @@ pub struct Info {
     pub modules: HashSet<String>,
     /// a function named `run` hides Oxie's `run { }` block
     pub run_shadowed: bool,
+    /// std's collections the file names without a path (`use std::collections::HashMap`)
+    pub std_collections: HashSet<String>,
 }
 
 #[derive(Clone, Default)]
@@ -134,6 +136,14 @@ pub struct Printer<'a> {
     top_level: bool,
     /// `rust { impl .. }` blocks of methods kept as Rust, printed after the current item.
     after_item: Vec<String>,
+    /// The next type is where Oxie reads `[T]` as a slice (after `&`, in `Box<..>`, in a trait's
+    /// arguments): a `Vec<T>` there keeps its name.
+    pub slice_here: std::cell::Cell<bool>,
+    /// The next path is a trait's, whose type arguments may be slices.
+    pub trait_args: std::cell::Cell<bool>,
+    /// A slice was printed where Oxie reads `[T]` as a list (`type Bytes = [u8]`): Oxie has no
+    /// name for that type, so the item is kept as Rust.
+    pub slice_by_value: std::cell::Cell<bool>,
 }
 
 pub fn indent(s: &str) -> String {
@@ -175,6 +185,9 @@ impl<'a> Printer<'a> {
             mod_prefix: String::new(),
             top_level: false,
             after_item: Vec::new(),
+            slice_here: Default::default(),
+            trait_args: Default::default(),
+            slice_by_value: Default::default(),
         }
     }
 
@@ -316,6 +329,9 @@ impl<'a> Printer<'a> {
                 }
                 _ => self.item(it, &plan, i, items),
             };
+            if self.slice_by_value.take() {
+                text = self.raw_item(it, "Oxie has no name for a slice that isn't behind a reference or pointer");
+            }
             if self.pending.len() > pending {
                 let todo: Vec<String> = self.pending.drain(pending..).collect();
                 text = format!("{}\n{}", todo.join("\n"), text);
@@ -1280,10 +1296,13 @@ impl<'a> Printer<'a> {
             if neg.is_some() {
                 head.push('!');
             }
+            self.trait_args.set(true);
             head.push_str(&self.type_path(None, path));
             head.push_str(" for ");
             trait_key = facts::trait_key(path);
         }
+        // `impl Display for [T]`: Oxie reads `[T]` as Rust does there
+        self.slice_here.set(true);
         head.push_str(&self.ty(&imp.self_ty));
         head.push_str(&self.where_clause(&imp.generics));
         let lo = line_of(imp);
@@ -1319,6 +1338,8 @@ impl<'a> Printer<'a> {
                 }
                 syn::ImplItem::Type(t) => {
                     let mut l = self.attrs(&t.attrs, false);
+                    // an associated type may be unsized: `type Target = [T]`
+                    self.slice_here.set(true);
                     l.push(format!("type {}{} = {}{}", id(&t.ident), self.generics(&t.generics), self.ty(&t.ty), self.where_clause(&t.generics)));
                     s.push_str(&l.join("\n"));
                 }

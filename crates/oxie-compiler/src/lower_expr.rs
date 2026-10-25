@@ -850,10 +850,20 @@ impl<'a> Lowerer<'a> {
             }
         }
         match ty {
+            // `&["a": 1]` for a `&[String: i32]` parameter
+            Type::Ref { mutable: false, inner, .. } if matches!(&e.kind, ExprKind::Unary(UnOp::Ref, x) if is_collection_lit(x)) => {
+                let ExprKind::Unary(_, x) = &e.kind else { unreachable!() };
+                self.e.w("&");
+                if !self.borrowed_lit(x, inner) {
+                    self.expr(x, P_UNARY);
+                }
+            }
             Type::Ref { mutable, inner, .. } if pos == TyPos::Param && (self.auto_borrow(e, *mutable) || !mutable && self.lend_to_slice(e, inner)) => {
                 self.e.mark(e.span);
                 self.e.w(if *mutable { "&mut " } else { "&" });
-                self.expr(e, P_UNARY);
+                if !(is_collection_lit(e) && self.borrowed_lit(e, inner)) {
+                    self.expr(e, P_UNARY);
+                }
                 let param = self.ty(ty, TyPos::Param);
                 self.e.decide(e.span, if *mutable { "&mut" } else { "&" }, format!("the parameter is `{}`", param), None);
             }
@@ -924,25 +934,7 @@ impl<'a> Lowerer<'a> {
                     self.expr(e, P_LOWEST);
                 }
             }
-            Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Vec" && segs[0].generics.as_ref().is_some_and(|g| g.len() == 1) => {
-                let elem = match &segs[0].generics.as_ref().unwrap()[0] {
-                    GenericArg::Type(t) => Some(t.clone()),
-                    _ => None,
-                };
-                match (&e.kind, elem) {
-                    (ExprKind::VecLit(items), Some(elem)) if !items.iter().any(|x| matches!(x.kind, ExprKind::ArrayRepeat(..))) => {
-                        self.e.w("vec![");
-                        for (i, x) in items.iter().enumerate() {
-                            if i > 0 {
-                                self.e.w(", ");
-                            }
-                            self.coerce(x, &elem, TyPos::Generic);
-                        }
-                        self.e.w("]");
-                    }
-                    _ => self.expr(e, P_LOWEST),
-                }
-            }
+            Type::Path { .. } if self.collection_lit(e, ty) => {}
             Type::Path { segs, .. }
                 if segs.len() == 1 && matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local) && self.is_trait_name(&segs[0].name) && self.is_constructed_value(e) =>
             {
@@ -951,6 +943,108 @@ impl<'a> Lowerer<'a> {
                 self.e.w(")");
             }
             _ => self.expr(e, P_LOWEST),
+        }
+    }
+
+    /// A list or map literal (`[1, 2]`, `vec[..]`, `[x; n]`, `["a": 1]`, `[:]`) for a declared std
+    /// collection: `vec![..]` for a list, `Name::from([..])` for the others, with each element
+    /// converted to the element type (`"a"` to a `String`). False, emitting nothing, for other
+    /// expressions and types.
+    fn collection_lit(&mut self, e: &Expr, ty: &Type) -> bool {
+        let Type::Path { segs, .. } = ty else { return false };
+        let [seg] = segs.as_slice() else { return false };
+        let name = seg.name.as_str();
+        if self.k.is_user_type(name) && !ty.is_map() {
+            return false;
+        }
+        let args: Vec<&Type> = seg.generics.iter().flatten().filter_map(|a| if let GenericArg::Type(t) = a { Some(t) } else { None }).collect();
+        match (&e.kind, name, args.as_slice()) {
+            (ExprKind::Array(items) | ExprKind::VecLit(items), "Vec", [elem]) => match items.as_slice() {
+                [x] if matches!(x.kind, ExprKind::ArrayRepeat(..)) => return self.collection_lit(x, ty),
+                _ => {
+                    self.e.w("vec![");
+                    self.coerce_each(items, elem);
+                    self.e.w("]");
+                }
+            },
+            (ExprKind::ArrayRepeat(x, n), "Vec", [elem]) => {
+                self.e.w("vec![");
+                self.coerce(x, elem, TyPos::Generic);
+                self.e.w("; ");
+                self.expr(n, P_LOWEST);
+                self.e.w("]");
+            }
+            (ExprKind::Array(items), "VecDeque" | "LinkedList" | "BinaryHeap" | "HashSet" | "BTreeSet", [elem]) => {
+                let path = self.std_collection(name);
+                if items.is_empty() {
+                    self.e.w(&format!("{}::new()", path));
+                } else {
+                    self.e.w(&format!("{}::from([", path));
+                    self.coerce_each(items, elem);
+                    self.e.w("])");
+                }
+            }
+            (ExprKind::MapLit(items), "HashMap" | "BTreeMap", [key, value]) => {
+                let path = self.std_collection(name);
+                if items.is_empty() {
+                    self.e.w(&format!("{}::new()", path));
+                    return true;
+                }
+                self.e.w(&format!("{}::from([", path));
+                for (i, x) in items.iter().enumerate() {
+                    if i > 0 {
+                        self.e.w(", ");
+                    }
+                    match pair_parts(x) {
+                        Some((k, v)) => {
+                            self.e.w("(");
+                            self.coerce(k, key, TyPos::Generic);
+                            self.e.w(", ");
+                            self.coerce(v, value, TyPos::Generic);
+                            self.e.w(")");
+                        }
+                        None => self.expr(x, P_LOWEST),
+                    }
+                }
+                self.e.w("])");
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// A collection literal lent to a `&T` parameter, converted to `T`: `[..]` for a slice, else
+    /// as for a value (`collection_lit`). False, emitting nothing, when it can't be.
+    fn borrowed_lit(&mut self, e: &Expr, inner: &Type) -> bool {
+        match (&e.kind, inner) {
+            (ExprKind::Array(items), Type::Slice(elem)) => {
+                self.e.w("[");
+                self.coerce_each(items, elem);
+                self.e.w("]");
+                true
+            }
+            (ExprKind::VecLit(_), Type::Slice(elem)) => self.collection_lit(e, &Type::list((**elem).clone(), e.span)),
+            _ => self.collection_lit(e, inner),
+        }
+    }
+
+    /// `items` separated by commas, each converted to `elem`.
+    fn coerce_each(&mut self, items: &[Expr], elem: &Type) {
+        for (i, x) in items.iter().enumerate() {
+            if i > 0 {
+                self.e.w(", ");
+            }
+            self.coerce(x, elem, TyPos::Generic);
+        }
+    }
+
+    /// The path of std's collection `name` (`HashSet`) here: the name itself where the module
+    /// imports it, else `::std::collections::HashSet`.
+    pub(crate) fn std_collection(&self, name: &str) -> String {
+        if self.names_std(name) {
+            name.to_string()
+        } else {
+            format!("::std::collections::{}", name)
         }
     }
 
@@ -978,8 +1072,23 @@ impl<'a> Lowerer<'a> {
             }
             _ if mutable => self.is_place(e),
             ExprKind::Field { .. } | ExprKind::Index(..) => true,
-            ExprKind::Call { .. } | ExprKind::StructLit { .. } | ExprKind::VecLit(_) | ExprKind::Array(_) | ExprKind::Template(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Tuple(_) => true,
-            ExprKind::MethodCall { name, .. } => matches!(name.as_str(), "clone" | "to_string" | "to_owned" | "to_vec" | "collect" | "format"),
+            ExprKind::Call { .. }
+            | ExprKind::StructLit { .. }
+            | ExprKind::VecLit(_)
+            | ExprKind::Array(_)
+            | ExprKind::ArrayRepeat(..)
+            | ExprKind::MapLit(_)
+            | ExprKind::SetLit(_)
+            | ExprKind::Template(_)
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Tuple(_) => true,
+            // a call that makes a value: by its name, or by the type Oxie knows it returns
+            // (`LineEdit.of(..)`); a reference it returns would be lent as `&&T`
+            ExprKind::MethodCall { name, .. } => {
+                matches!(name.as_str(), "clone" | "to_string" | "to_owned" | "to_vec" | "to_list" | "collect" | "format")
+                    || self.infer_type(e).is_some_and(|t| !matches!(t, Type::Ref { .. } | Type::Ptr { .. } | Type::Infer) && t.last_name() != Some("str"))
+            }
             _ => false,
         }
     }
@@ -1778,20 +1887,12 @@ impl<'a> Lowerer<'a> {
                 self.comma_list(v);
                 self.e.w("]");
             }
-            MapLit(v) => {
+            MapLit(v) | SetLit(v) => {
+                let path = self.std_collection(if matches!(e.kind, MapLit(_)) { "HashMap" } else { "HashSet" });
                 if v.is_empty() {
-                    self.e.w("::std::collections::HashMap::new()");
+                    self.e.w(&format!("{}::new()", path));
                 } else {
-                    self.e.w("::std::collections::HashMap::from([");
-                    self.comma_list(v);
-                    self.e.w("])");
-                }
-            }
-            SetLit(v) => {
-                if v.is_empty() {
-                    self.e.w("::std::collections::HashSet::new()");
-                } else {
-                    self.e.w("::std::collections::HashSet::from([");
+                    self.e.w(&format!("{}::from([", path));
                     self.comma_list(v);
                     self.e.w("])");
                 }
@@ -2671,6 +2772,9 @@ impl<'a> Lowerer<'a> {
                 return;
             }
         }
+        if n >= 2 {
+            self.unresolved.insert(segs[n - 1].clone());
+        }
         let mut path = self.join_path(segs);
         if let Some(g) = generics {
             path.push_str("::");
@@ -3095,7 +3199,8 @@ impl<'a> Lowerer<'a> {
         }
         // method of an Oxie class when the receiver's type is known
         if !matches!(recv.kind, ExprKind::SelfValue) {
-            let owner = self.infer_type(recv).and_then(|t| self.type_owner(&t));
+            let recv_ty = self.infer_type(recv);
+            let owner = recv_ty.as_ref().and_then(|t| self.type_owner(t));
             let m = owner.as_ref().and_then(|o| self.class_at(o).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(o).and_then(|e| e.methods.get(name)))).cloned();
             if let Some(m) = m {
                 self.expr(recv, P_POSTFIX);
@@ -3106,6 +3211,9 @@ impl<'a> Lowerer<'a> {
                 }
                 self.arg_list(args, Some(&m.params), TyPos::Param, span);
                 return;
+            }
+            if self.may_reach_oxie(recv_ty.as_ref()) {
+                self.unresolved.insert(name.to_string());
             }
         }
         // self.method(...) with known parameters / calling a function-typed field
@@ -3145,6 +3253,30 @@ impl<'a> Lowerer<'a> {
         self.arg_list(&args, None, TyPos::Param, span);
     }
 
+    /// Can a method call on a value of type `t` reach a method of an Oxie class it didn't
+    /// resolve to? Not on std's plain values (`String`, `Vec`, numbers, `Option`, ...) or on an
+    /// Oxie class or enum without that method; on anything else (an unknown type, `Box<..>`, a
+    /// crate's type) it may, through `Deref`.
+    fn may_reach_oxie(&self, t: Option<&Type>) -> bool {
+        const PLAIN: &[&str] = &[
+            "String", "Vec", "VecDeque", "LinkedList", "BinaryHeap", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Option", "Result",
+            "PathBuf", "Path", "OsString", "OsStr", "Duration", "Instant", "SystemTime", "Range", "RangeInclusive",
+        ];
+        match t {
+            None => true,
+            Some(Type::Ref { inner, .. }) => self.may_reach_oxie(Some(inner)),
+            Some(Type::Tuple(_) | Type::Array(..) | Type::Slice(_) | Type::Option(_) | Type::Never) => false,
+            Some(t @ Type::Path { segs, .. }) => {
+                if self.type_owner(t).is_some_and(|o| self.class_at(&o).is_some() || self.enum_at(&o).is_some()) {
+                    return false;
+                }
+                let name = segs.last().map(|s| s.name.as_str()).unwrap_or_default();
+                !(PLAIN.contains(&name) || crate::lower::PRIMITIVES.contains(&name) || kotlin_alias(name).is_some())
+            }
+            Some(_) => true,
+        }
+    }
+
     /// Kotlin lambdas may ignore their argument (`map_err { MyError() }`); Rust closures must
     /// declare it. Adds `_` for std methods whose closure always receives a value.
     fn fix_lambda_arity(&self, recv: &Expr, name: &str, args: &[Arg]) -> Vec<Arg> {
@@ -3182,6 +3314,7 @@ impl<'a> Lowerer<'a> {
                 self.e.w(&member(name));
             }
             ExprKind::MethodCall { name, generics, args, .. } => {
+                self.unresolved.insert(name.clone());
                 self.e.w(".");
                 self.e.w(&member(name));
                 if let Some(g) = generics {
@@ -4392,6 +4525,20 @@ fn spine<'e>(e: &'e Expr, ops: &mut Vec<&'e Expr>, nodes: &mut Vec<&'e Expr>) {
 
 /// The names an import brings in, with the paths they stand for (`Config` for
 /// `nucleo_matcher::{Config, Matcher}`).
+/// A list or map literal: `[1, 2]`, `[x; n]`, `vec[..]`, `["a": 1]`.
+fn is_collection_lit(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Array(_) | ExprKind::ArrayRepeat(..) | ExprKind::VecLit(_) | ExprKind::MapLit(_))
+}
+
+/// The key and value of a map literal's entry: `k: v`, `k to v` or `(k, v)`.
+fn pair_parts(x: &Expr) -> Option<(&Expr, &Expr)> {
+    match &x.kind {
+        ExprKind::Pair(k, v) => Some((k, v)),
+        ExprKind::Tuple(t) if t.len() == 2 => Some((&t[0], &t[1])),
+        _ => None,
+    }
+}
+
 fn imported_names(tree: &UseTree, prefix: &[String], out: &mut Vec<(String, Vec<String>)>) {
     match tree {
         UseTree::Path { segments, alias } => {

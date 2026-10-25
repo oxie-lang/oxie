@@ -1266,7 +1266,7 @@ fn list_op_on_iterator(d: &mut MappedDiag, sources: &Sources, method: &str, ty: 
     // receiver of the chain, an iterator too
     d.secondary.retain(|s| !s.text.starts_with(&format!("method `{}` is available on", method)));
     d.notes.push(help(&format!(
-        "`{m}()` is one of Oxie's list operations: lists, arrays and slices have it, but `{ty}` is an iterator. Call it on the list (`xs.{m}()` rather than `xs.iter().{m}()`), or collect the iterator into a list first (`.collect::<Vec<_>>().{m}()`).",
+        "`{m}()` is one of Oxie's list operations: lists, arrays and slices have it, but `{ty}` is an iterator. Call it on the list (`xs.{m}()` rather than `xs.iter().{m}()`), or collect the iterator into a list first (`.to_list().{m}()`).",
         m = method,
         ty = ty
     )));
@@ -1299,7 +1299,7 @@ fn list_op_on_iterator(d: &mut MappedDiag, sources: &Sources, method: &str, ty: 
         // a list collected from it is a temporary, which the operations that return a reference
         // into the list would outlive
         _ if values_iterator(ty) && !["find", "find_last", "max_by_key", "min_by_key"].contains(&method) => {
-            d.fixes.push(Fix { title: "collect the iterator into a list first".into(), edits: vec![span_edit(src, Span::new(end as usize, end as usize), ".collect::<Vec<_>>()")] });
+            d.fixes.push(Fix { title: "collect the iterator into a list first".into(), edits: vec![span_edit(src, Span::new(end as usize, end as usize), ".to_list()")] });
         }
         _ => {}
     }

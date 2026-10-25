@@ -124,7 +124,8 @@ struct Parsed {
 pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
     let mut parsed: Vec<Parsed> = Vec::new();
     for input in inputs {
-        let (file, diags) = parser::parse_file(&input.text);
+        let (mut file, diags) = parser::parse_file(&input.text);
+        crate::lists::grow_lists(&mut file.items);
         let (module, is_root) = module_of(&input.rel_path);
         parsed.push(Parsed { input, module, is_root, file, diags });
     }
@@ -134,8 +135,12 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         parsed[i].diags.push(d);
     }
     sema::auto_type_lifetimes(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>());
-    let param_notes = crate::params::borrow_params(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>());
     let has_lib = parsed.iter().any(|p| p.is_root && p.input.rel_path.file_stem().is_some_and(|s| s == "lib"));
+    // in a program (an Oxie root without a library) no other crate calls `pub` items, so they lend
+    // their parameters too
+    let has_root = parsed.iter().any(|p| p.is_root);
+    let lend_pub = has_root && !has_lib;
+    let param_notes = crate::params::borrow_params(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>(), lend_pub);
     let collect = |parsed: &[Parsed]| {
         let units: Vec<SourceUnit> = parsed.iter().map(|p| SourceUnit { module: p.module.clone(), file: &p.file }).collect();
         sema::collect(&units, &opts.crate_name, opts.extern_crates.clone(), has_lib)
@@ -144,11 +149,27 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
     // what takes the receivers: methods that take only the fields they use, and class and `Box`
     // parameters to lend. Then sema again, for the new signatures.
     let field_notes = crate::fields::take_fields(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
-    let class_notes = crate::params::borrow_class_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
+    let class_notes = crate::params::borrow_class_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k, lend_pub);
     if !field_notes.is_empty() || class_notes.iter().any(|n| n.borrowed) {
         k = collect(&parsed);
     }
-    let param_notes: Vec<crate::params::ParamNote> = param_notes.into_iter().chain(field_notes).chain(class_notes).collect();
+    let mut param_notes: Vec<crate::params::ParamNote> = param_notes.into_iter().chain(field_notes).chain(class_notes).collect();
+    // methods lend theirs where every call that may reach them is one the lowering resolves, so
+    // it writes the `&`: a dry run of the lowering names the methods called otherwise. Not in a
+    // Rust crate with Oxie modules, whose Rust code may call them too.
+    if has_root {
+        let mut unresolved = HashSet::new();
+        for p in &parsed {
+            let mut l = Lowerer::new(&k, p.module.clone(), p.is_root);
+            l.lower_file(&p.file);
+            unresolved.extend(l.unresolved);
+        }
+        let notes = crate::params::borrow_method_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k, &unresolved, lend_pub);
+        if notes.iter().any(|n| n.borrowed) {
+            k = collect(&parsed);
+        }
+        param_notes.extend(notes);
+    }
 
     let mut out = Output::default();
     // module tree: path -> generated file
@@ -402,7 +423,8 @@ mod tests {
         // the method shares the name of the function whose parameter is lent, but keeps its own
         let src = "fun describe(t: String): usize = t.len()\nclass Shelf(var items: Vec<String> = vec[]) {\n    fun describe(t: String) { items.push(t) }\n}\n";
         let ds = decisions(src);
-        assert_eq!(ds.iter().filter(|(about, ..)| about.starts_with("t:")).count(), 1, "{ds:?}");
+        let about_t: Vec<_> = ds.iter().filter(|(about, ..)| about.starts_with("t:")).map(|(_, what, why)| (what.as_str(), why.as_str())).collect();
+        assert_eq!(about_t, [("&str", "it only reads `t`"), ("owned", "it passes `t` to `.push()`")], "{ds:?}");
         assert!(ds.contains(&("describe".into(), "&mut self".into(), "it calls `items.push()`".into())), "{ds:?}");
     }
 

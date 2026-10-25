@@ -1,11 +1,11 @@
 /// Conway's Game of Life on a wrapping grid.
-class Grid(width: usize, height: usize, cells: Vec<bool>) {
+class Grid(width: usize, height: usize, cells: [bool]) {
     companion object {
-        fun parse(pattern: &str): Grid {
-            val lines: Vec<&str> = pattern.lines().map { it.trim() }.filter { !it.is_empty() }.collect()
+        fun parse(pattern: String): Grid {
+            val lines = pattern.lines().map { it.trim() }.filter { !it.is_empty() }.to_list()
             val height = lines.len()
             val width = lines[0].len()
-            val cells = lines.iter().flat_map { it.chars().map { c -> c == '#' } }.collect()
+            val cells = lines.iter().flat_map { it.chars().map { c -> c == '#' } }.to_list()
             Grid(width, height, cells)
         }
     }

@@ -1,5 +1,6 @@
 // A `String` or `Vec<T>` parameter that a function only reads becomes `&str` / `&[T]`, so callers
-// keep their values. Functions that keep the value, `pub` ones and ones used as values are unchanged.
+// keep their values. Functions that keep the value and ones used as values are unchanged; `pub` ones
+// are lent too, since no other crate calls a program's functions (a library's keep their types).
 
 fun greet(name: String) = println("hi $name (${name.len()})")
 fun shout(name: String): String = name.to_uppercase()

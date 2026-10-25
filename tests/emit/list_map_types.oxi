@@ -1,0 +1,28 @@
+// `[T]` is a `Vec<T>` (a slice behind `&`), `[K: V]` std's `HashMap`; literals take the
+// declared type, and methods lend what they only read.
+class Library {
+    var shelves: [String: [String]] = [:]
+    var log: [String] = []
+
+    fun add(shelf: String, title: String) {
+        if (shelf !in shelves) shelves[shelf.clone()] = []
+        shelves.get_mut(&shelf).unwrap().push(title)
+    }
+
+    fun count(shelf: String): usize = shelves.get(&shelf).map { it.len() }.unwrap_or(0)
+
+    fun label(shelf: String): String = "shelf ${shelf.to_uppercase()}"
+}
+
+fun longest(titles: &[String]): usize = titles.iter().map { it.len() }.max().unwrap_or(0)
+
+fun main() {
+    var lib = Library()
+    lib.add("a".to_string(), "Dune".to_string())
+    val titles: [String] = ["Emma", "Ulysses"]
+    var seen = [1, 2]
+    seen.push(3)
+    val sizes = titles.iter().map { it.len() }.to_list()
+    val shelf = "a".to_string()
+    println("${lib.count(shelf.clone())} ${lib.label(shelf)} $shelf ${longest(titles)} ${seen:?} ${sizes:?}")
+}

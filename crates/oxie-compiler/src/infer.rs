@@ -187,6 +187,7 @@ impl<'a> Lowerer<'a> {
                 }
                 match name.as_str() {
                     "len" | "count" | "capacity" => Some(ty("usize")),
+                    "to_list" => Some(generic("Vec", 1)),
                     "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "join" | "concat" | "replace" | "trim_string" => Some(ty("String")),
                     "is_empty" | "contains" | "contains_key" | "starts_with" | "ends_with" | "is_some" | "is_none" | "is_ok" | "is_err" | "any" | "all"
                     | "is_alphabetic" | "is_numeric" | "is_alphanumeric" | "is_whitespace" | "is_digit" | "eq" | "ne" | "is_nan" => Some(ty("bool")),
@@ -246,7 +247,7 @@ impl<'a> Lowerer<'a> {
             }
             Array(items) if !items.is_empty() => Some(Type::Array(Box::new(self.infer_type(&items[0])?), items.len().to_string())),
             // only the collection is known (`for` loops over it borrow it when it's used afterwards)
-            MapLit(items) if !items.is_empty() => Some(generic("HashMap", 2)),
+            MapLit(_) => Some(generic("HashMap", 2)),
             SetLit(items) if !items.is_empty() => Some(generic("HashSet", 1)),
             _ => None,
         }
