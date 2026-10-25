@@ -1,0 +1,12 @@
+// A `when` that misses cases points at `else ->`, in Oxie's spelling of the cases.
+enum Dir { Up, Down, Left }
+
+fun main() {
+    val d = Dir.Up
+    when (d) {
+    // error: 6: this `when` doesn't handle `Dir.Left`
+    // error: 6: or an `else ->` arm for all of them
+        Dir.Up -> println("up")
+        Dir.Down -> println("down")
+    }
+}

@@ -1,0 +1,16 @@
+// Kotlin's names of the number types and their limits work as paths
+fun main() {
+    println(Int.MAX)
+    println(Long.MAX_VALUE)
+    println(Int.MIN_VALUE)
+    println(Byte.MAX)
+    println(Double.MAX > 1.0e300)
+    println(Double.POSITIVE_INFINITY > Double.MAX)
+    println(Double.NaN.is_nan())
+    var smallest = Int.MAX_VALUE
+    for (x in vec[5, 3, 8]) {
+        smallest = smallest.min(x)
+    }
+    println(smallest)
+    println(Int.from_str_radix("ff", 16).unwrap())
+}

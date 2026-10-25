@@ -26,6 +26,8 @@ struct Line {
 /// Splits source into lines of code and verbatim (string/comment) segments.
 fn split(src: &str) -> Vec<Line> {
     let chars: Vec<char> = src.chars().collect();
+    // byte offset of each char (and of the end)
+    let byte_of: Vec<usize> = src.char_indices().map(|(b, _)| b).chain([src.len()]).collect();
     let mut lines = Vec::new();
     let mut cur = Line { raw: false, segs: Vec::new() };
     let mut buf = String::new();
@@ -35,7 +37,8 @@ fn split(src: &str) -> Vec<Line> {
     #[derive(PartialEq)]
     enum St {
         Code,
-        Str { interp_depth: Vec<usize> },
+        /// `until`: inside `${ }`, the char index of its closing `}`
+        Str { until: Option<usize> },
         Triple,
         Raw { hashes: usize },
         Char,
@@ -43,7 +46,6 @@ fn split(src: &str) -> Vec<Line> {
         Block { depth: usize },
     }
     let mut st = St::Code;
-    // stack of brace depth inside `${ }` interpolations for normal strings
     let push = |cur: &mut Line, buf: &mut String, kind: Seg| {
         if !buf.is_empty() {
             cur.segs.push((kind, std::mem::take(buf)));
@@ -97,7 +99,7 @@ fn split(src: &str) -> Vec<Line> {
                             continue;
                         }
                     }
-                    start_verbatim(St::Str { interp_depth: Vec::new() }, 1, &mut cur, &mut buf, &mut kind, &mut st, &mut i);
+                    start_verbatim(St::Str { until: None }, 1, &mut cur, &mut buf, &mut kind, &mut st, &mut i);
                 } else if c == '\'' {
                     // char literal vs lifetime
                     let is_char = i + 2 < chars.len() && (chars[i + 1] == '\\' || chars[i + 2] == '\'');
@@ -112,19 +114,13 @@ fn split(src: &str) -> Vec<Line> {
                     i += 1;
                 }
             }
-            St::Str { interp_depth } => {
+            St::Str { until } => {
                 buf.push(c);
                 i += 1;
-                if let Some(d) = interp_depth.last_mut() {
-                    // inside ${ ... }: track braces (nested strings are rare; treat simply)
-                    if c == '{' {
-                        *d += 1;
-                    } else if c == '}' {
-                        if *d == 0 {
-                            interp_depth.pop();
-                        } else {
-                            *d -= 1;
-                        }
+                if let Some(end) = *until {
+                    // inside ${ ... }: kept verbatim up to its closing brace
+                    if i > end {
+                        *until = None;
                     }
                     continue;
                 }
@@ -134,7 +130,9 @@ fn split(src: &str) -> Vec<Line> {
                 } else if c == '$' && i < chars.len() && chars[i] == '{' {
                     buf.push('{');
                     i += 1;
-                    interp_depth.push(0);
+                    // the closing brace, skipping braces in nested string and char literals
+                    let end = lexer::interp_end(src, byte_of[i]).map(|b| byte_of.partition_point(|&x| x < b));
+                    *until = Some(end.unwrap_or(chars.len()));
                 } else if c == '"' {
                     push(&mut cur, &mut buf, kind);
                     kind = Seg::Code;
@@ -380,7 +378,11 @@ pub fn format_checked(src: &str) -> Result<String, Vec<crate::diag::Diag>> {
     if !errors.is_empty() {
         return Err(errors);
     }
-    let out = format_inner(src);
+    let mut out = format_inner(src);
+    // keep Windows line endings
+    if src.find('\n').is_some_and(|i| src[..i].ends_with('\r')) {
+        out = out.replace('\n', "\r\n");
+    }
     Ok(if same_tokens(src, &out) { out } else { src.to_string() })
 }
 
@@ -614,6 +616,19 @@ mod tests {
     fn trailing_spaces_after_doc_comments() {
         let src = "/// Doc.   \nfun f() {\nval x = 1\n}\n";
         assert_eq!(format_source(src), "/// Doc.\nfun f() {\n    val x = 1\n}\n");
+    }
+
+    #[test]
+    fn literals_inside_interpolations() {
+        let src = "fun main() {\nval c = '{'\nprintln(\"${ if (c == '{') \"a\" else \"}\" }\")\nprintln(\"${s.replace('\"', \"x\")}\")\n  val x=1\n}\n";
+        let want = "fun main() {\n    val c = '{'\n    println(\"${ if (c == '{') \"a\" else \"}\" }\")\n    println(\"${s.replace('\"', \"x\")}\")\n    val x = 1\n}\n";
+        assert_eq!(format_source(src), want);
+    }
+
+    #[test]
+    fn keeps_crlf() {
+        let src = "fun main() {\r\nval x=1\r\n}\r\n";
+        assert_eq!(format_source(src), "fun main() {\r\n    val x = 1\r\n}\r\n");
     }
 
     #[test]

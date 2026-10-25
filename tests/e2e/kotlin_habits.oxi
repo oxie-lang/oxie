@@ -1,0 +1,45 @@
+// Kotlin habits that work: labels with `@`, text plus a number, print arguments after text,
+// brace-less do-while, typed destructuring, `f` float suffixes, line breaks after `as`/`in`
+fun main() {
+    outer@ for (i in 0..3) {
+        for (j in 0..3) {
+            if (j == 2) continue@outer
+            if (i == 2) break@outer
+            println("$i $j")
+        }
+    }
+    var k = 0
+    again@ while (k < 10) {
+        k += 1
+        if (k > 2) break@again
+    }
+    println(k)
+
+    val name = "n".to_string()
+    val n = 3
+    val c = 'x'
+    println(name + n)
+    println(name + c + n + "!")
+
+    println("total:", n)
+    println("pair", n, c)
+    println("$name has", n)
+
+    var x = 0
+    do x += 2 while (x < 5)
+    println(x)
+
+    val (a: Int, b: String) = (1, "b".to_string())
+    val (p, q: f64) = (true, 2.0)
+    println("$a $b $p $q")
+
+    val f = 1.5f
+    val g: f32 = 2F + f
+    println("$f $g")
+
+    val big = n as
+        i64
+    val inside = 2 in
+        vec[1, 2]
+    println("$big $inside")
+}

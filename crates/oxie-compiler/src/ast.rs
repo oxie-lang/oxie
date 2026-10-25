@@ -466,6 +466,8 @@ pub struct Expr {
 pub struct Arg {
     pub name: Option<String>,
     pub value: Expr,
+    /// A lambda written after the parentheses: `f(a) { .. }`
+    pub trailing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

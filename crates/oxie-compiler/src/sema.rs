@@ -499,6 +499,39 @@ pub struct SourceUnit<'a> {
 }
 
 pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<String>, has_lib: bool) -> Crate {
+    // classes and enums declared in function bodies count as types of their module, unless their
+    // name is declared elsewhere too
+    let mut top = HashSet::new();
+    for u in units {
+        declared_names(&u.file.items, &mut top);
+    }
+    let mut local: Vec<(Vec<String>, Vec<Item>)> = units
+        .iter()
+        .map(|u| {
+            let mut out = Vec::new();
+            local_types(&u.file.items, &mut out);
+            (u.module.clone(), out)
+        })
+        .collect();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (_, items) in &local {
+        let mut names = HashSet::new();
+        declared_names(items, &mut names);
+        for n in names {
+            *seen.entry(n).or_default() += 1;
+        }
+    }
+    for (_, items) in &mut local {
+        let own = |n: &str| seen.get(n) == Some(&1) && !top.contains(n);
+        items.retain(|it| match &it.kind {
+            ItemKind::Type(t) => own(&t.name),
+            ItemKind::Impl(i) => i.self_ty.last_name().is_some_and(own),
+            _ => false,
+        });
+    }
+    let files: Vec<(Vec<String>, File)> = local.into_iter().filter(|(_, items)| !items.is_empty()).map(|(m, items)| (m, File { inner_docs: Vec::new(), inner_attrs: Vec::new(), items })).collect();
+    let all: Vec<SourceUnit> = units.iter().map(|u| SourceUnit { module: u.module.clone(), file: u.file }).chain(files.iter().map(|(m, f)| SourceUnit { module: m.clone(), file: f })).collect();
+    let units = &all[..];
     let mut k = Crate { crate_name: crate_name.to_string(), extern_crates, has_lib, ..Default::default() };
     for u in units {
         if let Some(first) = u.module.first() {
@@ -547,6 +580,57 @@ fn collect_caps_types(k: &mut Crate, items: &[Item]) {
             k.caps_types.insert(name.clone());
         }
     }
+}
+
+/// The names of the types, interfaces and functions `items` declare, in modules too.
+fn declared_names(items: &[Item], out: &mut HashSet<String>) {
+    for it in items {
+        match &it.kind {
+            ItemKind::Type(t) => {
+                out.insert(t.name.clone());
+                declared_names(&t.members, out);
+            }
+            ItemKind::Trait(t) => {
+                out.insert(t.name.clone());
+            }
+            ItemKind::Mod { items, .. } => declared_names(items, out),
+            _ => {}
+        }
+    }
+}
+
+/// The classes, enums and `impl` blocks declared inside function bodies of `items`.
+fn local_types(items: &[Item], out: &mut Vec<Item>) {
+    fn block(b: &Block, out: &mut Vec<Item>) {
+        for s in &b.stmts {
+            if let Stmt::Item(i) = s {
+                if matches!(i.0.kind, ItemKind::Type(_) | ItemKind::Impl(_)) {
+                    out.push(i.0.clone());
+                }
+                local_types(std::slice::from_ref(&i.0), out);
+            }
+        }
+    }
+    for it in items {
+        match &it.kind {
+            ItemKind::Fun(FunDecl { body: Some(FunBody::Block(b)), .. }) => block(b, out),
+            ItemKind::Test(t) => block(&t.body, out),
+            ItemKind::Type(t) => local_types(&t.members, out),
+            ItemKind::Trait(t) => local_types(&t.members, out),
+            ItemKind::Impl(i) => local_types(&i.members, out),
+            ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => local_types(items, out),
+            _ => {}
+        }
+    }
+    crate::visit::walk_items(items, &mut |e| {
+        for it in crate::fields::local_items(e) {
+            if matches!(it.kind, ItemKind::Type(_) | ItemKind::Impl(_)) {
+                out.push(it.clone());
+            }
+            local_types(std::slice::from_ref(it), out);
+        }
+        true
+    });
 }
 
 /// Generics made only of lifetimes (or none), which don't stand in the way of derives.

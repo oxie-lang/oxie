@@ -1,0 +1,26 @@
+fun main() {
+    val list = vec["go".to_string(), "stop".to_string()]
+    for (s in &list) {
+        when (s) {
+            "go" -> println("go!")
+            else -> println("?")
+        }
+    }
+    for (s in list.iter()) {
+        when (s) {
+            "stop" -> println("stop!")
+            else -> println("?")
+        }
+    }
+    val t = ("a".to_string(), 1)
+    when (t.0) {
+        "a" -> println("a")
+        else -> {}
+    }
+    val opt: String? = Some("hi".to_string())
+    when (opt) {
+        Some("hi") -> println("hi!")
+        Some(other) -> println("other $other")
+        null -> println("none")
+    }
+}

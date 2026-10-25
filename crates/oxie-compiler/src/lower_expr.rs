@@ -249,6 +249,93 @@ fn replace_moved(e: &mut Expr, moved: &[(Span, String)]) {
     }
 }
 
+/// `var acc = ""` that a later statement appends to (`acc += x`) starts as `String::from("")`:
+/// a `&str` can't grow, so the variable could never compile as one.
+fn appended_text_var(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
+    let Stmt::Let { pat: pat @ Pat::Ident { name, mutable: true, sub: None, .. }, ty: None, init: Some(init @ Expr { kind: ExprKind::Str(_), .. }), else_: None, span, .. } = s else { return None };
+    let mut appended = false;
+    for s in rest {
+        visit::walk_stmt(s, &mut |e| {
+            if let ExprKind::Assign(Some(BinOp::Add), lhs, _) = &e.kind {
+                appended |= lhs.ident() == Some(name.as_str());
+            }
+            !appended
+        });
+    }
+    if !appended {
+        return None;
+    }
+    let sp = init.span;
+    let string = Expr::new(ExprKind::Path { segs: vec!["String".into()], generics: None, global: false }, sp);
+    let from = ExprKind::MethodCall { recv: Box::new(string), name: "from".into(), generics: None, args: vec![Arg { name: None, value: init.clone(), trailing: false }], safe: false };
+    Some(Stmt::Let { pat: pat.clone(), mutable: false, ty: None, init: Some(Expr::new(from, sp)), else_: None, span: *span })
+}
+
+/// `var (x, y) = ...` whose `y` never changes afterwards destructures to `let (mut x, y)`: Rust
+/// would warn about the `mut` of `y`, which Oxie can't drop on its own.
+fn unchanged_parts(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
+    let Stmt::Let { pat, .. } = s else { return None };
+    if matches!(pat, Pat::Ident { .. }) {
+        return None;
+    }
+    let mut names = Vec::new();
+    pat.bindings(&mut names);
+    // a name each later statement may change: assigned to, borrowed with `&mut`, a method
+    // called on it, passed to a call (which may borrow it mutably), looped over or in Rust code
+    fn root(e: &Expr) -> Option<&str> {
+        match &e.kind {
+            ExprKind::Field { recv: r, .. } | ExprKind::Index(r, _) | ExprKind::Paren(r) | ExprKind::Unary(UnOp::Deref, r) => root(r),
+            _ => e.ident(),
+        }
+    }
+    let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in rest {
+        visit::walk_stmt(s, &mut |e| {
+            let mut roots = Vec::new();
+            match &e.kind {
+                ExprKind::Assign(_, lhs, _) | ExprKind::Unary(UnOp::RefMut, lhs) => roots.push(root(lhs)),
+                ExprKind::MethodCall { recv, args, .. } => roots.extend(std::iter::once(root(recv)).chain(args.iter().map(|a| root(&a.value)))),
+                ExprKind::Call { args, .. } => roots.extend(args.iter().map(|a| root(&a.value))),
+                ExprKind::For { iter, .. } => roots.push(root(iter)),
+                ExprKind::Macro { text, .. } | ExprKind::Raw(text) => changed.extend(names.iter().filter(|n| crate::sema::contains_word(text, n)).cloned()),
+                _ => {}
+            }
+            changed.extend(roots.into_iter().flatten().map(str::to_string));
+            true
+        });
+    }
+    fn keep(p: &mut Pat, changed: &std::collections::HashSet<String>, any: &mut bool) {
+        match p {
+            Pat::Ident { name, mutable, sub, .. } => {
+                if *mutable && !changed.contains(name.as_str()) {
+                    *mutable = false;
+                    *any = true;
+                }
+                if let Some(s) = sub {
+                    keep(s, changed, any);
+                }
+            }
+            Pat::Tuple(v) | Pat::Slice(v) => v.iter_mut().for_each(|p| keep(p, changed, any)),
+            Pat::TupleStruct { elems, .. } => elems.iter_mut().for_each(|p| keep(p, changed, any)),
+            Pat::Struct { fields, .. } => fields.iter_mut().filter_map(|(_, p)| p.as_mut()).for_each(|p| keep(p, changed, any)),
+            Pat::Typed { pat, .. } => keep(pat, changed, any),
+            _ => {}
+        }
+    }
+    let mut s = s.clone();
+    let Stmt::Let { pat, .. } = &mut s else { return None };
+    let mut any = false;
+    keep(pat, &changed, &mut any);
+    any.then_some(s)
+}
+
+/// See `text_when`.
+enum TextWhen {
+    Deref,
+    AsStr,
+    AsDeref,
+}
+
 impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ statements
 
@@ -280,6 +367,8 @@ impl<'a> Lowerer<'a> {
                     self.e.mark(expr.span);
                     self.tail_moving_args(expr, tail.unwrap());
                 }
+            } else if let Some(s) = appended_text_var(s, &stmts[i + 1..]).or_else(|| unchanged_parts(s, &stmts[i + 1..])) {
+                self.stmt(&s);
             } else {
                 // `if (x == null) return` unwraps `x` only for a rest of the block that uses it
                 if let Stmt::Expr { expr, .. } = s {
@@ -924,6 +1013,14 @@ impl<'a> Lowerer<'a> {
 
     /// Emits `e` converted to `ty` where Oxie allows implicit conversion.
     pub(crate) fn coerce(&mut self, e: &Expr, ty: &Type, pos: TyPos) {
+        // an alias of a function type is a boxed function wherever it is used
+        if let Type::Path { segs, .. } = ty {
+            if let [seg] = &segs[..] {
+                if let Some(f) = self.fn_aliases.get(&seg.name).filter(|_| seg.generics.is_none()).cloned() {
+                    return self.coerce(e, &f, TyPos::Field);
+                }
+            }
+        }
         // a block ending in a lambda (`{ [a] -> ... }`) for an `impl Fn` parameter stays unboxed
         let unboxed_fn = matches!(ty, Type::Fn { .. }) && !matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local);
         if matches!(e.kind, ExprKind::If { .. } | ExprKind::When { .. } | ExprKind::Block(_) | ExprKind::LabeledBlock { .. }) && !matches!(&e.kind, ExprKind::If { else_: None, .. }) && !unboxed_fn {
@@ -1841,8 +1938,8 @@ impl<'a> Lowerer<'a> {
                 self.e.w(&format!(" as {}", tt));
             }
             Elvis(l, r) => self.elvis(l, r),
-            In { item, coll, negated } if matches!(strip_paren(coll).kind, Range { .. }) => {
-                let Range { start, end, inclusive } = &strip_paren(coll).kind else { unreachable!() };
+            In { item, coll, negated } if matches!(range_in(coll).kind, Range { .. }) => {
+                let Range { start, end, inclusive } = &range_in(coll).kind else { unreachable!() };
                 self.in_range(item, start.as_deref(), end.as_deref(), *inclusive, *negated);
             }
             In { item, coll, negated } => {
@@ -2024,12 +2121,13 @@ impl<'a> Lowerer<'a> {
                     (Pat::Ident { by_ref: false, sub: None, .. }, Some(copy)) => {
                         self.elem_type(iter).map(|t| if copy && !writes_elements { t } else { Type::Ref { lifetime: None, mutable: writes_elements, inner: Box::new(t) } })
                     }
-                    (Pat::Ident { by_ref: false, sub: None, .. }, None) if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
-                    // `for (x in xs.iter())`: references to the elements
+                    // `for (s in &names)` and `names.iter()`: references to the elements
                     (Pat::Ident { by_ref: false, sub: None, .. }, None) => match &strip_paren(iter).kind {
-                        MethodCall { recv, name, args, .. } if args.is_empty() && name == "iter" => {
-                            self.elem_type(recv).map(|t| Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) })
+                        Unary(op @ (UnOp::Ref | UnOp::RefMut), x) => self.elem_type(x).map(|t| Type::Ref { lifetime: None, mutable: *op == UnOp::RefMut, inner: Box::new(t) }),
+                        MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "iter" | "iter_mut") => {
+                            self.elem_type(recv).map(|t| Type::Ref { lifetime: None, mutable: name == "iter_mut", inner: Box::new(t) })
                         }
+                        _ if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
                         _ => None,
                     },
                     _ => None,
@@ -2835,6 +2933,10 @@ impl<'a> Lowerer<'a> {
                 if n == "Self" || crate::lower::PRIMITIVES.contains(&n.as_str()) {
                     return Some((segs.clone(), PathKind::Type));
                 }
+                // Kotlin's names of the number types: `Int.MAX` is `i32::MAX`
+                if let Some(a) = crate::lower::kotlin_alias(n).filter(|a| *a != "()" && !self.k.is_user_type(n)) {
+                    return Some((vec![a.to_string()], PathKind::Type));
+                }
                 if self.k.is_type_name(n) {
                     // a unit variant is a value with members; `Extension.instantiate(..)` with a
                     // tuple variant `Extension(..)` goes through a type of that name
@@ -2882,7 +2984,17 @@ impl<'a> Lowerer<'a> {
                         Some((p, kind))
                     }
                     PathKind::Type => {
-                        p.push(name.clone());
+                        // and Kotlin's names of their constants: `Long.MAX_VALUE` is `i64::MAX`
+                        let primitive = p.len() == 1 && crate::lower::PRIMITIVES.contains(&p[0].as_str());
+                        let name = match name.as_str() {
+                            "MAX_VALUE" if primitive => "MAX",
+                            "MIN_VALUE" if primitive => "MIN",
+                            "POSITIVE_INFINITY" if primitive => "INFINITY",
+                            "NEGATIVE_INFINITY" if primitive => "NEG_INFINITY",
+                            "NaN" if primitive => "NAN",
+                            n => n,
+                        };
+                        p.push(name.to_string());
                         Some((p, PathKind::Value))
                     }
                     PathKind::Value => None,
@@ -3359,12 +3471,15 @@ impl<'a> Lowerer<'a> {
         let mut next = 0;
         // a context the callee doesn't use is named `_cx`, and still passed as `cx`
         let named = |p: &ParamInfo, n: &str| p.name.as_deref() == Some(n) || p.context.is_some() && p.name.as_deref().and_then(|x| x.strip_prefix('_')) == Some(n);
+        // a trailing lambda goes to the last parameter, as in Kotlin, past any with defaults
+        let last = params.iter().rposition(|p| p.context.is_none() && p.name.as_deref() != Some("__this"));
         for a in args {
             match &a.name {
                 Some(n) => match params.iter().position(|p| named(p, n)) {
                     Some(i) => slots[i] = Some(a.value.clone()),
                     None => self.error(a.value.span, format!("no parameter named `{}`", n)),
                 },
+                None if a.trailing && last.is_some_and(|i| i >= next && slots[i].is_none()) => slots[last.unwrap()] = Some(a.value.clone()),
                 None => {
                     while next < slots.len() && slots[next].is_some() {
                         next += 1;
@@ -3445,7 +3560,7 @@ impl<'a> Lowerer<'a> {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
             params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false });
-            args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span) });
+            args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span), trailing: false });
         }
         (args, params)
     }
@@ -3620,6 +3735,23 @@ impl<'a> Lowerer<'a> {
         if !rest.is_empty() {
             if lead > 0 {
                 self.e.w(", ");
+            }
+            // `println("total:", n)`: text without `{}` placeholders is no format string, so the
+            // values are printed after it, separated by spaces, as without the text
+            let print = matches!(name, "println" | "print" | "eprintln" | "eprint");
+            let text: Option<Vec<TemplatePart>> = match &rest[0].value.kind {
+                ExprKind::Str(parts) => Some(vec![TemplatePart::Lit(crate::lower::lit_parts(parts))]),
+                ExprKind::Template(parts) => Some(parts.clone()),
+                _ => None,
+            };
+            if let Some(mut parts) = text.filter(|ps| print && rest.len() > 1 && !ps.iter().any(|p| matches!(p, TemplatePart::Lit(s) if s.contains('{')))) {
+                for a in &rest[1..] {
+                    parts.push(TemplatePart::Lit(" ".into()));
+                    parts.push(TemplatePart::Expr(a.value.clone(), None));
+                }
+                self.format_args(&parts);
+                self.e.w(")");
+                return;
             }
             match &rest[0].value.kind {
                 ExprKind::Template(parts) => {
@@ -4429,7 +4561,12 @@ impl<'a> Lowerer<'a> {
             return false;
         }
         let borrowed_text = |o: &Expr| matches!(self.infer_type(o), Some(Type::Ref { inner, .. }) if matches!(inner.single_name(), Some("str" | "String")));
-        ops.iter().any(|o| is_string_lit(o)) || borrowed_text(ops[0]) || ops[1..].iter().any(|o| self.is_owned_string(o))
+        // text plus a number or char (`name + n`) puts it in the text, as a template would
+        let number_or_char = |o: &Expr| self.infer_type(o).is_some_and(|t| t.single_name().is_some_and(|n| n == "char" || crate::lower::PRIMITIVES.contains(&n) && !matches!(n, "bool" | "str")));
+        ops.iter().any(|o| is_string_lit(o))
+            || borrowed_text(ops[0])
+            || ops[1..].iter().any(|o| self.is_owned_string(o))
+            || self.is_owned_string(ops[0]) && ops[1..].iter().any(|o| number_or_char(o))
     }
 
     /// Is `e` known to be an owned `String`?
@@ -4697,8 +4834,9 @@ impl<'a> Lowerer<'a> {
         self.e.w("}");
     }
 
-    /// A `when` on a `String` (`Some(false)`) or `&String` (`Some(true)`) with a string literal arm.
-    fn text_when(&self, subject: &Expr, arms: &[WhenArm]) -> Option<bool> {
+    /// How a `when` with string literal arms reaches the `&str` its literals have: `&*s` for a
+    /// `String`, `s.as_str()` for a `&String`, `s.as_deref()` for a `String?` with `Some("..")` arms.
+    fn text_when(&self, subject: &Expr, arms: &[WhenArm]) -> Option<TextWhen> {
         fn text(p: &Pat) -> bool {
             match p {
                 Pat::Lit(e) => matches!(e.kind, ExprKind::Str(_) | ExprKind::RawStr(_)),
@@ -4706,14 +4844,27 @@ impl<'a> Lowerer<'a> {
                 _ => false,
             }
         }
-        if !arms.iter().any(|a| a.conds.iter().any(|c| matches!(c, WhenCond::Pat(p) if text(p)))) {
+        fn some_text(p: &Pat) -> bool {
+            match p {
+                Pat::TupleStruct { path, elems, .. } => path.last().is_some_and(|n| n == "Some") && elems.len() == 1 && text(&elems[0]),
+                Pat::Or(ps) => ps.iter().any(some_text),
+                _ => false,
+            }
+        }
+        let has = |f: fn(&Pat) -> bool| arms.iter().any(|a| a.conds.iter().any(|c| matches!(c, WhenCond::Pat(p) if f(p))));
+        let is_string = |t: &Type| t.single_name() == Some("String");
+        let t = self.infer_type(subject)?;
+        let owned = match &t {
+            Type::Ref { inner, .. } => &**inner,
+            t => t,
+        };
+        if has(some_text) {
+            return matches!(owned, Type::Option(x) if is_string(x)).then_some(TextWhen::AsDeref);
+        }
+        if !has(text) || !is_string(owned) {
             return None;
         }
-        let is_string = |t: &Type| t.single_name() == Some("String");
-        match self.infer_type(subject)? {
-            Type::Ref { inner, .. } => is_string(&inner).then_some(true),
-            t => is_string(&t).then_some(false),
-        }
+        Some(if matches!(t, Type::Ref { .. }) { TextWhen::AsStr } else { TextWhen::Deref })
     }
 
     fn when_expr(&mut self, subject: Option<&Expr>, arms: &[WhenArm], rust_match: bool, mode: Option<&Target>, span: Span) {
@@ -4743,12 +4894,17 @@ impl<'a> Lowerer<'a> {
                 // a `&String`
                 let text_kind = self.text_when(s, arms);
                 match text_kind {
-                    Some(true) => {
+                    Some(TextWhen::AsStr) => {
                         self.expr(s, P_POSTFIX);
                         self.e.w(".as_str()");
                         self.e.decide(s.span, ".as_str()", "the arms compare text", None);
                     }
-                    Some(false) => {
+                    Some(TextWhen::AsDeref) => {
+                        self.expr(s, P_POSTFIX);
+                        self.e.w(".as_deref()");
+                        self.e.decide(s.span, ".as_deref()", "the arms compare optional text", None);
+                    }
+                    Some(TextWhen::Deref) => {
                         self.e.w("&*");
                         self.expr(s, P_UNARY);
                         self.e.decide(s.span, "&*", "the arms compare text", None);
@@ -4800,7 +4956,7 @@ impl<'a> Lowerer<'a> {
                             }
                             match c {
                                 WhenCond::In { expr, negated } => {
-                                    if let ExprKind::Range { start, end, inclusive } = &strip_paren(expr).kind {
+                                    if let ExprKind::Range { start, end, inclusive } = &range_in(expr).kind {
                                         let item = Expr::new(ExprKind::Unary(UnOp::Deref, Box::new(Expr::new(ExprKind::Path { segs: vec![w.clone()], generics: None, global: false }, expr.span))), expr.span);
                                         self.push_scope();
                                         self.bind_name(&w, None);
@@ -4820,8 +4976,8 @@ impl<'a> Lowerer<'a> {
                                             }
                                         } else {
                                             let subject_ty = match text_kind {
-                                                Some(_) => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(Type::simple("str")) }),
-                                                None => subject.and_then(|s| self.infer_type(s)),
+                                                Some(TextWhen::AsStr | TextWhen::Deref) => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(Type::simple("str")) }),
+                                                _ => subject.and_then(|s| self.infer_type(s)),
                                             };
                                             match subject_ty {
                                                 Some(t) => {
@@ -5299,6 +5455,14 @@ fn strip_paren(e: &Expr) -> &Expr {
     match &e.kind {
         ExprKind::Paren(x) => strip_paren(x),
         _ => e,
+    }
+}
+
+/// The range an `in` checks: `10 downTo 0` is `(0..=10).rev()`, which holds the same numbers.
+fn range_in(e: &Expr) -> &Expr {
+    match &strip_paren(e).kind {
+        ExprKind::MethodCall { recv, name, args, safe: false, .. } if name == "rev" && args.is_empty() && matches!(strip_paren(recv).kind, ExprKind::Range { .. }) => strip_paren(recv),
+        _ => strip_paren(e),
     }
 }
 

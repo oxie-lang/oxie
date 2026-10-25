@@ -569,7 +569,7 @@ fn walk_all(items: &[Item], f: &mut dyn FnMut(&Expr) -> bool) {
 }
 
 /// The items declared in the blocks directly inside `e`.
-fn local_items(e: &Expr) -> Vec<&Item> {
+pub(crate) fn local_items(e: &Expr) -> Vec<&Item> {
     let blocks: Vec<&Block> = match &e.kind {
         ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::ConstBlock(b) | ExprKind::LabeledBlock { block: b, .. } | ExprKind::Loop { body: b, .. } | ExprKind::Async { block: b, .. } | ExprKind::DoWhile { body: b, .. } => vec![b],
         ExprKind::While { body, .. } | ExprKind::If { then: body, .. } | ExprKind::For { body, .. } => vec![body],
@@ -681,11 +681,11 @@ fn pass_fields_to(e: &mut Expr, s: &Split) -> bool {
     let mut new_args = Vec::new();
     for (p, slot) in s.params.iter().zip(slots) {
         let Some(value) = slot.or_else(|| p.default.clone()) else { return true };
-        new_args.push(Arg { name: None, value });
+        new_args.push(Arg { name: None, value, trailing: false });
     }
     for p in &s.fields {
         let this = Expr::new(ExprKind::SelfValue, e.span);
-        new_args.push(Arg { name: None, value: Expr::new(ExprKind::Field { recv: Box::new(this), name: p.name.clone(), safe: false }, e.span) });
+        new_args.push(Arg { name: None, value: Expr::new(ExprKind::Field { recv: Box::new(this), name: p.name.clone(), safe: false }, e.span), trailing: false });
     }
     let callee = Expr::new(ExprKind::Path { segs: vec![s.method.clone()], generics, global: false }, e.span);
     e.kind = ExprKind::Call { callee: Box::new(callee), args: new_args };

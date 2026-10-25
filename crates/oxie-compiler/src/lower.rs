@@ -125,7 +125,7 @@ fn operator_trait(name: &str) -> Option<(&'static str, &'static str, bool, bool)
     })
 }
 
-fn kotlin_alias(name: &str) -> Option<&'static str> {
+pub(crate) fn kotlin_alias(name: &str) -> Option<&'static str> {
     Some(match name {
         "Int" => "i32",
         "Long" => "i64",
@@ -304,6 +304,8 @@ pub struct Lowerer<'a> {
     pub(crate) local_funs: Vec<(String, Vec<sema::ParamInfo>)>,
     /// The type aliases this file declares at its top level.
     pub(crate) aliases: HashSet<String>,
+    /// The function types those aliases name (`typealias Handler = (i32) -> String`).
+    pub(crate) fn_aliases: HashMap<String, Type>,
     /// Names imported inside the blocks being lowered (`import nucleo_matcher::Config` in a
     /// function), with the paths they stand for.
     pub(crate) local_imports: Vec<(String, Vec<String>)>,
@@ -442,6 +444,7 @@ impl<'a> Lowerer<'a> {
             param_notes: HashMap::new(),
             local_funs: Vec::new(),
             aliases: HashSet::new(),
+            fn_aliases: HashMap::new(),
             local_imports: Vec::new(),
             impl_params: Vec::new(),
             in_trait_items: false,
@@ -569,6 +572,14 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.aliases = file.items.iter().filter_map(|it| if let ItemKind::TypeAlias { name, .. } = &it.kind { Some(name.clone()) } else { None }).collect();
+        self.fn_aliases = file
+            .items
+            .iter()
+            .filter_map(|it| match &it.kind {
+                ItemKind::TypeAlias { name, generics, ty: ty @ Type::Fn { .. } } if generics.params.is_empty() => Some((name.clone(), ty.clone())),
+                _ => None,
+            })
+            .collect();
         let mut inline = Vec::new();
         mods(&file.items, &mut inline);
         self.path_roots.extend(inline);
@@ -2273,7 +2284,7 @@ impl<'a> Lowerer<'a> {
             .fields
             .iter()
             .filter(|f| f.in_ctor && f.default.is_none())
-            .map(|f| Arg { name: Some(f.name.clone()), value: Expr::new(ExprKind::Raw("Default::default()".into()), span) })
+            .map(|f| Arg { name: Some(f.name.clone()), value: Expr::new(ExprKind::Raw("Default::default()".into()), span), trailing: false })
             .collect();
         let callee = Expr::new(ExprKind::Path { segs: vec![t.name.clone()], generics: None, global: false }, span);
         let call = Expr::new(ExprKind::Call { callee: Box::new(callee), args }, span);

@@ -1,0 +1,12 @@
+// Kotlin names of properties and list operations point at Oxie's.
+fun main() {
+    val xs = vec[1, 2]
+    val s = "abc".to_string()
+    println(xs.size)
+    // error: 5:16: the number of elements is the method `len()`
+    // error: 5: fix: use `len()`: `println(xs.len())`
+    println(s.length)
+    // error: 8: fix: use `len()`: `println(s.len())`
+    println(xs.joinToString(", "))
+    // error: 10: fix: use `join_to_string`: `println(xs.join_to_string(", "))`
+}

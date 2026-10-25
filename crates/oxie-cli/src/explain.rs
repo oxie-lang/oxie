@@ -15,6 +15,7 @@ use oxie_compiler::ast::{Block, Cond, Expr, ExprKind, File, FunBody, FunDecl, It
 use oxie_compiler::diag::Span;
 
 pub fn explain(d: &mut MappedDiag, sources: &Sources) {
+    hide_closure_paths(d);
     let Some(here) = sources.file(&d.file) else { return };
     let src = here.text.as_str();
     let lines = here.lines();
@@ -93,6 +94,14 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
             d.notes.retain(|n| !n.contains("does not implement"));
             d.notes.push(help("unwrap it first: inside a function that `throws`, `?` passes the error on (`total()? + 1`); elsewhere give a default with `?:` or handle both cases with `when (val r = ...) { Ok(v) -> ...; Err(e) -> ... }`."));
         }
+        "E0609" => no_field(d, &lines, &first),
+        "E0004" => {
+            let missing = d.message.strip_prefix("non-exhaustive patterns: ").map(oxie_terms).unwrap_or_default();
+            rewrite(d, format!("this `when` doesn't handle {}", missing.trim_end_matches(" not covered")));
+            d.label = d.label.take().map(|l| oxie_terms(&l));
+            d.notes.retain(|n| !n.contains("wildcard pattern"));
+            d.notes.push(help("add an arm for each case it doesn't handle, or an `else ->` arm for all of them."));
+        }
         // `filter { seen.insert(it) }`: the lambda's parameter is a reference into the iteration
         "E0521" if d.label.as_deref().is_some_and(|l| l.ends_with("escapes the closure body here")) => {
             let name = d.label.as_deref().and_then(|l| between(l, "`", "`")).unwrap_or_else(|| "it".to_string());
@@ -103,6 +112,11 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
         "E0283" if d.notes.iter().any(|n| n.contains("Option<_>: From<Option<")) => optional_already(d, &lines),
         // reported without a code
         _ if d.message.starts_with("future cannot be sent between threads safely") => thread_safety(d, sources, ""),
+        // `println("$x {}", 1)`: rustc's advice shows the generated format string
+        _ if (d.message.starts_with("argument never used") || d.message.starts_with("multiple unused formatting arguments")) && lines.get(d.line as usize).is_some_and(|l| l.contains('$')) => {
+            d.notes.retain(|n| !n.contains("format specifier") && !n.contains("{{"));
+            d.notes.push(help("in a text with `$` templates, `{}` is just text: put the value in the text instead (`\"total: $n\"`, `\"${a + b}\"`)."));
+        }
         _ => {}
     }
     match d.code.as_deref() {
@@ -1150,10 +1164,50 @@ const KOTLIN_METHODS: &[(&str, &str)] = &[
     ("toDouble", "parse::<f64>"),
     ("charAt", "chars().nth"),
     ("substring", "get(a..b)"),
-    ("joinToString", "join"),
-    ("reversed", "rev"),
-    ("first", "first"),
+    // Oxie's list operations (docs/reference.md, "Collection operations")
+    ("joinToString", "join_to_string"),
+    ("mapIndexed", "map_indexed"),
+    ("mapNotNull", "filter_map"),
+    ("filterNot", "filter_not"),
+    ("flatMap", "flat_map"),
+    ("forEachIndexed", "for_each_indexed"),
+    ("findLast", "find_last"),
+    ("indexOfFirst", "index_of_first"),
+    ("sumOf", "sum_of"),
+    ("maxOf", "max_of"),
+    ("minOf", "min_of"),
+    ("maxBy", "max_by_key"),
+    ("minBy", "min_by_key"),
+    ("maxByOrNull", "max_by_key"),
+    ("minByOrNull", "min_by_key"),
+    ("sortedBy", "sorted_by"),
+    ("sortedByDescending", "sorted_by_descending"),
+    ("sortedDescending", "sorted_descending"),
+    ("distinctBy", "distinct_by"),
+    ("groupBy", "group_by"),
+    ("associateBy", "associate_by"),
 ];
+
+/// Kotlin's `xs.size` and `s.length` (rustc: "no field `size` on type `Vec<i32>`"): Rust's is
+/// the method `len()`. rustc's span starts at the value; it moves to the field.
+fn no_field(d: &mut MappedDiag, lines: &[&str], field: &str) {
+    let line = lines.get(d.line as usize).copied().unwrap_or("");
+    let chars: Vec<char> = line.chars().collect();
+    let dot: Vec<char> = format!(".{}", field).chars().collect();
+    let at = (d.col as usize..chars.len().saturating_sub(dot.len() - 1)).find(|&i| chars[i..i + dot.len()] == dot[..] && !chars.get(i + dot.len()).is_some_and(|c| is_ident_char(*c)));
+    if let Some(i) = at {
+        d.col = i as u32 + 1;
+        d.end_line = d.line;
+        d.end_col = (i + dot.len()) as u32;
+    }
+    if matches!(field, "size" | "length" | "count") {
+        d.notes.retain(|n| !n.contains("available field"));
+        d.notes.push(help(&format!("the number of elements is the method `len()`, not a field `{}`.", field)));
+        if let Some(i) = at {
+            d.fixes.push(Fix { title: "use `len()`".into(), edits: vec![edit(d.line, i as u32 + 1, (i + dot.len()) as u32, "len()")] });
+        }
+    }
+}
 
 fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str) {
     if !d.message.starts_with("no method named") && !d.message.starts_with("no function or associated item named") {
@@ -1180,7 +1234,7 @@ fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str
     if let Some(r) = rust.filter(|r| r != method) {
         let plain = r.chars().all(|c| c.is_alphanumeric() || c == '_');
         d.notes.retain(|n| !n.contains("similar name") && !n.contains("you might have meant"));
-        d.notes.push(help(&format!("Rust names this `{}`; standard library methods use Rust's snake_case names.", r)));
+        d.notes.push(help(&format!("this is `{}`: Rust and Oxie name methods in snake_case.", r)));
         let line = lines.get(d.line as usize).copied().unwrap_or("");
         if plain && word_at(line, d.col as usize) == Some(method) {
             let end = d.col + method.chars().count() as u32;
@@ -2110,6 +2164,16 @@ fn unused_mut(d: &mut MappedDiag, lines: &[&str]) {
     let Some(c) = col else { return };
     let after: String = line.chars().skip(c as usize + 4).collect();
     let name: String = after.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    // `var (x, y) = ...`: one part never changes, but `val` would stop the others from changing
+    if name.is_empty() || after.trim_start()[name.len()..].trim_start().starts_with(['(', '{']) {
+        let part = d.gen_text.as_deref().and_then(|t| t.strip_prefix("mut ")).unwrap_or("").to_string();
+        let part = if part.is_empty() { "a part of this".to_string() } else { format!("`{}`", part) };
+        rewrite(d, format!("{} never changes, so it doesn't need to be a `var`", part));
+        d.label = None;
+        d.notes.retain(|n| !n.contains("remove this `mut`") && !n.contains("#[warn(unused_mut)]"));
+        d.notes.push(help("`var` makes every part of a destructuring changeable; declare the ones that change with their own `var` to leave the others read-only."));
+        return;
+    }
     rewrite(d, format!("`{}` never changes, so it can be a `val`", name));
     d.col = c;
     d.end_col = c + 3;
@@ -2158,8 +2222,14 @@ fn rustc_fixes(d: &mut MappedDiag, lines: &[&str]) {
         d.notes.retain(|n| !(n.starts_with("help: there is a method") && n.contains("with a similar name")));
     }
     let suggestions = d.suggestions.clone();
+    // rustc offers `.as_str()` for `Some("text")` arms on an optional `String`, which has none
+    let optional_text = d.secondary.iter().any(|l| l.text.contains("has type `Option<String>`") || l.text.contains("has type `&Option<String>`"));
+    if optional_text && suggestions.iter().any(|s| s.replacement == ".as_str()") {
+        d.notes.retain(|n| !n.contains(".as_str()"));
+        d.notes.push(help("compare the text inside with `.as_deref()`, which turns a `String?` into a `&str?`."));
+    }
     for s in suggestions {
-        let r = s.replacement.as_str();
+        let r = if optional_text && s.replacement == ".as_str()" { ".as_deref()" } else { s.replacement.as_str() };
         let title = match r {
             ".clone()" => "use a copy (`.clone()`)".to_string(),
             "&" => "pass a reference (`&`)".to_string(),
@@ -2330,6 +2400,32 @@ fn type_paths(code: &str) -> String {
         out.push_str(&segs.join(if types { "." } else { "::" }));
     }
     out + rest
+}
+
+/// rustc names a closure's type by its place in the generated Rust
+/// (`{closure@/home/.../out/oxie/main.rs:29:32: 29:36}`): it is a lambda.
+fn hide_closure_paths(d: &mut MappedDiag) {
+    fn hide(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(i) = rest.find("{closure@") {
+            out.push_str(&rest[..i]);
+            out.push_str("{lambda}");
+            rest = &rest[i..];
+            rest = rest.find('}').map_or("", |e| &rest[e + 1..]);
+        }
+        out + rest
+    }
+    d.message = hide(&d.message);
+    for n in &mut d.notes {
+        *n = hide(n);
+    }
+    for l in &mut d.secondary {
+        l.text = hide(&l.text);
+    }
+    if let Some(l) = &mut d.label {
+        *l = hide(l);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2942,6 +3038,17 @@ mod tests {
         assert_eq!(fixed("if (!value.is_not_empty()) g()"), "if (value.is_empty()) g()");
         assert_eq!(fixed("val n = value.is_not_empty().then { 1 }"), "val n = (!value.is_empty()).then { 1 }");
         assert_eq!(fixed(r#"println("${value.is_not_empty()}")"#), r#"println("${!value.is_empty()}")"#);
+    }
+
+    #[test]
+    fn a_part_of_a_var_destructuring_that_never_changes_is_named() {
+        let src = "fun main() {\n    var (a, b) = (vec[1], 2)\n    b += 1\n}\n";
+        let mut d = diag("/crate/main.oxi", "unused_mut", "variable does not need to be mutable", 1, 4, 28);
+        d.level = "warning".into();
+        d.gen_text = Some("mut a".into());
+        explain(&mut d, &Sources::from_texts(&[("/crate/main.oxi", src)]));
+        assert_eq!(d.message, "`a` never changes, so it doesn't need to be a `var`");
+        assert!(d.fixes.is_empty(), "{:?}", d.fixes);
     }
 
     #[test]
