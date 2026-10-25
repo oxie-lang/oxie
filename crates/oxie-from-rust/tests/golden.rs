@@ -1012,3 +1012,37 @@ impl Store {
     let out: Vec<String> = oxie_from_rust::translate_crate(&[main, copilot]).into_iter().map(|t| t.unwrap().oxie).collect();
     assert!(out[1].contains("self.servers.push(servers::COPILOT.to_string())"), "{}", out[1]);
 }
+
+#[test]
+fn ignored_results_in_arms_keep_braces() {
+    // `push` is also a throwing function of the file, so the ignored `Vec::push` becomes `val _ =`
+    check(
+        r#"
+fn push(line: &str) -> Result<(), String> {
+    if line.is_empty() { Err("empty".into()) } else { Ok(()) }
+}
+
+fn record(n: usize, seen: &mut Vec<usize>) {
+    match n {
+        3 => {
+            seen.push(n);
+        }
+        _ => {}
+    }
+}
+"#,
+        r#"fun push(line: &str) throws String {
+    if (line.is_empty()) throw "empty"
+}
+
+fun record(n: usize, seen: &mut Vec<usize>) {
+    when (n) {
+        3 -> {
+            val _ = seen.push(n)
+        }
+        else -> {}
+    }
+}
+"#,
+    );
+}

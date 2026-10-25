@@ -1541,7 +1541,8 @@ impl Printer<'_> {
                     {
                         let marks = (self.todos.len(), self.pending.len());
                         let t = self.stmt(&b.block.stmts[0], false, &Ctx::stmt(), false);
-                        if t.contains('\n') {
+                        // a declaration (`val _ = ..`) is no arm body without braces
+                        if t.contains('\n') || t.starts_with("val ") || t.starts_with("var ") {
                             self.todos.truncate(marks.0);
                             self.pending.truncate(marks.1);
                             self.block(&b.block, ctx)
