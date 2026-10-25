@@ -1,0 +1,64 @@
+// Bounds the methods of generic classes and enums need are inferred, also for `toString`,
+// operators and overrides (on their impl), and an override without a result type takes the
+// interface's with its arguments.
+
+import std::collections::HashMap
+
+data class P<T>(x: T, y: T) {
+    override fun toString() = "($x, $y)"
+    operator fun plus(o: P<T>): P<T> = P(x + o.x, y + o.y)
+    fun with_y(o: T): P<T> = this.copy(y = o)
+}
+
+interface Repo<T> {
+    fun all(): Vec<T>
+}
+
+class Mem : Repo<String> {
+    override fun all() = vec["a".to_string()]
+}
+
+class Bag<T>(items: Vec<T>) : Repo<T> {
+    override fun all(): Vec<T> = items.clone()
+    fun show(): String = "${items:?}"
+    fun has(x: &T): bool = items.contains(x)
+    fun top(): Option<&T> = items.iter().max()
+}
+
+class Index<K, V>(map: HashMap<K, V>) {
+    fun put(k: K, v: V) { map.insert(k, v) }
+    fun size(): usize = map.len()
+}
+
+enum Tree<T> {
+    Leaf(T),
+    Node(Box<Tree<T>>, Box<Tree<T>>);
+
+    fun first(): T = when (this) {
+        Leaf(x) -> x.clone()
+        Node(l, _) -> l.first()
+    }
+}
+
+enum Money {
+    Cents(i64);
+
+    operator fun plus(o: Money): Money = when (this) {
+        Cents(a) -> when (o) { Cents(b) -> Cents(a + b) }
+    }
+    override fun toString(): String = when (this) { Cents(c) -> "$c cents" }
+}
+
+fun main() {
+    val p = P(1, 2) + P(3, 4)
+    println(p)
+    println(p.with_y(9))
+    println("${Mem().all():?}")
+    val b = Bag(vec[3, 1, 2])
+    println("${b.all():?} ${b.show()} ${b.has(&2)} ${b.top():?}")
+    var ix = Index(HashMap())
+    ix.put("a", 1)
+    println(ix.size())
+    println(Tree.Node(Box.new(Tree.Leaf(7)), Box.new(Tree.Leaf(8))).first())
+    println(Money.Cents(5) + Money.Cents(7))
+}

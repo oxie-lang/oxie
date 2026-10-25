@@ -1,0 +1,34 @@
+// A shared class changes its data through `&self` (the handle locks it), so implementing an
+// interface with methods that change it doesn't make the interface's methods `&mut self`.
+
+import std::collections::HashMap
+
+interface Store {
+    fun put(k: String, v: i32)
+    fun get(k: &str): Option<i32>
+}
+
+@sync shared class MemStore : Store {
+    var data: HashMap<String, i32> = HashMap()
+    override fun put(k: String, v: i32) { data.insert(k, v) }
+    override fun get(k: &str): Option<i32> = data.get(k).copied()
+}
+
+shared class Log : Store {
+    var lines: Vec<String> = vec[]
+    override fun put(k: String, v: i32) { lines.push("$k=$v") }
+    override fun get(_k: &str): Option<i32> = if (lines.is_empty()) None else Some(lines.len() as i32)
+}
+
+fun fill(s: &Store) = s.put("a".to_string(), 1)
+
+fun main() {
+    val m = MemStore()
+    fill(m)
+    val n = m.data.len()
+    println("$n ${m.get("a"):?}")
+    val l = Log()
+    fill(&l)
+    fill(&l)
+    println(l.get("x").unwrap())
+}

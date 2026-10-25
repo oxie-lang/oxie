@@ -76,6 +76,8 @@ pub struct ClassInfo {
     pub contexts: Vec<String>,
     /// The last names of the interfaces it implements (after `:` or in `impl X for` blocks).
     pub interfaces: Vec<String>,
+    /// Associated constants (in the body, a companion object or an `impl` block).
+    pub consts: Vec<String>,
 }
 
 impl ClassInfo {
@@ -112,6 +114,8 @@ pub struct EnumInfo {
     pub has_type_params: bool,
     /// The last names of the interfaces it implements (after `:` or in `impl X for` blocks).
     pub interfaces: Vec<String>,
+    /// Associated constants, as in `ClassInfo`.
+    pub consts: Vec<String>,
 }
 
 impl EnumInfo {
@@ -133,6 +137,8 @@ pub struct TraitInfo {
     /// or `&mut self` and doesn't mention `Self`. `Some(true)` when they all take `&self`, so
     /// they can be forwarded from a `&T` too.
     pub forward: Option<bool>,
+    /// Names of its type parameters (`interface Repo<T>`).
+    pub generics: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -186,6 +192,8 @@ pub struct Crate {
     pub derives: HashMap<String, Vec<String>>,
     /// Types declared inside a class body (hoisted to the module): outer name -> inner names.
     pub nested: HashMap<String, Vec<String>>,
+    /// Declared type names in all capitals (`class DB`, `enum HTTP`), which don't look like types.
+    pub caps_types: HashSet<String>,
 }
 
 /// What `Crate` keys by module when several modules declare a name.
@@ -469,6 +477,10 @@ impl Crate {
     pub fn is_trait(&self, name: &str) -> bool {
         self.traits.contains_key(name)
     }
+    /// Whether `name` names a type: it looks like one (`Point`) or the crate declares it (`DB`).
+    pub fn is_type_name(&self, name: &str) -> bool {
+        is_type_like(name) || self.caps_types.contains(name)
+    }
     pub fn is_user_type(&self, name: &str) -> bool {
         self.classes.contains_key(name) || self.enums.contains_key(name) || self.traits.contains_key(name) || self.same_named.contains(name)
     }
@@ -494,6 +506,9 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
         }
         k.module_paths.insert(u.module.clone());
     }
+    for u in units {
+        collect_caps_types(&mut k, &u.file.items);
+    }
     // pass 1: traits (needed for impl receivers)
     for u in units {
         collect_traits(&mut k, &u.module, &u.file.items);
@@ -511,6 +526,27 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
     infer_receivers(&mut k, units);
     compute_derives(&mut k, units);
     k
+}
+
+fn collect_caps_types(k: &mut Crate, items: &[Item]) {
+    for it in items {
+        let name = match &it.kind {
+            ItemKind::Type(t) => {
+                collect_caps_types(k, &t.members);
+                &t.name
+            }
+            ItemKind::Trait(t) => &t.name,
+            ItemKind::TypeAlias { name, .. } => name,
+            ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => {
+                collect_caps_types(k, items);
+                continue;
+            }
+            _ => continue,
+        };
+        if !is_type_like(name) && name.starts_with(|c: char| c.is_uppercase()) {
+            k.caps_types.insert(name.clone());
+        }
+    }
 }
 
 /// Generics made only of lifetimes (or none), which don't stand in the way of derives.
@@ -748,6 +784,7 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
             ItemKind::Trait(t) => {
                 let mut methods = HashMap::new();
                 let mut assoc = Vec::new();
+                let generics = t.generics.params.iter().filter_map(|g| if let GenericParam::Type { name, .. } = g { Some(name.clone()) } else { None }).collect();
                 for m in &t.members {
                     match &m.kind {
                         ItemKind::Fun(f) => {
@@ -768,7 +805,7 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
                     })
                     .collect();
                 let forward = forwardable(t);
-                insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc, supertraits, forward });
+                insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc, supertraits, forward, generics });
             }
             ItemKind::Mod { name, items } => {
                 let mut m = module.to_vec();
@@ -1153,6 +1190,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
                         contexts: t.contexts.iter().filter_map(|p| p.name().map(String::from)).collect(),
                         interfaces: t.supertypes.iter().filter_map(|s| s.last_name().map(String::from)).collect(),
+                        consts: member_consts(&t.members),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, true) {
                         k.classes.insert(key, info);
@@ -1187,6 +1225,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
                         has_type_params: !only_lifetimes(&t.generics),
                         interfaces: t.supertypes.iter().filter_map(|s| s.last_name().map(String::from)).collect(),
+                        consts: member_consts(&t.members),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, false) {
                         for (vn, _) in &info.variants {
@@ -1218,6 +1257,11 @@ fn impl_owner(k: &Crate, imp: &ImplDecl, module: &[String]) -> Option<String> {
     Some(k.type_key_at(&path, module).unwrap_or_else(|| name.to_string()))
 }
 
+/// The names of the constants among a type's members.
+fn member_consts(members: &[Item]) -> Vec<String> {
+    members.iter().filter_map(|m| if let ItemKind::Const(c) = &m.kind { Some(c.name.clone()) } else { None }).collect()
+}
+
 fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
     for it in items {
         match &it.kind {
@@ -1240,6 +1284,14 @@ fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
                         c.interfaces.push(t.to_string());
                     } else if let Some(e) = k.enums.get_mut(&owner) {
                         e.interfaces.push(t.to_string());
+                    }
+                }
+                if imp.trait_.is_none() {
+                    let consts = member_consts(&imp.members);
+                    if let Some(c) = k.classes.get_mut(&owner) {
+                        c.consts.extend(consts);
+                    } else if let Some(e) = k.enums.get_mut(&owner) {
+                        e.consts.extend(consts);
                     }
                 }
                 for m in &imp.members {
@@ -1485,10 +1537,11 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                 changed = true;
             }
         }
-        // the first `&mut self` implementation (or default body) of an interface method spreads to the others
+        // the first `&mut self` implementation (or default body) of an interface method spreads to the
+        // others; not a shared class's, whose handle changes the data behind `&self`
         for m in &methods {
             if let Some(t) = &m.implements {
-                if decided[&(m.owner.clone(), m.fun.name.clone())] == Recv::RefMut {
+                if decided[&(m.owner.clone(), m.fun.name.clone())] == Recv::RefMut && !k.classes.get(&m.owner).is_some_and(|c| c.is_shared) {
                     trait_mut.entry((t.clone(), m.fun.name.clone())).or_insert_with(|| m.owner.clone());
                 }
             }

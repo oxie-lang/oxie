@@ -1,0 +1,6 @@
+running 0 0 None
+running 1 1 None
+running 2 2 None
+finished after 2 -1 Some("finished after 2")
+finished after 2 -1 Some("finished after 2")
+5

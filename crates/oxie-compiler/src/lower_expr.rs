@@ -3,7 +3,6 @@
 use crate::ast::*;
 use crate::diag::{Diag, Span};
 use crate::lower::*;
-use crate::parser::is_type_like;
 use crate::sema::{ParamInfo, Recv, VariantShape};
 use crate::visit;
 
@@ -1333,12 +1332,12 @@ impl<'a> Lowerer<'a> {
             ExprKind::Call { callee, .. } => match &callee.kind {
                 ExprKind::Path { segs, .. } => {
                     let last = segs.last().map(|s| s.as_str()).unwrap_or("");
-                    is_type_like(last) && !matches!(last, "Some" | "Ok" | "Err" | "None" | "Box" | "Rc" | "Arc")
+                    (self.k.is_type_name(last) || self.k.variant_owner.contains_key(last)) && !matches!(last, "Some" | "Ok" | "Err" | "None" | "Box" | "Rc" | "Arc")
                 }
                 _ => false,
             },
             ExprKind::MethodCall { recv, name, .. } => {
-                is_type_like(name) && matches!(self.as_path(recv), Some((_, PathKind::Type)))
+                (self.k.is_type_name(name) || self.k.variant_owner.contains_key(name)) && matches!(self.as_path(recv), Some((_, PathKind::Type)))
             }
             ExprKind::Path { .. } | ExprKind::Field { .. } => self.is_unit_variant(e) || self.is_unit_class_value(e),
             _ => false,
@@ -1435,7 +1434,8 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn is_place(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Path { segs, generics: None, .. } => {
-                segs.len() == 1 && !is_type_like(&segs[0]) && !self.k.is_fun_name(&segs[0]) || is_const_like(segs.last().unwrap())
+                let last = segs.last().unwrap();
+                segs.len() == 1 && !self.k.is_type_name(&segs[0]) && !self.k.is_fun_name(&segs[0]) || is_const_like(last) && !self.k.is_type_name(last)
             }
             ExprKind::SelfValue => true,
             ExprKind::Field { recv, safe: false, .. } => self.as_path(e).is_none() && self.is_place(recv),
@@ -1857,7 +1857,7 @@ impl<'a> Lowerer<'a> {
                 }
                 self.e.w("matches!(");
                 self.expr(expr, P_LOWEST);
-                let p = self.pat(pat);
+                let p = self.pat_against(pat, Some(expr));
                 self.e.w(&format!(", {})", p));
             }
             Pair(a, b) => {
@@ -2415,12 +2415,12 @@ impl<'a> Lowerer<'a> {
             Cond::Let { pat, expr, implicit_some } => {
                 let end = guards_end(1);
                 self.e.w("match ");
-                self.expr(expr, P_LOWEST + 1);
+                self.let_subject(pat, expr, *implicit_some);
                 self.e.w(" {");
                 self.e.indent();
                 self.e.nl();
                 self.push_scope();
-                let p = self.pat(pat);
+                let p = self.let_cond_pat(pat, expr, *implicit_some);
                 if *implicit_some {
                     self.e.w(&format!("Some({})", p));
                 } else {
@@ -2665,16 +2665,98 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Cond::Let { pat, expr, implicit_some } => {
-                let p = self.pat(pat);
+                let p = self.let_cond_pat(pat, expr, *implicit_some);
                 if *implicit_some {
                     self.e.w(&format!("let Some({}) = ", p));
                 } else {
                     self.e.w(&format!("let {} = ", p));
                 }
-                self.expr(expr, P_LOWEST + 1);
+                self.let_subject(pat, expr, *implicit_some);
                 self.bind_pat(pat, None);
             }
         }
+    }
+
+    /// Is `subject` a field of `this` that arms with `pats` would move a value out of? A method
+    /// borrows `this`, so the field is matched by reference instead (`match &self.state`), as
+    /// `for` borrows a field.
+    fn match_field_by_ref(&mut self, subject: &Expr, pats: &[&Pat]) -> bool {
+        if self.self_by_value {
+            return false;
+        }
+        let name = match &strip_paren(subject).kind {
+            ExprKind::Path { segs, generics: None, global: false } if segs.len() == 1 && self.implicit_field(&segs[0]).is_some() => &segs[0],
+            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => name,
+            _ => return false,
+        };
+        let Some(ty) = self.class.as_ref().and_then(|c| c.fields.get(name)).cloned() else { return false };
+        if matches!(ty, Type::Ref { .. }) {
+            return false;
+        }
+        pats.iter().any(|p| self.pat_moves(p, Some(ty.clone())))
+    }
+
+    /// Does pattern `p`, matching a value of type `ty`, bind a part of it that isn't `Copy`?
+    fn pat_moves(&mut self, p: &Pat, ty: Option<Type>) -> bool {
+        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+        let saved = std::mem::replace(&mut self.pat_ty, ty.clone());
+        let moves = match p {
+            Pat::Ident { by_ref: false, sub, .. } => ty.as_ref().is_some_and(|t| !crate::sema::is_copy_simple(t, &copy)) || sub.as_ref().is_some_and(|s| self.pat_moves(s, ty.clone())),
+            Pat::Or(ps) => ps.iter().any(|p| self.pat_moves(p, ty.clone())),
+            Pat::Tuple(ps) => match &ty {
+                Some(Type::Tuple(ts)) if ts.len() == ps.len() => ps.iter().zip(ts.clone()).any(|(p, t)| self.pat_moves(p, Some(t))),
+                _ => false,
+            },
+            Pat::TupleStruct { path, elems, .. } => {
+                let (_, shape) = self.resolve_variant_path(path);
+                let tys = self.tuple_pat_types(path, shape.as_ref());
+                !elems.iter().any(|e| matches!(e, Pat::Rest)) && elems.iter().enumerate().any(|(i, e)| self.pat_moves(e, tys.get(i).cloned().flatten()))
+            }
+            Pat::Struct { path, fields, .. } => {
+                let (_, shape) = self.resolve_variant_path(path);
+                let field_ty = |n: &str| match &shape {
+                    Some(VariantShape::Named(fs)) => fs.iter().find(|(f, _)| f == n).map(|(_, t)| t.clone()),
+                    _ => None,
+                };
+                fields.iter().any(|(n, sub)| match sub {
+                    Some(sp) => self.pat_moves(sp, field_ty(n)),
+                    None => field_ty(n).is_some_and(|t| !crate::sema::is_copy_simple(&t, &copy)),
+                })
+            }
+            _ => false,
+        };
+        self.pat_ty = saved;
+        moves
+    }
+
+    /// The value of `if (val pat = expr)`: a field `pat` would move a value out of is borrowed.
+    fn let_subject(&mut self, pat: &Pat, expr: &Expr, implicit_some: bool) {
+        if !implicit_some && self.match_field_by_ref(expr, &[pat]) {
+            self.e.w("&");
+            self.expr(expr, P_UNARY);
+            self.e.decide(expr.span, "&", "the pattern takes a value out of the field, which a method can only borrow", None);
+        } else {
+            self.expr(expr, P_LOWEST + 1);
+        }
+    }
+
+    /// The pattern of `if (val pat = expr)`, matched against the value (inside its `Some` when
+    /// `implicit_some`).
+    fn let_cond_pat(&mut self, pat: &Pat, expr: &Expr, implicit_some: bool) -> String {
+        let ty = self.infer_type(expr);
+        let ty = if implicit_some {
+            match ty {
+                Some(Type::Option(inner)) => Some(*inner),
+                Some(Type::Path { segs, .. }) if segs.len() == 1 && segs[0].name == "Option" => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(t)]) => Some(t.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else {
+            ty
+        };
+        self.pat_typed(pat, ty)
     }
 
     // ------------------------------------------------------------------ paths
@@ -2695,7 +2777,10 @@ impl<'a> Lowerer<'a> {
                 self.e.w(field);
                 return;
             }
-            if !self.is_local(n) && !self.k.is_class_name(n) && !self.k.is_fun_name(n) {
+            // a constant of the class or companion object being lowered
+            if !self.is_local(n) && self.class.as_ref().is_some_and(|c| c.consts.contains(n)) {
+                s.push_str("Self::");
+            } else if !self.is_local(n) && !self.k.is_class_name(n) && !self.k.is_fun_name(n) {
                 if let Some(en) = self.variant_enum(n) {
                     s.push_str(&format!("{}::{}", en.name, n));
                     self.e.w(&s);
@@ -2750,7 +2835,7 @@ impl<'a> Lowerer<'a> {
                 if n == "Self" || crate::lower::PRIMITIVES.contains(&n.as_str()) {
                     return Some((segs.clone(), PathKind::Type));
                 }
-                if is_type_like(n) {
+                if self.k.is_type_name(n) {
                     // a unit variant is a value with members; `Extension.instantiate(..)` with a
                     // tuple variant `Extension(..)` goes through a type of that name
                     let unit = self.variant_enum(n).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
@@ -2765,7 +2850,7 @@ impl<'a> Lowerer<'a> {
                 None
             }
             // `Stack::<i32>.new()`: a type with explicit generic arguments
-            ExprKind::Path { segs, generics: Some(g), global: false } if is_type_like(segs.last().unwrap()) && !self.is_local(&segs[0]) => {
+            ExprKind::Path { segs, generics: Some(g), global: false } if self.k.is_type_name(segs.last().unwrap()) && !self.is_local(&segs[0]) => {
                 let mut p = segs.clone();
                 let last = p.pop().unwrap();
                 p.push(format!("{}::{}", last, self.generic_args_text(g)));
@@ -2773,7 +2858,7 @@ impl<'a> Lowerer<'a> {
             }
             ExprKind::Path { segs, generics: None, .. } => {
                 let last = segs.last().unwrap();
-                let kind = if is_type_like(last) {
+                let kind = if self.k.is_type_name(last) {
                     PathKind::Type
                 } else if is_const_like(last) {
                     PathKind::Value
@@ -2786,7 +2871,7 @@ impl<'a> Lowerer<'a> {
                 let (mut p, k) = self.as_path(recv)?;
                 match k {
                     PathKind::Module => {
-                        let kind = if is_type_like(name) {
+                        let kind = if self.k.is_type_name(name) {
                             PathKind::Type
                         } else if is_const_like(name) {
                             PathKind::Value
@@ -3132,7 +3217,7 @@ impl<'a> Lowerer<'a> {
                         return;
                     }
                 }
-                if is_type_like(&name) && args.is_empty() && !matches!(name.as_str(), "Some" | "None" | "Ok" | "Err") {
+                if self.k.is_type_name(&name) && args.is_empty() && !matches!(name.as_str(), "Some" | "None" | "Ok" | "Err") {
                     let g = generics.as_ref().map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                     self.e.w(&format!("{}{}::new()", esc(&name), g));
                     return;
@@ -4668,7 +4753,16 @@ impl<'a> Lowerer<'a> {
                         self.expr(s, P_UNARY);
                         self.e.decide(s.span, "&*", "the arms compare text", None);
                     }
-                    None => self.expr(s, P_LOWEST),
+                    None => {
+                        let pats: Vec<&Pat> = arms.iter().flat_map(|a| a.conds.iter()).filter_map(|c| if let WhenCond::Pat(p) = c { Some(p) } else { None }).collect();
+                        if self.match_field_by_ref(s, &pats) {
+                            self.e.w("&");
+                            self.expr(s, P_UNARY);
+                            self.e.decide(s.span, "&", "an arm takes a value out of the field, which a method can only borrow", None);
+                        } else {
+                            self.expr(s, P_LOWEST);
+                        }
+                    }
                 }
                 self.e.w(" {");
                 self.e.indent();
@@ -4747,7 +4841,7 @@ impl<'a> Lowerer<'a> {
                                     }
                                 }
                                 WhenCond::Pat(p) => {
-                                    let ps = self.pat(p);
+                                    let ps = self.pat_against(p, subject);
                                     self.e.w(&format!("matches!({}, {})", w, ps));
                                 }
                                 _ => {}
@@ -4773,7 +4867,7 @@ impl<'a> Lowerer<'a> {
                                     if arm.guard.is_none() && matches!(p, Pat::Wild | Pat::Ident { sub: None, .. }) {
                                         has_catch_all = true;
                                     }
-                                    self.pat(p)
+                                    self.pat_against(p, subject)
                                 }
                                 WhenCond::Else => {
                                     has_catch_all = arm.guard.is_none() || has_catch_all;

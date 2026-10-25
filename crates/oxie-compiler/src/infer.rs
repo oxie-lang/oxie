@@ -3,7 +3,6 @@
 
 use crate::ast::*;
 use crate::lower::{int_suffix, Lowerer};
-use crate::parser::is_type_like;
 
 fn ty(name: &str) -> Type {
     Type::simple(name)
@@ -220,7 +219,7 @@ impl<'a> Lowerer<'a> {
             Block(b) => self.infer_block(b),
             StructLit { path, generics: None, .. } => {
                 let n = path.last()?;
-                if path.len() == 1 && is_type_like(n) && self.class_info(n).is_some_and(|c| !c.has_generics) {
+                if path.len() == 1 && self.class_info(n).is_some_and(|c| !c.has_generics) {
                     Some(ty(n))
                 } else {
                     None

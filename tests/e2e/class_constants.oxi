@@ -1,0 +1,42 @@
+// Constants of a class, enum or companion object are used without qualification inside it.
+
+const MAX: i32 = 1000
+
+class Grid(w: i32) {
+    const MAX: i32 = 10
+    fun area(): i32 = w * SIZE
+    fun capped(): i32 = if (area() > MAX) MAX else area()
+    companion object {
+        const SIZE: i32 = 4
+        fun unit(): Grid = Grid(SIZE / 4)
+    }
+}
+
+shared class Counter {
+    var n: i32 = 0
+    fun bump() { n += STEP }
+    companion object { const STEP: i32 = 2 }
+}
+
+enum Level {
+    Low, High;
+    fun weight(): i32 = when (this) {
+        Low -> BASE
+        High -> BASE * 2
+    }
+    companion object { const BASE: i32 = 5 }
+}
+
+class Stack<T>(items: Vec<T>) {
+    fun full(): bool = items.len() >= CAP
+    companion object { const CAP: usize = 2 }
+}
+
+fun main() {
+    println("${Grid(2).area()} ${Grid(3).capped()} ${Grid.unit().w} ${Grid.SIZE} $MAX")
+    val c = Counter()
+    c.bump()
+    println(c.n)
+    println("${Level.Low.weight()} ${Level.High.weight()}")
+    println("${Stack(vec[1, 2]).full()} ${Stack(vec["a"]).full()}")
+}

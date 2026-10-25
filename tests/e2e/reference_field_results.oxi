@@ -1,0 +1,25 @@
+// A method returning a part of a reference field returns it with the field's lifetime, so the
+// caller can keep it while it goes on using the object.
+
+class Parser(input: &str) {
+    var pos: usize = 0
+    fun done(): bool = pos >= input.len()
+    fun next_word(): &str { val s = pos; pos += 1; &input[s..pos] }
+    fun rest(): &str = if (done()) "" else input[pos..].trim()
+    fun all(): &str {
+        if (pos == 0) return input
+        &input[..pos]
+    }
+}
+fun main() {
+    val t = "abc".to_string()
+    var p = Parser(&t)
+    var words = vec[]
+    while (!p.done()) words.push(p.next_word())
+    println("${words:?}")
+    var q = Parser(" x y ")
+    val a = q.all()
+    q.pos = 2
+    val b = q.rest()
+    println("[$a] [$b] [${q.all()}]")
+}

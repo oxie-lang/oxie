@@ -1,0 +1,23 @@
+// An override takes the interface's parameters, so it can't use its class's contexts.
+
+class Log(var lines: Vec<String> = vec[]) {
+    fun add(line: String) = lines.push(line)
+}
+
+interface Job {
+    fun run()
+}
+
+context(log: &mut Log)
+class Worker(name: String) : Job {
+    fun start() = log.add("start $name")
+    override fun run() = log.add("run $name")
+}
+// error: 14: `run` is an interface method, so it takes only the parameters declared there and can't use the class's context `log`
+
+fun main() {
+    var log = Log()
+    val w = Worker("w")
+    w.start()
+    println(log.lines.len())
+}

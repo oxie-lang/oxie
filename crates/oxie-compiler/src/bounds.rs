@@ -15,6 +15,8 @@
 //! | `a += b`                              | `AddAssign`, ...               |
 //! | `x.clone()`                           | `Clone`                        |
 //! | key of a `HashSet`/`HashMap` local    | `Eq + Hash`                    |
+//! | `xs.clone()`, `"${xs:?}"`, `xs.contains(x)`, `xs.iter().max()` of a `Vec<T>` | `Clone`, `Debug`, `PartialEq`, `Ord` |
+//! | `this.copy(..)` of a generic data class | `Clone`                      |
 //!
 //! Bounds the declaration already states (or implies, like `Ord` for `PartialOrd`) are not
 //! repeated. Only plain uses are recognized; anything else is left to rustc, whose error then
@@ -30,15 +32,27 @@ use crate::visit::walk_expr;
 enum Kind {
     Elem(String),
     Coll(String),
+    /// A hash map or set with keys of the type parameter.
+    Keys(String),
 }
 
 type Names = HashMap<String, Kind>;
+/// Enum case -> what each of its fields holds.
+type Cases = HashMap<String, Vec<Option<Kind>>>;
+
+/// What a scan knows besides the names: locals holding hash sets or maps, and the cases of the
+/// enum whose method it is.
+struct Cx<'a> {
+    sets: &'a HashSet<String>,
+    cases: &'a Cases,
+}
 /// Type parameter -> bounds in the order found (deduplicated by name).
 type Found = BTreeMap<String, Vec<(&'static str, Type)>>;
 
 /// Returns `f` with inferred bounds added as `where` predicates. `outer` are type parameters
-/// of an enclosing generic class, with the class fields typed by them (`fields`).
-pub fn with_inferred_bounds(f: &FunDecl, outer: &[GenericParam], fields: &[(String, Type)]) -> FunDecl {
+/// of an enclosing generic class or enum, with the class fields typed by them (`fields`) and
+/// the enum's cases (`variants`, the types of their fields in order).
+pub fn with_inferred_bounds(f: &FunDecl, outer: &[GenericParam], fields: &[(String, Type)], variants: &[(String, Vec<Type>)]) -> FunDecl {
     let mut params: Vec<(String, Vec<Type>)> = Vec::new();
     for g in f.generics.params.iter().chain(outer.iter()) {
         if let GenericParam::Type { name, bounds, .. } = g {
@@ -60,17 +74,19 @@ pub fn with_inferred_bounds(f: &FunDecl, outer: &[GenericParam], fields: &[(Stri
             names.entry(n.clone()).or_insert(k);
         }
     }
-    if names.is_empty() {
+    let cases: Cases = variants.iter().map(|(n, ts)| (n.clone(), ts.iter().map(|t| kind_of(t, &tnames)).collect())).collect();
+    if names.is_empty() && !cases.values().flatten().any(|k| k.is_some()) {
         return f.clone();
     }
     let mut found = Found::new();
     let mut sets = HashSet::new();
+    if let Some(FunBody::Block(b)) = &f.body {
+        collect_sets(b, &mut sets);
+    }
+    let cx = Cx { sets: &sets, cases: &cases };
     match &f.body {
-        Some(FunBody::Block(b)) => {
-            collect_sets(b, &mut sets);
-            scan_block(b, &names, &sets, &mut found);
-        }
-        Some(FunBody::Expr(e)) => scan(e, &names, &sets, &mut found),
+        Some(FunBody::Block(b)) => scan_block(b, &names, &cx, &mut found),
+        Some(FunBody::Expr(e)) => scan(e, &names, &cx, &mut found),
         None => {}
     }
     let mut out = f.clone();
@@ -111,6 +127,13 @@ fn kind_of(t: &Type, tnames: &HashSet<String>) -> Option<Kind> {
         Type::Ref { inner, .. } => kind_of(inner, tnames),
         Type::Slice(inner) | Type::Array(inner, _) => match kind_of(inner, tnames) {
             Some(Kind::Elem(n)) => Some(Kind::Coll(n)),
+            _ => None,
+        },
+        Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "HashMap" | "HashSet") => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(key), ..]) => match kind_of(key, tnames) {
+                Some(Kind::Elem(n)) => Some(Kind::Keys(n)),
+                _ => None,
+            },
             _ => None,
         },
         Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "Vec" | "VecDeque" | "List" | "MutableList") => {
@@ -199,14 +222,14 @@ fn collect_sets(b: &Block, out: &mut HashSet<String>) {
     }
 }
 
-fn scan_block(b: &Block, names: &Names, sets: &HashSet<String>, found: &mut Found) {
+fn scan_block(b: &Block, names: &Names, cx: &Cx, found: &mut Found) {
     // `val y = x` makes `y` a `T` too
     let mut names = names.clone();
     for s in &b.stmts {
         match s {
             Stmt::Let { pat, init, .. } => {
                 if let Some(e) = init {
-                    scan(e, &names, sets, found);
+                    scan(e, &names, cx, found);
                 }
                 let mut bound = Vec::new();
                 pat.bindings(&mut bound);
@@ -221,8 +244,8 @@ fn scan_block(b: &Block, names: &Names, sets: &HashSet<String>, found: &mut Foun
                     }
                 }
             }
-            Stmt::Expr { expr, .. } => scan(expr, &names, sets, found),
-            Stmt::Attributed { stmt, .. } => scan_block(&Block { stmts: vec![(**stmt).clone()], span: b.span }, &names, sets, found),
+            Stmt::Expr { expr, .. } => scan(expr, &names, cx, found),
+            Stmt::Attributed { stmt, .. } => scan_block(&Block { stmts: vec![(**stmt).clone()], span: b.span }, &names, cx, found),
             Stmt::Item(_) => {}
         }
     }
@@ -239,19 +262,22 @@ fn lambda_names(params: &[LambdaParam], body: &Expr, braces: bool) -> Vec<String
     out
 }
 
-fn scan(e: &Expr, names: &Names, sets: &HashSet<String>, found: &mut Found) {
+fn scan(e: &Expr, names: &Names, cx: &Cx, found: &mut Found) {
     walk_expr(e, &mut |x: &Expr| {
         use ExprKind::*;
         match &x.kind {
             Template(parts) => {
                 for p in parts {
                     if let TemplatePart::Expr(v, spec) = p {
+                        let debug = spec.as_deref().is_some_and(|s| s.contains('?'));
                         if let Some(t) = elem(v, names) {
-                            if spec.as_deref().is_some_and(|s| s.contains('?')) {
+                            if debug {
                                 add(found, &t, "Debug", path(&["std", "fmt", "Debug"]));
                             } else {
                                 display(found, &t);
                             }
+                        } else if let Some(t) = coll(v, names).filter(|_| debug) {
+                            add(found, &t, "Debug", path(&["std", "fmt", "Debug"]));
                         }
                     }
                 }
@@ -268,6 +294,15 @@ fn scan(e: &Expr, names: &Names, sets: &HashSet<String>, found: &mut Found) {
             }
             Binary(op, a, b) => {
                 let (ta, tb) = (elem(a, names), elem(b, names));
+                // `x + o.x` beside a field `x: T`: the same field of another value of the class
+                let field = |e: &Expr, other: &Option<String>| match &e.kind {
+                    Field { name, .. } => match names.get(name) {
+                        Some(Kind::Elem(t)) if other.as_ref() == Some(t) => Some(t.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let (ta, tb) = (ta.clone().or_else(|| field(a, &tb)), tb.clone().or_else(|| field(b, &ta)));
                 let t = ta.clone().or(tb.clone());
                 match op {
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
@@ -323,31 +358,56 @@ fn scan(e: &Expr, names: &Names, sets: &HashSet<String>, found: &mut Found) {
                         _ => {}
                     }
                 }
-                if recv.ident().is_some_and(|r| sets.contains(r)) && matches!(name.as_str(), "insert" | "contains" | "contains_key" | "entry" | "get" | "remove") {
+                let hash_op = matches!(name.as_str(), "insert" | "contains" | "contains_key" | "entry" | "get" | "get_mut" | "remove");
+                if recv.ident().is_some_and(|r| cx.sets.contains(r)) && hash_op {
                     if let Some(t) = args.first().and_then(|a| elem(&a.value, names)) {
                         add(found, &t, "Eq", path(&["std", "cmp", "Eq"]));
                         add(found, &t, "Hash", path(&["std", "hash", "Hash"]));
                     }
                 }
+                // a map or set field keyed by `K`
+                if let (true, Some(Kind::Keys(t))) = (hash_op, recv.ident().and_then(|r| names.get(r))) {
+                    add(found, t, "Eq", path(&["std", "cmp", "Eq"]));
+                    add(found, t, "Hash", path(&["std", "hash", "Hash"]));
+                }
+                // a `Vec<T>` copied, searched or sorted
+                if let Some(t) = coll(recv, names) {
+                    match name.as_str() {
+                        "clone" | "to_vec" => add(found, &t, "Clone", Type::simple("Clone")),
+                        "contains" => add(found, &t, "PartialEq", path(&["std", "cmp", "PartialEq"])),
+                        "sort" | "max" | "min" => add(found, &t, "Ord", path(&["std", "cmp", "Ord"])),
+                        _ => {}
+                    }
+                } else if let (Some(t), true) = (chain_root(x, names), matches!(name.as_str(), "max" | "min") && args.is_empty()) {
+                    add(found, &t, "Ord", path(&["std", "cmp", "Ord"]));
+                }
+                // `this.copy(..)` of a generic data class clones the fields
+                if name == "copy" && matches!(recv.kind, SelfValue) {
+                    for k in names.values() {
+                        if let Kind::Elem(t) | Kind::Coll(t) = k {
+                            add(found, t, "Clone", Type::simple("Clone"));
+                        }
+                    }
+                }
                 // lambdas over a collection of `T` get `T` values
                 if let Some(t) = chain_root(x, names) {
-                    scan(recv, names, sets, found);
+                    scan(recv, names, cx, found);
                     for a in args {
                         if let Lambda { params, body, implicit_it, .. } = &a.value.kind {
                             let mut inner = names.clone();
                             for n in lambda_names(params, body, *implicit_it) {
                                 inner.insert(n, Kind::Elem(t.clone()));
                             }
-                            scan(body, &inner, sets, found);
+                            scan(body, &inner, cx, found);
                         } else {
-                            scan(&a.value, names, sets, found);
+                            scan(&a.value, names, cx, found);
                         }
                     }
                     return false;
                 }
             }
             For { pat, iter, body, .. } => {
-                scan(iter, names, sets, found);
+                scan(iter, names, cx, found);
                 let mut inner = names.clone();
                 let mut bound = Vec::new();
                 pat.bindings(&mut bound);
@@ -357,7 +417,31 @@ fn scan(e: &Expr, names: &Names, sets: &HashSet<String>, found: &mut Found) {
                 if let (Some(t), Pat::Ident { name, .. }) = (coll(iter, names), pat) {
                     inner.insert(name.clone(), Kind::Elem(t));
                 }
-                scan_block(body, &inner, sets, found);
+                scan_block(body, &inner, cx, found);
+                return false;
+            }
+            // the fields of a generic enum's case hold `T`s: `Leaf(x) -> x.clone()`
+            When { subject, arms, .. } if !cx.cases.is_empty() => {
+                if let Some(s) = subject {
+                    scan(s, names, cx, found);
+                }
+                for arm in arms {
+                    let mut inner = names.clone();
+                    for c in &arm.conds {
+                        if let WhenCond::Pat(Pat::TupleStruct { path, elems, .. }) = c {
+                            let Some(kinds) = path.last().and_then(|n| cx.cases.get(n)) else { continue };
+                            for (p, k) in elems.iter().zip(kinds) {
+                                if let (Pat::Ident { name, sub: None, .. }, Some(k)) = (p, k) {
+                                    inner.insert(name.clone(), k.clone());
+                                }
+                            }
+                        }
+                    }
+                    if let Some(g) = &arm.guard {
+                        scan(g, &inner, cx, found);
+                    }
+                    scan(&arm.body, &inner, cx, found);
+                }
                 return false;
             }
             Lambda { params, body, implicit_it, .. } => {
@@ -365,11 +449,11 @@ fn scan(e: &Expr, names: &Names, sets: &HashSet<String>, found: &mut Found) {
                 for n in lambda_names(params, body, *implicit_it) {
                     inner.remove(&n);
                 }
-                scan(body, &inner, sets, found);
+                scan(body, &inner, cx, found);
                 return false;
             }
             Block(b) | Unsafe(b) | LabeledBlock { block: b, .. } | Loop { body: b, .. } => {
-                scan_block(b, names, sets, found);
+                scan_block(b, names, cx, found);
                 return false;
             }
             _ => {}
@@ -386,7 +470,7 @@ mod tests {
         let (file, diags) = crate::parser::parse_file(src);
         assert!(diags.is_empty(), "{:?}", diags);
         let ItemKind::Fun(f) = &file.items[0].kind else { panic!() };
-        let out = with_inferred_bounds(f, &[], &[]);
+        let out = with_inferred_bounds(f, &[], &[], &[]);
         out.generics
             .where_clause
             .iter()
@@ -409,6 +493,11 @@ mod tests {
         assert_eq!(bounds_of("fun names<T>(xs: &[T]): Vec<String> = xs.iter().map { it.to_string() }.collect()"), "T: Display");
         assert_eq!(bounds_of("fun uniq<T>(xs: &[T]): usize { val seen = HashSet()\n for (x in xs) seen.insert(x)\n seen.len() }"), "T: Eq + Hash");
         assert_eq!(bounds_of("fun has<T>(xs: &[T], x: &T): bool = x in xs"), "T: PartialEq");
+        assert_eq!(bounds_of("fun f<T>(xs: Vec<T>): Vec<T> = xs.clone()"), "T: Clone");
+        assert_eq!(bounds_of("fun f<T>(xs: &[T]): String = \"${xs:?}\""), "T: Debug");
+        assert_eq!(bounds_of("fun f<T>(xs: &[T], x: &T): bool = xs.contains(x)"), "T: PartialEq");
+        assert_eq!(bounds_of("fun f<T>(xs: &[T]): Option<&T> = xs.iter().max()"), "T: Ord");
+        assert_eq!(bounds_of("fun f<K, V>(m: &mut HashMap<K, V>, k: K, v: V) { m.insert(k, v) }"), "K: Eq + Hash");
         // a lambda over something else doesn't make `it` a `T`
         assert_eq!(bounds_of("fun f<T>(x: T, ys: Vec<i32>): Vec<String> = ys.iter().map { \"$it\" }.collect()"), "");
     }

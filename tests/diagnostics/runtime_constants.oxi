@@ -1,0 +1,22 @@
+// A `val` outside functions and classes is a Rust `const`: its value must be computable while
+// compiling.
+
+class Point(x: i32, y: i32)
+
+object Config {
+    val NAMES: Vec<&str> = vec["a", "b"]
+    val LIMIT: i32 = 3 * 4
+}
+// error: 7: `NAMES` is a Rust `const`, computed while compiling, but `vec[...]` allocates
+
+val ORIGIN: Point = Point(0, 0)
+// error: 12: `ORIGIN` is a Rust `const`, computed while compiling, but `Point(...)` calls `Point::new`, which isn't `const`
+
+val GREETING: String = "hi".to_string()
+// error: 15: `.to_string()` isn't `const`
+
+val PAIR: (i32, &str) = (1, "x")
+
+fun main() {
+    println("${Config.LIMIT} ${PAIR.1} ${ORIGIN.x} $GREETING ${Config.NAMES.len()}")
+}

@@ -1,0 +1,32 @@
+// Kotlin habits Oxie has no equivalent for are reported in Oxie terms.
+
+interface Animal {
+    fun sound(): String
+}
+
+class Base(name: String)
+
+class Dog(name: String) : Base(name) {
+    fun bark() = println("woof")
+}
+// error: 9: Oxie has no class inheritance, so `Base` can't be extended
+
+class Puppy : Base
+// error: 14: Oxie has no class inheritance, so `Base` can't be extended
+
+open class Shape(sides: i32)
+// error: 17: `open` has no effect: Oxie has no class inheritance
+
+interface Named {
+    val name: String
+}
+// error: 21: an interface has no properties: declare `fun name(): String`
+
+class Cat {
+    override fun sound(): String = "meow"
+}
+// error: 26: `sound` overrides nothing: `Cat` implements no interface
+
+fun main() {
+    println(Shape(3).sides)
+}
