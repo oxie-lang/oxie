@@ -1047,6 +1047,8 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let mut elems = Vec::new();
                 let mut trailing_comma = false;
+                // inside brackets, `->` is a return type again
+                let fn_ret = std::mem::replace(&mut self.fn_ret, true);
                 loop {
                     if self.eat_punct(")") {
                         break;
@@ -1060,7 +1062,8 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                if self.eat_punct("->") {
+                self.fn_ret = fn_ret;
+                if self.fn_ret && self.eat_punct("->") {
                     let ret = self.ty()?;
                     return Ok(Type::Fn { params: elems, ret: Box::new(ret) });
                 }
@@ -1128,7 +1131,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                 }
                 self.raw_group()?;
-                if self.eat_punct("->") {
+                if self.fn_ret && self.eat_punct("->") {
                     self.ty()?;
                 }
                 Ok(Type::Raw(self.src[start..self.prev_span().end as usize].to_string()))
@@ -1181,6 +1184,7 @@ impl<'a> Parser<'a> {
         } else if self.is_punct("(") && matches!(seg.name.as_str(), "Fn" | "FnMut" | "FnOnce") {
             self.bump();
             let mut params = Vec::new();
+            let fn_ret = std::mem::replace(&mut self.fn_ret, true);
             loop {
                 if self.eat_punct(")") {
                     break;
@@ -1191,6 +1195,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+            self.fn_ret = fn_ret;
             let ret = if self.fn_ret && self.eat_punct("->") { Some(Box::new(self.ty()?)) } else { None };
             seg.fn_sugar = Some((params, ret));
         }
@@ -1198,6 +1203,13 @@ impl<'a> Parser<'a> {
     }
 
     fn generic_args(&mut self) -> PResult<Vec<GenericArg>> {
+        let fn_ret = std::mem::replace(&mut self.fn_ret, true);
+        let r = self.generic_args_inner();
+        self.fn_ret = fn_ret;
+        r
+    }
+
+    fn generic_args_inner(&mut self) -> PResult<Vec<GenericArg>> {
         self.expect_punct("<")?;
         let mut args = Vec::new();
         loop {
