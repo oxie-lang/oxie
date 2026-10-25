@@ -1,0 +1,40 @@
+// An interface method whose parameters or result are interfaces takes and returns boxes
+// (`Box<dyn State>`), in the interface and in each implementation, so the interface can still
+// be used as a boxed value; arguments are boxed at the call.
+interface State {
+    fun next(c: char): State
+    fun name(): String
+    fun merge(other: State): String = "${name()}+${other.name()}"
+}
+
+class Idle : State {
+    override fun next(c: char): State = if (c == 'g') Running() else Idle()
+    override fun name() = "idle"
+}
+
+class Running : State {
+    override fun next(_c: char): State = Idle()
+    override fun name() = "running"
+}
+
+interface Shape { fun area(): f64 }
+interface Scaler { fun scale(s: Shape, by: f64): Shape }
+class Sq(side: f64) : Shape { override fun area() = side * side }
+class Doubling
+impl Scaler for Doubling {
+    fun scale(s: Shape, by: f64): Shape = Sq(s.area().sqrt() * by)
+}
+
+fun main() {
+    var s: Box<State> = Box.new(Idle())
+    s = s.next('g')
+    println(s.name())
+    s = s.next('x')
+    println(s.name())
+    println(s.merge(Running()))
+    println(Idle().merge(Running()))
+    val t: State = Idle().next('g')
+    println(t.name())
+    val big = Doubling().scale(Sq(3.0), 2.0)
+    println(big.area())
+}

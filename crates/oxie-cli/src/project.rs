@@ -146,6 +146,10 @@ Oxie version installed here, which may differ from what you know about Oxie. Che
 with `oxie check`, run the program with `oxie run` and the tests with `oxie test`.
 ";
 
+/// Written next to `AGENTS.md`: Claude Code reads `CLAUDE.md`, and this one imports
+/// `AGENTS.md`, so Claude Code gets the same notes as the other agents.
+pub const CLAUDE_MD: &str = "@AGENTS.md\n";
+
 const HELLO_LIB: &str = r#"/// Adds two numbers.
 pub fun add(a: i32, b: i32): i32 = a + b
 
@@ -166,6 +170,7 @@ pub fn create(dir: &Path, name: &str, lib: bool) -> std::io::Result<()> {
     write_new(dir.join("build.rs"), BUILD_RS)?;
     write_new(dir.join(".gitignore"), "/target\n")?;
     write_new(dir.join("AGENTS.md"), AGENTS_MD)?;
+    write_new(dir.join("CLAUDE.md"), CLAUDE_MD)?;
     if lib {
         write_new(dir.join("src/lib.rs"), &root_stub("lib"))?;
         write_new(dir.join("src/lib.oxi"), HELLO_LIB)?;

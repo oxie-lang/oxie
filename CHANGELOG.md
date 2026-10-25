@@ -5,7 +5,174 @@
 * A throwing call in a `when` arm or a brace-less `else` (`if (c) a() else b()`) passes its error
   on, as any statement in a throwing function or a `try` does. Before, the error was dropped with
   only a warning, and the function went on.
-
+* A default value that names another parameter (`fun connect(retries: i32 = 3, verbose: bool =
+  retries > 2)`, `class Rect(w: i32, h: i32 = w)`) uses that parameter's argument. Before, the
+  default was pasted into the call, where it read a variable of the caller with that name, or
+  failed when there was none.
+* `val (x, y) = point` destructures a data class into its fields in constructor order, as
+  Kotlin's `component1()`, `component2()` do (`let Point { x, y } = point;`). Before, rustc
+  rejected the tuple pattern.
+* A `when` guard that compares an arm's binding with a literal reads its value
+  (`Click(x, y) if x < 0`), as predicates do, also when the subject is a reference. Before, it
+  needed `*x`.
+* `if (val (k, v) = split(s))` and `while (val (a, b) = pairs.pop())` unwrap an optional pair,
+  as `if (val v = opt)` unwraps an optional value.
+* `oxie fmt` no longer indents the line after a glob import (`import a::*`), lines up `else`
+  with its `if` in an expression-bodied function, and keeps `T: ?Sized`, `x @ 1..=9`,
+  `macro_rules! name`, `$x:expr`, `&{ .. }` and the spaces before trailing comments as written.
+  It formats files whose doc comments end in spaces, which it used to leave unchanged.
+* `oxie fmt` reports paths that don't exist, files that don't parse (with their errors) and
+  unknown options, and exits with status 1. Before, it said "0 file(s) already formatted" or
+  counted the file as formatted. Outside a project it needs paths, instead of formatting every
+  `.oxi` file below the current directory.
+* `x in set` works on a `HashSet` or `BTreeSet` of `String` with a `&str`, a `String` or a
+  `&String` item, and `in` on a list of `String` with a `&str` item (or a list of `&str` with a
+  `String`) compares the text. An item that already is a reference, like a loop variable over a
+  borrowed list, isn't lent again. Before, these failed with `Borrow<&str>` or
+  "expected `&String`, found `&&str`" errors.
+* Predicates compare their parameter with a text literal on any list: `words.any { it == "bob" }`
+  works on a `Vec<&str>`.
+* Reading a map by index with an owned key or a number works: `ages[name]`,
+  `mapOf(1 to "one")[1]`, `xs.group_by { it.len() }[2]`.
+* A map index assignment on a field whose value calls a method that changes `this`
+  (`ids[k] = alloc()`) computes that call first, like `items.push(next_id())`; so does a call
+  after a conversion of a parameter (`ids.insert(name.to_string(), alloc())`).
+* `sorted()` and `sorted_descending()` work on lists of `f64` (NaN sorts last, as in Kotlin).
+* `x in a..b` no longer makes rustc warn about unneeded parentheses (with a broken suggested
+  fix), and a `when` arm with several `in` conditions and a guard applies the guard to all of
+  them. Before, the guard applied only to the last.
+* Printing a value without a text form (`println(xs)`) suggests `println("${xs:?}")`.
+* Assigning a plain value to a `T?` field from outside its class (`p.age = 5`) and in
+  `copy(age = 7)` wraps it in `Some`, as in constructors.
+* `?.` after a link that gives a plain value (`p?.display()?.len()`, `s?.trim()?.len()`,
+  `n?.name?.len()`) works like Kotlin's. Before, it was a Rust type error, also when only another
+  class had an optional field of that name. `x?.let { if (c) it.len() else null }` gives a
+  `usize?`, not a `usize??`.
+* `?.` chains ending in a std method that gives an optional (`s?.chars().next()`,
+  `list?.first()`, `map?.get(k)`) give one optional, not a nested one.
+* `a ?: b ?: c` with an optional `b` tries `a`, then `b`, then `c`; a call in the middle runs only
+  when needed. Before, it was an error whose fix used `.expect`, which panics.
+* `?.` on a method declared to return `&T?` and on `find_last` reads fields by reference. Before,
+  it was "can't take `__oxie_v2.name` out of a borrowed value"; error messages no longer show the
+  names Oxie generates.
+* `x!!.len()` on a variable or field reads through the value instead of moving it out, so `x`
+  stays usable (`email!!.split('@')` in a method, `o!!.len()` twice). `val e = o!!` still takes
+  the value.
+* A null check whose branch (or the rest of the block) doesn't use the variable stays a check
+  (`b.is_some()`). Before, it warned about an unused variable, and the offered fix broke the code.
+* Safe assignment: `books.get_mut(isbn)?.available = true` and `o?.inner?.n = 2` assign only when
+  the values aren't null. Before, it was "invalid left-hand side of assignment".
+* A method called on a `T?` that rustc calls private (`best.len()`) is explained as an optional
+  value, and rustc's `?` fix, which would read as `?.`, is no longer offered.
+* Null checks unwrap in more places, as Kotlin's smart casts do: the `else` branch of
+  `if (x == null)`, after `if (a == null || b == null) return`, and the right side of
+  `x == null || x.len() > 3` and `x != null && x.len() < 3`.
+* Values put into a `Vec` or map of interface values (`push`, `insert`), assigned to an
+  interface-typed field of another value, or passed in `&[..]` to a `&[Shape]` parameter are
+  boxed, including values of implementing classes and enums and interface parameters (which
+  become `impl Shape + 'static`). Before, most of these failed with "expected `Box<dyn Shape>`".
+* Lambdas and function parameters pushed onto a `Vec<(A) -> B>` or assigned to a function-typed
+  field (also from outside the class) are boxed; a stored function parameter is
+  `impl Fn(..) + 'static`. `(field)()` works inside classes, and the `Box.new` fix around a
+  lambda is whole (it put `)` inside the braces).
+* An interface method whose parameter or result is an interface (`fun next(c: char): State`)
+  takes and returns `Box<dyn State>`, so implementations can return different classes. Before it
+  was `impl State`, which Rust doesn't allow there.
+* A boxed interface value reached any way (`shapes.first()`, `map.get(k)`, `it` in
+  `shapes.iter().for_each { describe(it) }`) is accepted for `Shape` and `&Shape` parameters:
+  Oxie implements each interface for `Box<T>` and `&T`. Before: "`&Box<dyn Shape>: Shape` is not
+  satisfied".
+* Extension functions on an interface (`fun Shape.describe()`) apply to every implementing type;
+  before they generated an invalid `impl Ext for Shape`.
+* Type names in all capitals (`class DB`, `enum HTTP`, `class V8`) are types: `DB.open()`,
+  `HTTP.GET`, `V2 { x: 1 }` and boxing `V8()` into an interface work. Before, they were taken for
+  constants. `oxie from-rust` keeps such code as Oxie instead of `rust { }`.
+* A bare case name in a pattern (`Circle(r)`, `Number(n)`) is a case of the matched value's enum,
+  even when a class or another enum has the same name. `is Int` and other names that match
+  nothing are reported instead of silently matching everything.
+* Constants of a class, enum or companion object can be used unqualified inside it
+  (`w * SIZE`). A `var` in an `object`, a companion object or at the top level gets a clear error.
+* `@from` works on cases wrapping any type, not only errors. `main() throws` shows each cause
+  once. Error cases without a message show their fields (`too many (count: 5, max: 3)`) instead
+  of warning that the fields are never read.
+* Generic classes and enums get the bounds their `toString`, operators and overrides need
+  (`impl<T> Display for P<T> where T: Display`), and the bounds that cloning, printing,
+  searching or sorting a `Vec<T>` field and using a `HashMap<K, V>` field need. An override
+  without a result type in `class Mem : Repo<String>` returns `Vec<String>`.
+* A method returning part of a reference field (`class Parser(input: &str)`,
+  `fun next_word(): &str = &input[s..pos]`) returns it with the field's lifetime, so callers can
+  keep the result while using the object.
+* `when (state)` on a field inside a method borrows the field when an arm takes a value out of
+  it (`Done(r) -> Done(r.clone())`), as `for` does.
+* A `shared class` implementing an interface no longer makes its methods `&mut self`: the handle
+  changes its data behind `&self`, so `fun fill(s: &Store) = s.put(..)` works.
+* An enum's `operator fun` is emitted once (no more "method `plus` is never used" warning).
+* Kotlin habits get Oxie errors instead of confusing rustc ones: extending a class
+  (`: Base(name)`), properties in interfaces, `override` without an interface, overrides using a
+  class's contexts, and top-level or object `val`s that allocate (`vec[...]`, `Point(0, 0)`).
+  `open class` warns. `enum class` and `interface Marker` without braces are accepted.
+* Char literals and nested strings containing `"`, `{` or `}` work inside `${...}`
+  (`"${s.trim_matches('{')}"`), and `${x?:0}` is an Elvis expression, not a format spec.
+  `oxie fmt` handles them too; before, it stopped formatting at such a template.
+* A trailing lambda goes to the last parameter, past parameters with defaults:
+  `with_opts(1) { it * 2 }`. Before: "missing argument".
+* An `if` without `else` in a `when` arm no longer takes the next `else ->` arm as its else.
+* A `///` doc comment before a local `val`/`var` is a plain comment. Before, it turned the local
+  into a `const`, or failed.
+* Classes, data classes and enums declared inside function bodies get constructors, inferred
+  receivers and automatic derives.
+* `String()`, `String.with_capacity(n)` and `format(..)` are known to be `String`s, so `s += a`
+  and `when (format(..)) { "ab" -> }` work; `var acc = ""` that is later appended to starts as a
+  `String`.
+* Text arms in `when` work on `&String` loop variables (`for (s in &list)`) and tuple fields
+  (`t.0`), and `Some("hi") ->` arms on a `String?` match with `as_deref()`.
+* Lambdas passed where an alias of a function type is expected
+  (`typealias Handler = (i32) -> String`) are boxed. Error notes say `{lambda}` instead of a
+  generated file's path.
+* `x in a downTo b` is checked as `b <= x && x <= a`.
+* Files with Windows line endings: multi-line strings and `\` line continuations compile, and
+  `oxie fmt` keeps CRLF line endings.
+* `var (x, y) = ...` makes only the parts that change mutable.
+* Kotlin's `Int.MAX`, `Long.MAX_VALUE`, `Double.POSITIVE_INFINITY` work, as do `1.5f`, `\b`,
+  labels written `outer@ for` / `break@outer`, `do x += 1 while (c)` without braces, and typed
+  destructuring `val (a: Int, b: String) = ...`. `n++` and `return@label` get Oxie errors that
+  say what to write.
+* `println("total:", n)` prints `total: 3` when the text has no `{}`, and `name + n` with a
+  `String` and a number or `char` builds a `String`.
+* A non-exhaustive `when` says which cases it doesn't handle and suggests `else ->`; `xs.size`
+  and `s.length` point at the field and offer `len()`; Kotlin's `joinToString` maps to
+  `join_to_string`.
+* A loop that only reads a parameter's elements (`for (x in xs)`, `for (t in list.items)`)
+  borrows it, so callers keep their value; before, the loop kept the parameter owned and the
+  caller's value was moved. A loop over a field of a reference, or of a variable used after the
+  loop, borrows the field instead of failing to move it out.
+* A loop whose body changes its elements through a method that takes `&mut self`
+  (`for (c in counters) c.bump()`), `&mut x.f`, `*v` of a map entry or an inner loop goes over the
+  list mutably; before, it failed with "`c` is a `&` reference".
+* A method that returns `this` (a builder: `fun url(u: &str): B { url = u.to_string(); this }`)
+  takes `self`, or `mut self` when it changes it; before, it failed with "expected `B`, found
+  `&mut B`".
+* Variables built empty or with type arguments (`var a = vec[]`, `mutableListOf<i32>()`,
+  `HashMap<String, i32>()`, `Stack<i32>()`) have a known type: they are lent `&mut` to functions,
+  `m[k] = v` inserts, and calls of their methods fill in defaults, named arguments and contexts.
+* `String` parameters that a function only joins with `+` (`fun label(a: String, b: String) =
+  a + b`) or passes on as `&s` are lent as `&str`, as the docs say.
+* A lambda stored in a `val` that changes a captured variable through a method
+  (`{ s: &str -> log.push(s.to_string()) }`) can be called; before, it failed with E0596.
+* Methods borrow the `String`, `Vec` and class parameters they only read, like top-level
+  functions (`fun cheaper_than(o: Item)` no longer moves `o`). Extension functions that change
+  their receiver take `&mut self` (`fun Temp.warm(by: f64) { c += by }`) without `mut fun`.
+* Changing a parameter (`fun fill(c: Cart) { c.add("x") }`) offers `c: &mut Cart`. A function
+  that stores or returns its parameter no longer gets a fix that would borrow it (which didn't
+  compile); the error says where it keeps it.
+* A class's body properties can be computed from its constructor parameters and from earlier
+  properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
+  read there was already moved into its field, and earlier properties weren't visible.
+* `oxie new` and `oxie init` also write a `CLAUDE.md` with the line `@AGENTS.md`, so Claude Code
+  reads the notes for agents that the other agents read in `AGENTS.md`. A crate's own `CLAUDE.md`
+  is kept. The documentation has a page on [AI coding agents](docs/ai-agents.md): setting up
+  Claude Code, Codex, Cursor and other agents, the commands they use, and what the compiler tells
+  them.
 * Context parameters: `context(log: &mut Log) fun record(line: &str)` takes `log` without its
   callers writing it. Each call passes the variable named `log` where it is made, or one given by
   name (`record("x", log = &mut other)`). Before a class,
@@ -83,6 +250,11 @@
   suggests an async block, instead of rustc's advice to call the closure.
 * Storing a predicate's parameter where it outlives the lambda (`filter { seen.insert(it) }`) is
   explained: `it` is a reference to the element, so store `*it` or `it.clone()`.
+* `throw` in a function that doesn't declare `throws` is an Oxie error that says to declare it,
+  instead of rustc's "expected `()`, found `Result`".
+* `?` inside a lambda is explained (it leaves the lambda, not the function), instead of advice to
+  add `throws` to a function that already has it. A throwing call's result used in arithmetic
+  (`value(x) + 1`) is explained too, with `?` as the fix.
 
 ## 0.2.0 - 2026-10-24
 

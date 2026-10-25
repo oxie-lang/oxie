@@ -1,0 +1,26 @@
+// A lambda in a `val` that changes a captured variable through a method (`log.push(s)`, a
+// `&mut self` method) or a `&mut` parameter is `let mut`, so it can be called.
+class Counter(var n: i32 = 0) { fun bump() { n += 1 } }
+fun fill(out: &mut Vec<String>) = out.push("f".to_string())
+class Box2(var items: Vec<i32> = vec[]) {
+    fun run() {
+        val add = { x: i32 -> items.push(x) }
+        add(1)
+        add(2)
+    }
+}
+fun main() {
+    var log: Vec<String> = vec[]
+    val add = { s: &str -> log.push(s.to_string()) }
+    add("a")
+    add("b")
+    var c = Counter()
+    val tick = { c.bump() }
+    tick()
+    tick()
+    val more = { fill(log) }
+    more()
+    var b = Box2()
+    b.run()
+    println("${log.len()} ${c.n} ${b.items.len()}")
+}

@@ -35,6 +35,11 @@ pub struct Diag {
     pub help: Option<String>,
 }
 
+/// What Oxie says about a class listed as a supertype (`class Dog : Animal(name)`).
+pub fn no_inheritance(name: &str) -> String {
+    format!("Oxie has no class inheritance, so `{}` can't be extended: make `{}` an interface (listed without arguments), or keep a `{}` in a field", name, name, name)
+}
+
 impl Diag {
     pub fn error(span: Span, message: impl Into<String>) -> Diag {
         Diag { severity: Severity::Error, span, message: message.into(), help: None }

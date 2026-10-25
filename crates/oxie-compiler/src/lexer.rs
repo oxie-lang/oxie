@@ -65,7 +65,7 @@ pub struct Token {
 
 const PUNCTS: &[&str] = &[
     "...", "..=", "..<", "<<=", "::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=",
-    "%=", "^=", "&=", "|=", "<<", "..", "?.", "?:", "!!", "+", "-", "*", "/", "%", "^", "!", "&", "|", "=",
+    "%=", "^=", "&=", "|=", "<<", "..", "?.", "?:", "!!", "++", "--", "+", "-", "*", "/", "%", "^", "!", "&", "|", "=",
     "<", ">", "@", ".", ",", ";", ":", "#", "$", "?", "~", "(", ")", "[", "]", "{", "}",
 ];
 
@@ -78,6 +78,8 @@ fn continues_after(t: &Tok) -> bool {
                 | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "->" | "=>" | "." | "?." | "?:" | "::" | ","
                 | "(" | "[" | "{" | ":" | "<" | "&" | "^" | "<<" | "@" | "#"
         ),
+        // `x as\n i64`, `x in\n xs`, `x is\n Shape`
+        Tok::Ident(w) => matches!(w.as_str(), "as" | "in" | "is"),
         Tok::DocOuter(_) | Tok::DocInner(_) => false,
         _ => false,
     }
@@ -326,6 +328,10 @@ impl<'a> Lexer<'a> {
         let suffix = &self.src[suffix_start..self.pos];
         if suffix == "L" {
             text = format!("{}i64", &self.src[start..suffix_start]);
+        } else if suffix == "f" || suffix == "F" {
+            // Kotlin's `1.5f`
+            text = format!("{}f32", &self.src[start..suffix_start]);
+            is_float = true;
         } else if suffix.starts_with('f') && (suffix == "f32" || suffix == "f64") {
             is_float = true;
         }
@@ -490,6 +496,20 @@ impl<'a> Lexer<'a> {
                             self.pos += 1;
                             lit.push_str("\\\n");
                         }
+                        Some('\r') if self.peek_at(1) == Some('\n') => {
+                            self.pos += 2;
+                            lit.push_str("\\\n");
+                        }
+                        Some('b') => {
+                            // Kotlin's backspace
+                            self.pos += 1;
+                            lit.push_str("\\u{8}");
+                        }
+                        Some(c) if !matches!(c, 'n' | 'r' | 't' | '\\' | '0' | '\'' | '"' | 'x' | 'u') => {
+                            self.pos += c.len_utf8();
+                            let at = self.pos - c.len_utf8() - 1;
+                            self.error(at, &format!("unknown escape `\\{}` (escapes are \\n, \\r, \\t, \\\\, \\0, \\', \\\", \\$, \\b, \\x7F and \\u{{..}})", c));
+                        }
                         Some(c) => {
                             self.pos += c.len_utf8();
                             lit.push('\\');
@@ -508,6 +528,8 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                     lit.push_str("\\n");
                 }
+                // a Windows line ending is a `\n`, as in Rust
+                Some('\r') if self.peek_at(1) == Some('\n') => self.pos += 1,
                 Some('\t') => {
                     self.pos += 1;
                     lit.push_str("\\t");
@@ -529,36 +551,12 @@ impl<'a> Lexer<'a> {
         let next = self.peek_at(1);
         if next == Some('{') {
             let open = self.pos + 2;
-            let mut depth = 1;
-            let mut i = open;
-            let bytes = self.src.as_bytes();
-            let mut in_str = false;
-            while i < bytes.len() {
-                let b = bytes[i];
-                if in_str {
-                    if b == b'\\' {
-                        i += 1;
-                    } else if b == b'"' {
-                        in_str = false;
-                    }
-                } else if b == b'"' {
-                    in_str = true;
-                } else if b == b'{' {
-                    depth += 1;
-                } else if b == b'}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                i += 1;
-            }
-            if depth != 0 {
+            let Some(i) = interp_end(self.src, open) else {
                 let p = self.pos;
                 self.pos = self.src.len();
                 self.error(p, "unterminated `${` in string");
                 return true;
-            }
+            };
             let inner = &self.src[open..i];
             let (expr, spec) = split_format_spec(inner);
             if !lit.is_empty() {
@@ -691,35 +689,90 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// If a string or char literal starts at byte `i` of `s`, the index just past it (the end of `s`
+/// when a string is unterminated). `None` for anything else, including a lifetime or label `'a`.
+pub(crate) fn skip_literal(s: &str, i: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    match *b.get(i)? {
+        b'"' if s[i..].starts_with("\"\"\"") => Some(s[i + 3..].find("\"\"\"").map_or(s.len(), |e| i + 3 + e + 3)),
+        b'"' => {
+            let mut j = i + 1;
+            while j < b.len() {
+                match b[j] {
+                    b'\\' => j += 2,
+                    b'"' => return Some(j + 1),
+                    b'$' if b.get(j + 1) == Some(&b'{') => match interp_end(s, j + 2) {
+                        Some(e) => j = e + 1,
+                        None => return Some(s.len()),
+                    },
+                    _ => j += 1,
+                }
+            }
+            Some(s.len())
+        }
+        b'\'' => {
+            let rest = &s[i + 1..];
+            let mut cs = rest.chars();
+            match cs.next()? {
+                // `'\n'`, `'\''`, `'\u{..}'`: the escaped character, then up to the closing quote
+                '\\' => {
+                    let k = 1 + cs.next()?.len_utf8();
+                    let end = rest[k..].find(['\'', '\n'])?;
+                    rest[k + end..].starts_with('\'').then_some(i + 1 + k + end + 1)
+                }
+                c if cs.next() == Some('\'') => Some(i + 1 + c.len_utf8() + 1),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The index of the `}` that closes a `${` whose contents start at byte `open` of `s`, skipping
+/// braces inside string and char literals.
+pub(crate) fn interp_end(s: &str, open: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 0;
+    let mut i = open;
+    while i < b.len() {
+        if let Some(e) = skip_literal(s, i) {
+            i = e;
+            continue;
+        }
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => return Some(i),
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Splits `expr:spec` at the last top-level single `:` if the remainder looks like a format spec.
+/// The `:` of `?:` (Elvis) and `::` (paths) never splits.
 fn split_format_spec(inner: &str) -> (&str, Option<String>) {
     let bytes = inner.as_bytes();
     let mut depth = 0i32;
     let mut cand = None;
     let mut i = 0;
-    let mut in_str = false;
     while i < bytes.len() {
-        let b = bytes[i];
-        if in_str {
-            if b == b'\\' {
-                i += 1;
-            } else if b == b'"' {
-                in_str = false;
-            }
-        } else {
-            match b {
-                b'"' => in_str = true,
-                b'(' | b'[' | b'{' => depth += 1,
-                b')' | b']' | b'}' => depth -= 1,
-                b':' if depth == 0 => {
-                    let prev_colon = i > 0 && bytes[i - 1] == b':';
-                    let next_colon = i + 1 < bytes.len() && bytes[i + 1] == b':';
-                    if !prev_colon && !next_colon {
-                        cand = Some(i);
-                    }
+        if let Some(e) = skip_literal(inner, i) {
+            i = e;
+            continue;
+        }
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b':' if depth == 0 => {
+                let prev = if i > 0 { bytes[i - 1] } else { 0 };
+                let next_colon = i + 1 < bytes.len() && bytes[i + 1] == b':';
+                if prev != b':' && prev != b'?' && !next_colon {
+                    cand = Some(i);
                 }
-                _ => {}
             }
+            _ => {}
         }
         i += 1;
     }
@@ -767,6 +820,33 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn literals_inside_interpolations() {
+        let interps = |src: &str| match &kinds(src)[0] {
+            Tok::Str(parts) => parts.iter().filter_map(|p| if let StrPart::Interp { src, spec, .. } = p { Some((src.clone(), spec.clone())) } else { None }).collect::<Vec<_>>(),
+            t => panic!("{:?}", t),
+        };
+        assert_eq!(interps(r#""${s.trim_matches('{')}""#), [("s.trim_matches('{')".to_string(), None)]);
+        assert_eq!(interps(r#""${s.replace('"', "x")}""#), [(r#"s.replace('"', "x")"#.to_string(), None)]);
+        assert_eq!(interps(r#""${ if (c == 'x') "yes{" else "no}" }""#), [(r#" if (c == 'x') "yes{" else "no}" "#.to_string(), None)]);
+        assert_eq!(interps(r#""${'\''} ${"a ${b} }"}""#), [(r"'\''".to_string(), None), (r#""a ${b} }""#.to_string(), None)]);
+        // `?:` and `::` are not format specs
+        assert_eq!(interps(r#""${x?:0} ${a::B:>4}""#), [("x?:0".to_string(), None), ("a::B".to_string(), Some(">4".to_string()))]);
+    }
+
+    #[test]
+    fn windows_line_endings_in_strings() {
+        assert_eq!(kinds("\"a\r\nb\"")[0], Tok::Str(vec![StrPart::Lit("a\\nb".into())]));
+        assert_eq!(kinds("\"a \\\r\n  b\"")[0], Tok::Str(vec![StrPart::Lit("a \\\n  b".into())]));
+    }
+
+    #[test]
+    fn escapes() {
+        assert_eq!(kinds("\"a\\bc\"")[0], Tok::Str(vec![StrPart::Lit("a\\u{8}c".into())]));
+        let (_, diags) = lex("val s = \"ab\\qc\"");
+        assert_eq!((diags.len(), diags[0].span.start, diags[0].span.end), (1, 11, 13));
     }
 
     #[test]

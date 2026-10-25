@@ -1,0 +1,46 @@
+// `in` on sets, and on lists whose elements are another form of text than the item, or
+// with an item that already is a reference to an element.
+
+import std::collections::HashSet
+import std::collections::BTreeSet
+import std::collections::HashMap
+fun main() {
+    var seen: HashSet<String> = HashSet()
+    seen.insert("x".to_string())
+    println("x" in seen)
+    val next = vec["y".to_string(), "x".to_string()]
+    for (n in next) if (n in seen) println("dup $n")
+    println(next.len())
+    val key = "x".to_string()
+    println(key in seen)
+    println(key !in seen)
+    val ids: BTreeSet<i32> = BTreeSet()
+    println(3 in ids)
+    val names = vec["a".to_string()]
+    println("a" in names)
+    val k = "a"
+    println(k in names)
+    val banned = vec["root"]
+    val user = "root".to_string()
+    println(user in banned)
+    println("root" in banned)
+    println(k in banned)
+    val s = "go".to_string()
+    println(when (s) { in ["go", "run"] -> 1; else -> 0 })
+    println(when (s) { in names -> 1; in seen -> 2; else -> 0 })
+    println(when (k) { in names -> 1; else -> 0 })
+    println(when (s) { "stop" -> 3; in ["go", "run"] -> 1; else -> 0 })
+    val nums = vec[1, 2, 2, 3]
+    var uniq = vec[]
+    for (it in nums) if (it !in uniq) uniq.push(it)
+    println("${uniq:?}")
+    var refs = vec[]
+    for (it in nums.iter()) if (it !in refs) refs.push(*it)
+    println("${refs:?}")
+    var lambdas = vec[]
+    val firsts = nums.filter { if (it !in lambdas) { lambdas.push(*it); true } else false }
+    println("${lambdas:?} ${firsts.len()}")
+    val m: HashMap<String, i32> = HashMap()
+    println(s in m)
+    println(when (s) { in m -> 1; else -> 0 })
+}

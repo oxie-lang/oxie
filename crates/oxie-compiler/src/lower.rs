@@ -125,7 +125,7 @@ fn operator_trait(name: &str) -> Option<(&'static str, &'static str, bool, bool)
     })
 }
 
-fn kotlin_alias(name: &str) -> Option<&'static str> {
+pub(crate) fn kotlin_alias(name: &str) -> Option<&'static str> {
     Some(match name {
         "Int" => "i32",
         "Long" => "i64",
@@ -178,6 +178,8 @@ pub(crate) struct ClassCtx {
     /// Methods of implemented interfaces: their signatures follow the interface, so no bounds
     /// are inferred for them. `None` inside interfaces and trait impls (never inferred).
     pub(crate) trait_methods: Option<HashSet<String>>,
+    /// Associated constants, used without `Self::` inside the type.
+    pub(crate) consts: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -271,6 +273,14 @@ pub struct Lowerer<'a> {
     pub(crate) reused_iters: HashMap<u32, Option<u32>>,
     /// Variables a null check in the `if` being lowered unwraps, with their value types.
     pub(crate) narrowed_types: Vec<(String, Type)>,
+    /// The variables of an `if (x == null) return` statement that the rest of its block doesn't
+    /// use, so the check stays a check (`narrowing_exit`).
+    pub(crate) unused_after_check: Vec<String>,
+    /// The type of the value the pattern being lowered matches, when known: its bare variant
+    /// names are that enum's first.
+    pub(crate) pat_ty: Option<Type>,
+    /// Lowering a method of a trait impl (an operator's): its bounds go on the impl block.
+    pub(crate) trait_impl: bool,
     /// Methods of the shared class being lowered that use `this` as a value, or call one that
     /// does: their data methods take the handle as `__this` (see `shared.rs`).
     pub(crate) needs_this: HashSet<String>,
@@ -289,14 +299,27 @@ pub struct Lowerer<'a> {
     /// What happened to the `String`/`Vec` parameters of this file's functions that could be
     /// lent, by (the function's name span, parameter index).
     pub param_notes: HashMap<(Span, usize), crate::params::ParamNote>,
+    /// The parameters of the function being lowered that Oxie lends (see `params.rs`).
+    pub(crate) lent: Vec<String>,
     /// Functions declared in the blocks being lowered, with their parameters: calls go to them
     /// rather than to the crate's functions with their names.
     pub(crate) local_funs: Vec<(String, Vec<sema::ParamInfo>)>,
     /// The type aliases this file declares at its top level.
     pub(crate) aliases: HashSet<String>,
+    /// The function types those aliases name (`typealias Handler = (i32) -> String`).
+    pub(crate) fn_aliases: HashMap<String, Type>,
     /// Names imported inside the blocks being lowered (`import nucleo_matcher::Config` in a
     /// function), with the paths they stand for.
     pub(crate) local_imports: Vec<(String, Vec<String>)>,
+    /// Parameters whose type is an interface or a function (`impl Shape`, `impl FnMut(..)`),
+    /// as (scope depth, name): a value Oxie boxes where a `Box<dyn ..>` is expected.
+    pub(crate) impl_params: Vec<(usize, String)>,
+    /// Lowering the items of an interface or of an `impl Interface for` block.
+    pub(crate) in_trait_items: bool,
+    /// Lowering an interface's method or an implementation of one: parameters and results
+    /// typed as an Oxie interface are `Box<dyn I>` there, which keeps the interface usable as
+    /// `dyn` (an `impl I` would make the method generic).
+    pub(crate) iface_sig: bool,
 }
 
 /// The `#[cfg(..)]` attributes among `attrs`, each followed by a space.
@@ -324,6 +347,37 @@ pub fn esc(name: &str) -> String {
 }
 
 /// `"NotFound"` -> `"not found"`
+/// Where a returned reference points (see `with_field_ret_lifetime`).
+#[derive(Clone, Debug, PartialEq)]
+enum RetLt {
+    Any,
+    Field(String),
+    Other,
+}
+
+impl RetLt {
+    fn join(self, o: RetLt) -> RetLt {
+        match (self, o) {
+            (RetLt::Any, x) | (x, RetLt::Any) => x,
+            (RetLt::Field(a), RetLt::Field(b)) if a == b => RetLt::Field(a),
+            _ => RetLt::Other,
+        }
+    }
+}
+
+/// The result type interface `tr` declares for method `name`, with the interface's type
+/// parameters replaced by `tr`'s arguments (`Vec<T>` of `Repo<String>` is `Vec<String>`).
+pub(crate) fn trait_ret(tr: &Type, info: Option<&sema::TraitInfo>, name: &str) -> Option<Type> {
+    let info = info?;
+    let ret = info.methods.get(name)?.ret.as_ref()?;
+    let args: Vec<Type> = match tr {
+        Type::Path { segs, .. } => segs.last().and_then(|s| s.generics.as_ref()).map(|g| g.iter().filter_map(|a| if let GenericArg::Type(t) = a { Some(t.clone()) } else { None }).collect()).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let map: Vec<(String, Type)> = info.generics.iter().cloned().zip(args).collect();
+    Some(ret.substitute(&map))
+}
+
 fn humanize(name: &str) -> String {
     let mut out = String::new();
     for (i, c) in name.chars().enumerate() {
@@ -380,6 +434,9 @@ impl<'a> Lowerer<'a> {
             next_lambda_refs: false,
             reused_iters: HashMap::new(),
             narrowed_types: Vec::new(),
+            unused_after_check: Vec::new(),
+            pat_ty: None,
+            trait_impl: false,
             needs_this: HashSet::new(),
             this_recv: None,
             extra_param: None,
@@ -387,9 +444,14 @@ impl<'a> Lowerer<'a> {
             self_by_value: false,
             keep_args: false,
             param_notes: HashMap::new(),
+            lent: Vec::new(),
             local_funs: Vec::new(),
             aliases: HashSet::new(),
+            fn_aliases: HashMap::new(),
             local_imports: Vec::new(),
+            impl_params: Vec::new(),
+            in_trait_items: false,
+            iface_sig: false,
         }
     }
 
@@ -409,6 +471,8 @@ impl<'a> Lowerer<'a> {
     }
     pub(crate) fn pop_scope(&mut self) {
         self.scopes.pop();
+        let depth = self.scopes.len();
+        self.impl_params.retain(|(d, _)| *d < depth);
     }
     pub(crate) fn bind_name(&mut self, name: &str, ty: Option<Type>) {
         self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
@@ -511,6 +575,14 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.aliases = file.items.iter().filter_map(|it| if let ItemKind::TypeAlias { name, .. } = &it.kind { Some(name.clone()) } else { None }).collect();
+        self.fn_aliases = file
+            .items
+            .iter()
+            .filter_map(|it| match &it.kind {
+                ItemKind::TypeAlias { name, generics, ty: ty @ Type::Fn { .. } } if generics.params.is_empty() => Some((name.clone(), ty.clone())),
+                _ => None,
+            })
+            .collect();
         let mut inline = Vec::new();
         mods(&file.items, &mut inline);
         self.path_roots.extend(inline);
@@ -1065,6 +1137,66 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// A pattern matched against `subject`: bare variant names are cases of its enum first.
+    pub(crate) fn pat_against(&mut self, p: &Pat, subject: Option<&Expr>) -> String {
+        let ty = subject.and_then(|s| self.infer_type(s));
+        self.pat_typed(p, ty)
+    }
+
+    /// A pattern matching a value of type `ty` (when known).
+    pub(crate) fn pat_typed(&mut self, p: &Pat, ty: Option<Type>) -> String {
+        let saved = std::mem::replace(&mut self.pat_ty, ty);
+        let s = self.pat(p);
+        self.pat_ty = saved;
+        s
+    }
+
+    /// The enum the pattern being lowered matches (through references and boxes).
+    fn pat_enum(&self) -> Option<&'a sema::EnumInfo> {
+        let mut t = self.pat_ty.as_ref()?;
+        loop {
+            match t {
+                Type::Ref { inner, .. } => t = inner,
+                Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Box" => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(inner)]) => t = inner,
+                    _ => return None,
+                },
+                _ => break,
+            }
+        }
+        let name = t.last_name()?;
+        let name = if name == "Self" { self.class.as_ref()?.name.as_str() } else { name };
+        self.enum_info(name)
+    }
+
+    /// The types of the parts of a `path(elems)` pattern matching the current `pat_ty`.
+    pub(crate) fn tuple_pat_types(&self, path: &[String], shape: Option<&VariantShape>) -> Vec<Option<Type>> {
+        match shape {
+            Some(VariantShape::Tuple(ts)) => return ts.iter().cloned().map(Some).collect(),
+            Some(VariantShape::Named(fs)) => return fs.iter().map(|(_, t)| Some(t.clone())).collect(),
+            _ => {}
+        }
+        let mut t = self.pat_ty.as_ref();
+        while let Some(Type::Ref { inner, .. }) = t {
+            t = Some(inner);
+        }
+        let args = |t: &Type| match t {
+            Type::Path { segs, .. } => segs.last().and_then(|s| s.generics.clone()).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let arg = |t: &Type, i: usize| match args(t).get(i) {
+            Some(GenericArg::Type(t)) => vec![Some(t.clone())],
+            _ => Vec::new(),
+        };
+        match (path, t) {
+            ([n], Some(Type::Option(inner))) if n == "Some" => vec![Some((**inner).clone())],
+            ([n], Some(t)) if n == "Some" && t.last_name() == Some("Option") => arg(t, 0),
+            ([n], Some(t)) if n == "Ok" && t.last_name() == Some("Result") => arg(t, 0),
+            ([n], Some(t)) if n == "Err" && t.last_name() == Some("Result") => arg(t, 1),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn pat(&mut self, p: &Pat) -> String {
         match p {
             Pat::Wild => "_".into(),
@@ -1092,20 +1224,36 @@ impl<'a> Lowerer<'a> {
                 format!("{}{}{}", lo, if *inclusive { "..=" } else { ".." }, hi)
             }
             Pat::Tuple(v) => {
-                let parts: Vec<String> = v.iter().map(|p| self.pat(p)).collect();
+                let tys = match &self.pat_ty {
+                    Some(Type::Tuple(ts)) if ts.len() == v.len() => ts.iter().cloned().map(Some).collect(),
+                    _ => vec![None; v.len()],
+                };
+                let parts: Vec<String> = v.iter().zip(tys).map(|(p, t)| self.pat_typed(p, t)).collect();
                 if parts.len() == 1 {
                     format!("({},)", parts[0])
                 } else {
                     format!("({})", parts.join(", "))
                 }
             }
-            Pat::Slice(v) => format!("[{}]", v.iter().map(|p| self.pat(p)).collect::<Vec<_>>().join(", ")),
-            Pat::Ref { mutable, pat } => format!("&{}{}", if *mutable { "mut " } else { "" }, self.pat_operand(pat, true)),
+            Pat::Slice(v) => format!("[{}]", v.iter().map(|p| self.pat_typed(p, None)).collect::<Vec<_>>().join(", ")),
+            Pat::Ref { mutable, pat } => {
+                let inner = match &self.pat_ty {
+                    Some(Type::Ref { inner, .. }) => Some((**inner).clone()),
+                    _ => None,
+                };
+                let saved = std::mem::replace(&mut self.pat_ty, inner);
+                let s = format!("&{}{}", if *mutable { "mut " } else { "" }, self.pat_operand(pat, true));
+                self.pat_ty = saved;
+                s
+            }
             Pat::Or(v) => v.iter().map(|p| self.pat(p)).collect::<Vec<_>>().join(" | "),
-            Pat::Typed { pat, ty } => format!("{}: {}", self.pat(pat), self.ty(ty, TyPos::Local)),
+            Pat::Typed { pat, ty } => format!("{}: {}", self.pat_typed(pat, Some(ty.clone())), self.ty(ty, TyPos::Local)),
             Pat::Raw(s) => s.clone(),
-            Pat::Path(segs, _) => {
+            Pat::Path(segs, span) => {
                 let (path, shape) = self.resolve_variant_path(segs);
+                if shape.is_none() {
+                    self.check_bare_pat_name(segs, *span);
+                }
                 match shape {
                     Some(VariantShape::Named(_)) => format!("{} {{ .. }}", path),
                     Some(VariantShape::Tuple(_)) => format!("{}(..)", path),
@@ -1114,6 +1262,8 @@ impl<'a> Lowerer<'a> {
             }
             Pat::TupleStruct { path, elems, .. } => {
                 let (p, shape) = self.resolve_variant_path(path);
+                let tys = self.tuple_pat_types(path, shape.as_ref());
+                let ty_at = |i: usize| if elems.iter().any(|e| matches!(e, Pat::Rest)) { None } else { tys.get(i).cloned().flatten() };
                 if let Some(VariantShape::Named(fields)) = shape {
                     let mut parts = Vec::new();
                     let mut rest = false;
@@ -1123,7 +1273,7 @@ impl<'a> Lowerer<'a> {
                             continue;
                         }
                         if let Some((fname, _)) = fields.get(i) {
-                            let sub = self.pat(e);
+                            let sub = self.pat_typed(e, ty_at(i));
                             if sub == esc(fname) {
                                 parts.push(sub);
                             } else {
@@ -1136,14 +1286,22 @@ impl<'a> Lowerer<'a> {
                     }
                     return format!("{} {{ {} }}", p, parts.join(", "));
                 }
-                format!("{}({})", p, elems.iter().map(|e| self.pat(e)).collect::<Vec<_>>().join(", "))
+                format!("{}({})", p, elems.iter().enumerate().map(|(i, e)| self.pat_typed(e, ty_at(i))).collect::<Vec<_>>().join(", "))
             }
             Pat::Struct { path, fields, rest, .. } => {
-                let (p, _) = self.resolve_variant_path(path);
+                let (p, shape) = self.resolve_variant_path(path);
+                let field_ty = |n: &str| match &shape {
+                    Some(VariantShape::Named(fs)) => fs.iter().find(|(f, _)| f == n).map(|(_, t)| t.clone()),
+                    _ => None,
+                };
                 let mut parts: Vec<String> = fields
                     .iter()
                     .map(|(n, sub)| match sub {
-                        Some(sp) => format!("{}: {}", esc(n), self.pat(sp)),
+                        // `Point { x, mut y }`
+                        Some(Pat::Ident { name, by_ref: false, mutable, sub: None, .. }) if name == n => {
+                            format!("{}{}", if *mutable { "mut " } else { "" }, esc(n))
+                        }
+                        Some(sp) => format!("{}: {}", esc(n), self.pat_typed(sp, field_ty(n))),
                         None => esc(n),
                     })
                     .collect();
@@ -1159,10 +1317,40 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// A capitalized bare name in a pattern that names nothing Oxie knows (`is Int`) would bind
+    /// anything in Rust: say so instead.
+    fn check_bare_pat_name(&mut self, segs: &[String], span: Span) {
+        let [n] = segs else { return };
+        if !crate::parser::is_type_like(n) || matches!(n.as_str(), "None" | "Self") || self.is_local(n) {
+            return;
+        }
+        let known = self.k.is_class_name(n)
+            || self.k.variant_owner.contains_key(n)
+            || self.k.is_user_type(n)
+            || self.k.rust_types.iter().any(|(_, t)| t == n)
+            || self.local_imports.iter().any(|(name, _)| name == n || name == "*")
+            || self.k.imports.contains_key(&(self.module.clone(), n.clone()))
+            || self.k.globs.get(&self.module).is_some_and(|g| !g.is_empty());
+        if known {
+            return;
+        }
+        let msg = match self.pat_enum() {
+            Some(en) => format!("`{}` is not a case of `{}`", n, en.name),
+            None => format!("`{}` is not an enum case, constant or class without fields; Oxie has no type tests: to match on kinds of values, use an enum", n),
+        };
+        self.error(span, msg);
+    }
+
     /// Resolves `Circle`, `Shape.Circle`, `Shape::Circle` to a qualified variant path.
     pub(crate) fn resolve_variant_path(&self, segs: &[String]) -> (String, Option<VariantShape>) {
         if segs.len() == 1 {
             let n = &segs[0];
+            // a case of the matched value's enum, whatever else the name means
+            if let Some(en) = self.pat_enum() {
+                if let Some(shape) = en.variant(n) {
+                    return (format!("{}::{}", en.name, esc(n)), Some(shape.clone()));
+                }
+            }
             if !self.k.is_class_name(n) && !self.is_local(n) {
                 if let Some(en) = self.variant_enum(n) {
                     let shape = en.variant(n).cloned();
@@ -1256,12 +1444,29 @@ impl<'a> Lowerer<'a> {
                 self.docs(&it.docs);
                 self.attrs(&it.attrs, &[]);
                 let vis = self.vis(&it.vis, ctx);
+                let at_run_time = c.value.as_ref().and_then(|v| self.run_time_part(v));
+                if let Some((span, why)) = &at_run_time {
+                    let kind = if is_static { "a `static`" } else { "a Rust `const`" };
+                    self.error(
+                        *span,
+                        format!(
+                            "`{}` is {}, computed while compiling, but {}: compute it in a function (`fun {}() = ...`) or in a `static` on first use (`static {}: LazyLock<T> = LazyLock.new {{ ... }}`)",
+                            c.name,
+                            kind,
+                            why,
+                            c.name.to_lowercase(),
+                            c.name
+                        ),
+                    );
+                }
                 let ty = match &c.ty {
                     Some(t) => self.ty(t, TyPos::Plain),
                     None => match c.value.as_ref().and_then(infer_lit_type) {
                         Some(t) => t,
                         None => {
-                            self.error(it.span, format!("constant `{}` needs a type annotation", c.name));
+                            if at_run_time.is_none() {
+                                self.error(it.span, format!("constant `{}` needs a type annotation", c.name));
+                            }
                             "_".into()
                         }
                     },
@@ -1497,9 +1702,22 @@ impl<'a> Lowerer<'a> {
         if let Some(r) = recv {
             parts.push(r);
         }
+        // a function that implements an interface method keeps the interface's signature
+        let in_trait_impl = f.mods.is_override || self.class.as_ref().is_some_and(|c| c.trait_methods.as_ref().is_some_and(|t| t.contains(&f.name)));
         for p in &f.params {
             let fn_typed = matches!(p.ty, Type::Fn { .. });
             let mut pat = self.pat(&p.pat);
+            // stored in a field or collection, where it is boxed: `impl Shape + 'static`,
+            // `impl Fn(i32) + 'static` (a `Box<dyn Fn>` can't hold an `FnMut`)
+            if !in_trait_impl && self.is_impl_type(&p.ty) && p.name().is_some_and(|n| f.body.as_ref().is_some_and(|b| visit::stores_ident(b, n))) {
+                let ty = self.ty(&p.ty, TyPos::Ret);
+                parts.push(format!("{}: {} + 'static", pat, ty));
+                continue;
+            }
+            if self.iface_sig && self.is_oxie_iface(&p.ty) {
+                parts.push(format!("{}: {}", pat, self.ty(&p.ty, TyPos::Field)));
+                continue;
+            }
             let mut pos = TyPos::Param;
             if fn_typed {
                 let captured = p.name().is_some_and(|n| f.body.as_ref().is_some_and(|b| visit::ident_in_lambda(b, n)));
@@ -1537,13 +1755,37 @@ impl<'a> Lowerer<'a> {
     fn bind_params(&mut self, f: &FunDecl) {
         for p in &f.params {
             self.bind_pat(&p.pat, Some(p.ty.clone()));
+            if let (Some(n), true) = (p.name(), self.is_impl_type(&p.ty) && !(self.iface_sig && self.is_oxie_iface(&p.ty))) {
+                self.impl_params.push((self.scopes.len() - 1, n.to_string()));
+            }
         }
+    }
+
+    /// An interface or function type, which is `impl ..` as a parameter and `Box<dyn ..>` in
+    /// fields and collections.
+    pub(crate) fn is_impl_type(&self, t: &Type) -> bool {
+        match t {
+            Type::Fn { .. } => true,
+            Type::Path { segs, .. } => segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && self.is_trait_name(&segs[0].name),
+            _ => false,
+        }
+    }
+
+    /// An interface declared in Oxie, named bare (`Shape`).
+    pub(crate) fn is_oxie_iface(&self, t: &Type) -> bool {
+        matches!(t, Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && self.k.traits.contains_key(&segs[0].name) && self.is_trait_name(&segs[0].name))
+    }
+
+    /// Is `name` a parameter of an interface or function type (see `impl_params`)?
+    pub(crate) fn is_impl_param(&self, name: &str) -> bool {
+        let Some(depth) = self.scopes.iter().rposition(|s| s.contains_key(name)) else { return false };
+        self.impl_params.iter().any(|(d, n)| *d == depth && n == name)
     }
 
     fn free_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {
         let lifetimes: Vec<String> = f.generics.params.iter().filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(name.clone()) } else { None }).collect();
         let f = &auto_lifetimes(&self.with_inferred_ret(f, None), false, &|n| self.k.type_lifetimes_in(n, &self.module));
-        let f = &crate::bounds::with_inferred_bounds(f, &[], &[]);
+        let f = &crate::bounds::with_inferred_bounds(f, &[], &[], &[]);
         let is_main = f.name == "main" && ctx == ItemCtx::Top && self.is_root && self.module.is_empty();
         let wrap_main = is_main && !matches!(f.throws, Throws::No);
         self.docs(&it.docs);
@@ -1599,6 +1841,8 @@ impl<'a> Lowerer<'a> {
         let unboxed_ret = !throws && self.iface_ret(f).is_some_and(|boxed| !boxed);
         self.fns.push(FnCtx { throws, ret: ret.clone(), is_lambda: false, tries: Vec::new(), text_break: None, unboxed_ret });
         let by_value = std::mem::replace(&mut self.self_by_value, matches!(f.self_param, Some(SelfParam::Value { .. })));
+        let lent_here = f.params.iter().enumerate().filter(|(i, _)| self.param_notes.get(&(f.name_span, *i)).is_some_and(|n| n.borrowed)).filter_map(|(_, p)| p.name().map(str::to_string)).collect();
+        let lent = std::mem::replace(&mut self.lent, lent_here);
         match body {
             FunBody::Block(b) => self.fn_block(b, ret.as_ref(), throws),
             FunBody::Expr(e) => {
@@ -1615,6 +1859,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.self_by_value = by_value;
+        self.lent = lent;
         self.fns.pop();
     }
 
@@ -1655,7 +1900,7 @@ impl<'a> Lowerer<'a> {
     fn ext_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {
         let by_ref = !matches!(f.self_param, Some(SelfParam::Value { .. }) | Some(SelfParam::Typed(_)));
         let f = &auto_lifetimes(&self.with_inferred_ret(f, None), by_ref, &|n| self.k.type_lifetimes_in(n, &self.module));
-        let f = &crate::bounds::with_inferred_bounds(f, &[], &[]);
+        let f = &crate::bounds::with_inferred_bounds(f, &[], &[], &[]);
         let recv_ty = f.receiver.as_ref().unwrap();
         let tname = sema::ext_trait_name(&self.module, &f.name);
         let recv = match &f.self_param {
@@ -1684,7 +1929,19 @@ impl<'a> Lowerer<'a> {
         self.e.w(&format!("#[allow(non_camel_case_types)]\n{}trait {}{}{} {{\n    {};\n}}", vis, tname, g, wc, sig));
         self.e.nl();
         self.e.nl();
-        self.e.w(&format!("impl{} {}{} for {}{} {{", g, tname, gn, self.ty(recv_ty, TyPos::Plain), wc));
+        // on an interface: every type that implements it (`impl<T: Shape + ?Sized> Ext for T`)
+        let iface = matches!(recv_ty, Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && self.is_trait_name(&segs[0].name));
+        if iface {
+            let tv = if f.generics.params.iter().any(|p| matches!(p, GenericParam::Type { name, .. } if name == "T")) { "S" } else { "T" };
+            let param = format!("{}: {} + ?Sized", tv, self.ty(recv_ty, TyPos::Plain));
+            let ig = match g.strip_suffix('>') {
+                Some(open) => format!("{}, {}>", open, param),
+                None => format!("<{}>", param),
+            };
+            self.e.w(&format!("impl{} {}{} for {}{} {{", ig, tname, gn, tv, wc));
+        } else {
+            self.e.w(&format!("impl{} {}{} for {}{} {{", g, tname, gn, self.ty(recv_ty, TyPos::Plain), wc));
+        }
         self.e.indent();
         self.e.nl();
         self.attrs(&it.attrs, &[]);
@@ -1695,6 +1952,12 @@ impl<'a> Lowerer<'a> {
         if let Some(owner) = recv_ty.single_name() {
             if self.class_info(owner).is_some() || self.enum_info(owner).is_some() {
                 let mut ctx = self.class_ctx_for(owner, &[], &[]);
+                ctx.is_static = matches!(f.self_param, Some(SelfParam::Typed(_)));
+                self.class = Some(ctx);
+            } else if iface && self.k.traits.contains_key(owner) {
+                // an interface's methods (and its supertraits') are callable without `this.`
+                let mut ctx = self.class_ctx_for(owner, &[], std::slice::from_ref(recv_ty));
+                ctx.trait_methods = None;
                 ctx.is_static = matches!(f.self_param, Some(SelfParam::Typed(_)));
                 self.class = Some(ctx);
             }
@@ -1724,11 +1987,13 @@ impl<'a> Lowerer<'a> {
             Some(_) => false,
             None => matches!(recv, Recv::Ref | Recv::RefMut),
         };
-        let f = &auto_lifetimes(&self.with_inferred_ret(f, trait_ret), by_ref, &|n| self.k.type_lifetimes_in(n, &self.module));
+        let f = &self.with_inferred_ret(f, trait_ret);
+        let f = &self.with_field_ret_lifetime(f, by_ref);
+        let f = &auto_lifetimes(f, by_ref, &|n| self.k.type_lifetimes_in(n, &self.module));
         let f = &match self.class.as_ref() {
-            Some(c) if !f.mods.is_override && c.trait_methods.as_ref().is_some_and(|t| !t.contains(&f.name)) => {
+            Some(c) if !f.mods.is_override && !self.trait_impl && c.trait_methods.as_ref().is_some_and(|t| !t.contains(&f.name)) => {
                 let fields: Vec<(String, Type)> = c.fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
-                crate::bounds::with_inferred_bounds(f, &c.generics, &fields)
+                crate::bounds::with_inferred_bounds(f, &c.generics, &fields, &self.case_types(&c.name))
             }
             _ => f.clone(),
         };
@@ -1749,6 +2014,8 @@ impl<'a> Lowerer<'a> {
         };
         let header = self.fn_header(f);
         let g = self.generics_decl(&f.generics);
+        let iface_sig = self.in_trait_items || f.mods.is_override || self.class.as_ref().is_some_and(|c| c.trait_methods.as_ref().is_some_and(|t| t.contains(&f.name)));
+        let saved_sig = std::mem::replace(&mut self.iface_sig, iface_sig);
         self.push_scope();
         let params = self.params_parts(f, recv_text);
         let ret = self.ret_type(f, TyPos::Ret);
@@ -1790,6 +2057,7 @@ impl<'a> Lowerer<'a> {
         if let (Some(c), Some(s)) = (self.class.as_mut(), saved_static) {
             c.is_static = s;
         }
+        self.iface_sig = saved_sig;
         self.pop_scope();
         self.e.nl();
     }
@@ -1821,9 +2089,11 @@ impl<'a> Lowerer<'a> {
                     trait_methods.insert(n.clone());
                     methods.entry(n.clone()).or_insert_with(|| m.clone());
                 }
+                stack.extend(ti.supertraits.iter().cloned());
             }
         }
-        ClassCtx { name: name.to_string(), fields, methods, self_name: "self".into(), is_static: false, generics: Vec::new(), trait_methods: Some(trait_methods) }
+        let consts = info.map(|c| c.consts.clone()).or_else(|| self.enum_info(name).map(|e| e.consts.clone())).unwrap_or_default().into_iter().collect();
+        ClassCtx { name: name.to_string(), fields, methods, self_name: "self".into(), is_static: false, generics: Vec::new(), trait_methods: Some(trait_methods), consts }
     }
 
     fn field_type(&mut self, f: &Field) -> Type {
@@ -1969,6 +2239,29 @@ impl<'a> Lowerer<'a> {
         }
         // trait impls
         for (tr, members) in impl_traits.iter().zip(members_by_trait.iter()) {
+            if t.shared && self.data_changes_behind_ref(&t.name, tr, members) {
+                // the data's methods change it where the interface takes `&self`: only the handle
+                // implements the interface, the data has the methods
+                self.e.nl();
+                self.e.w(&format!("impl{} {}{} {{", g, self_ty, wc));
+                self.e.indent();
+                let info = tr.last_name().and_then(|n| self.k.traits.get(n)).cloned();
+                for m in members {
+                    self.e.nl();
+                    match &m.kind {
+                        ItemKind::Fun(f) => {
+                            let recv = self.recv_of(&t.name, f);
+                            self.pending_trait_ret = trait_ret(tr, info.as_ref(), &f.name);
+                            self.method(m, f, recv, true, None);
+                        }
+                        _ => self.assoc_item(m, true),
+                    }
+                }
+                self.e.dedent();
+                self.e.w("}");
+                self.e.nl();
+                continue;
+            }
             self.trait_impl_block(tr, members, t.name_span, &g, &self_ty, &wc);
         }
         // error class
@@ -2007,7 +2300,7 @@ impl<'a> Lowerer<'a> {
             .fields
             .iter()
             .filter(|f| f.in_ctor && f.default.is_none())
-            .map(|f| Arg { name: Some(f.name.clone()), value: Expr::new(ExprKind::Raw("Default::default()".into()), span) })
+            .map(|f| Arg { name: Some(f.name.clone()), value: Expr::new(ExprKind::Raw("Default::default()".into()), span), trailing: false })
             .collect();
         let callee = Expr::new(ExprKind::Path { segs: vec![t.name.clone()], generics: None, global: false }, span);
         let call = Expr::new(ExprKind::Call { callee: Box::new(callee), args }, span);
@@ -2080,6 +2373,14 @@ impl<'a> Lowerer<'a> {
                 impl_traits.push(st.clone());
             }
         }
+        // a class as a supertype: Kotlin inheritance
+        for st in &impl_traits {
+            if let (Type::Path { segs, span, .. }, Some(name)) = (st, st.last_name()) {
+                if segs.len() == 1 && self.class_info(name).is_some() && !self.k.traits.contains_key(name) {
+                    self.error(*span, crate::diag::no_inheritance(name));
+                }
+            }
+        }
         let mut by_trait: Vec<Vec<&Item>> = vec![Vec::new(); impl_traits.len()];
         let mut inherent = Vec::new();
         for m in &t.members {
@@ -2099,6 +2400,12 @@ impl<'a> Lowerer<'a> {
             } else if (is_override || assoc) && impl_traits.iter().filter(|t| t.last_name() != Some("__Display")).count() == 1 {
                 let i = impl_traits.iter().position(|t| t.last_name() != Some("__Display")).unwrap();
                 by_trait[i].push(m);
+            } else if is_override && !impl_traits.iter().any(|t| t.last_name() != Some("__Display")) {
+                let name = match &m.kind {
+                    ItemKind::Fun(f) => f.name.as_str(),
+                    _ => "this member",
+                };
+                self.error(m.span, format!("`{}` overrides nothing: `{}` implements no interface; list the interface that declares it (`class {} : Interface`), or remove `override`", name, t.name, t.name));
             } else if is_override || (assoc && !impl_traits.is_empty()) {
                 self.error(m.span, "cannot tell which supertype this member implements; use a separate `impl Trait for Type { }` block");
             } else {
@@ -2145,6 +2452,35 @@ impl<'a> Lowerer<'a> {
         self.e.indent();
         self.e.nl();
         let has_init = t.init.is_some();
+        // body properties computed from the parameters or from each other are computed first, in
+        // order, so they can read a parameter before it moves into its field
+        let mut known: HashSet<&str> = fields.iter().filter(|(f, _)| f.in_ctor).map(|(f, _)| f.name.as_str()).collect();
+        let mut computed_first = false;
+        for (f, _) in fields.iter().filter(|(f, _)| !f.in_ctor && f.attrs.is_empty()) {
+            if let Some(d) = &f.default {
+                let mut ids = Vec::new();
+                visit::idents_in(d, &mut ids);
+                computed_first |= ids.iter().any(|i| known.contains(i.as_str()));
+            }
+            known.insert(&f.name);
+        }
+        self.push_scope();
+        for (f, _) in fields.iter().filter(|(f, _)| f.in_ctor) {
+            self.bind_name(&f.name, Some(f.ty.clone()));
+        }
+        let saved = self.class.take();
+        let mut as_locals = HashSet::new();
+        if computed_first {
+            for (f, ty) in fields.iter().filter(|(f, _)| !f.in_ctor && f.attrs.is_empty()) {
+                let Some(d) = &f.default else { continue };
+                self.e.w(&format!("let {}: {} = ", esc(&f.name), self.ty(ty, TyPos::Local)));
+                self.coerce(d, ty, TyPos::Field);
+                self.e.w(";");
+                self.e.nl();
+                self.bind_name(&f.name, Some(ty.clone()));
+                as_locals.insert(f.name.clone());
+            }
+        }
         if has_init {
             self.e.w("#[allow(unused_mut)]\nlet mut __self = ");
         }
@@ -2153,16 +2489,11 @@ impl<'a> Lowerer<'a> {
         } else {
             self.e.w("Self {");
             self.e.indent();
-            self.push_scope();
-            for (f, _) in fields.iter().filter(|(f, _)| f.in_ctor) {
-                self.bind_name(&f.name, Some(f.ty.clone()));
-            }
-            let saved = self.class.take();
             for (f, ty) in fields {
                 self.e.nl();
                 // a field that exists only in some builds (`@cfg(test)`) is set only there
                 self.e.w(&cfg_attrs(&f.attrs));
-                if f.in_ctor {
+                if f.in_ctor || as_locals.contains(&f.name) {
                     self.e.w(&format!("{},", esc(&f.name)));
                 } else {
                     self.e.w(&format!("{}: ", esc(&f.name)));
@@ -2173,12 +2504,12 @@ impl<'a> Lowerer<'a> {
                     self.e.w(",");
                 }
             }
-            self.class = saved;
-            self.pop_scope();
             self.e.dedent();
             self.e.nl();
             self.e.w("}");
         }
+        self.class = saved;
+        self.pop_scope();
         if has_init {
             self.e.w(";");
             self.e.nl();
@@ -2244,7 +2575,190 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// A method returning a reference into a reference field (`class Parser(input: &str)`,
+    /// `fun word(): &str = &input[a..b]`) returns it with the field's lifetime (`&'a str`), not
+    /// one tied to `self`: the caller can keep it while changing the object.
+    fn with_field_ret_lifetime(&self, f: &FunDecl, by_ref: bool) -> FunDecl {
+        let (Some(Type::Ref { lifetime: None, .. }), true, Some(body)) = (&f.ret, by_ref, &f.body) else { return f.clone() };
+        let mut found = RetLt::Any;
+        let mut returns = Vec::new();
+        let mut collect = |e: &Expr| {
+            visit::walk_expr(e, &mut |x| match &x.kind {
+                ExprKind::Lambda { .. } => false,
+                ExprKind::Return(v) => {
+                    returns.push(v.as_deref().cloned());
+                    true
+                }
+                _ => true,
+            })
+        };
+        match body {
+            FunBody::Expr(e) => {
+                collect(e);
+                found = self.ret_lt(e);
+            }
+            FunBody::Block(b) => {
+                for st in &b.stmts {
+                    if let Stmt::Expr { expr, .. } | Stmt::Let { init: Some(expr), .. } = st {
+                        collect(expr);
+                    }
+                }
+                if let Some(Stmt::Expr { expr, semi: false }) = b.stmts.last() {
+                    found = self.ret_lt(expr);
+                }
+            }
+        }
+        for r in returns {
+            let Some(r) = r else { return f.clone() };
+            found = found.join(self.ret_lt(&r));
+        }
+        self.set_ret_lt(f, found)
+    }
+
+    fn set_ret_lt(&self, f: &FunDecl, lt: RetLt) -> FunDecl {
+        let RetLt::Field(l) = lt else { return f.clone() };
+        let mut f2 = f.clone();
+        if let Some(Type::Ref { lifetime, .. }) = &mut f2.ret {
+            *lifetime = Some(l);
+        }
+        f2
+    }
+
+    /// Where the reference `e` points: into a reference field of the class (its lifetime), at a
+    /// literal (any lifetime), or elsewhere.
+    fn ret_lt(&self, e: &Expr) -> RetLt {
+        let field_lt = |name: &str| match self.class.as_ref().and_then(|c| c.fields.get(name)) {
+            Some(Type::Ref { lifetime: Some(l), mutable: false, .. }) if l != "_" && l != "static" => RetLt::Field(l.clone()),
+            _ => RetLt::Other,
+        };
+        match &e.kind {
+            ExprKind::Str(_) | ExprKind::RawStr(_) => RetLt::Any,
+            ExprKind::Paren(x) => self.ret_lt(x),
+            ExprKind::Path { segs, generics: None, global: false } if segs.len() == 1 => field_lt(&segs[0]),
+            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => field_lt(name),
+            // `&input[a..b]`, `input[a..].trim()`
+            ExprKind::Unary(UnOp::Ref, x) => match &x.kind {
+                ExprKind::Index(root, _) => self.ret_lt(root),
+                _ => RetLt::Other,
+            },
+            ExprKind::MethodCall { recv, name, safe: false, .. } if matches!(name.as_str(), "trim" | "trim_start" | "trim_end") => match &recv.kind {
+                ExprKind::Index(root, _) => self.ret_lt(root),
+                _ => self.ret_lt(recv),
+            },
+            ExprKind::If { then, else_: Some(els), .. } => {
+                let t = match then.stmts.last() {
+                    Some(Stmt::Expr { expr, semi: false }) => self.ret_lt(expr),
+                    _ => RetLt::Other,
+                };
+                t.join(self.ret_lt(els))
+            }
+            ExprKind::Block(b) => match b.stmts.last() {
+                Some(Stmt::Expr { expr, semi: false }) => self.ret_lt(expr),
+                _ => RetLt::Other,
+            },
+            _ => RetLt::Other,
+        }
+    }
+
+    /// Does a method of shared class `owner` that implements interface `tr` change the data
+    /// where the interface's method takes `&self` (the handle changes it through a lock)?
+    pub(crate) fn data_changes_behind_ref(&self, owner: &str, tr: &Type, members: &[&Item]) -> bool {
+        let Some(info) = tr.last_name().and_then(|n| self.k.traits.get(n)) else { return false };
+        members.iter().any(|m| match &m.kind {
+            ItemKind::Fun(f) => self.recv_of(owner, f) == Recv::RefMut && info.methods.get(&f.name).is_some_and(|mi| mi.recv == Recv::Ref),
+            _ => false,
+        })
+    }
+
+    /// The first part of a constant's value that only the running program can compute (it
+    /// allocates or calls a function that isn't `const`), with why.
+    fn run_time_part(&self, e: &Expr) -> Option<(Span, String)> {
+        let allocates = |what: &str| Some((e.span, format!("{} allocates, which only the running program can do", what)));
+        match &e.kind {
+            ExprKind::VecLit(items) if !items.is_empty() => allocates("`vec[...]`"),
+            ExprKind::MapLit(_) | ExprKind::SetLit(_) => allocates("a map or set"),
+            ExprKind::Template(_) => Some((e.span, "a string template builds a `String` while the program runs".into())),
+            ExprKind::MethodCall { name, .. } if matches!(name.as_str(), "to_string" | "to_owned" | "to_vec" | "collect" | "clone" | "into") => {
+                Some((e.span, format!("`.{}()` isn't `const`", name)))
+            }
+            ExprKind::MethodCall { recv, name, .. } if name == "new" || name == "from" => match recv.ident() {
+                Some(t @ ("Box" | "String" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "Rc" | "Arc")) if !(t == "String" && name == "new") => allocates(&format!("`{}.{}`", t, name)),
+                _ => None,
+            },
+            ExprKind::Call { callee, args } => {
+                if let Some(n) = callee.ident() {
+                    if matches!(n, "Box" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "Rc" | "Arc") {
+                        return allocates(&format!("`{}(...)`", n));
+                    }
+                    if self.class_info(n).is_some_and(|c| !c.user_new && !c.is_unit && !c.is_tuple) {
+                        return Some((e.span, format!("`{}(...)` calls `{}::new`, which isn't `const` (`{} {{ .. }}` is)", n, n, n)));
+                    }
+                }
+                args.iter().find_map(|a| self.run_time_part(&a.value))
+            }
+            ExprKind::Paren(x) | ExprKind::Unary(_, x) | ExprKind::Cast(x, _) => self.run_time_part(x),
+            ExprKind::Binary(_, a, b) => self.run_time_part(a).or_else(|| self.run_time_part(b)),
+            ExprKind::Tuple(xs) | ExprKind::Array(xs) => xs.iter().find_map(|x| self.run_time_part(x)),
+            ExprKind::StructLit { fields, .. } => fields.iter().find_map(|(_, v)| v.as_ref().and_then(|v| self.run_time_part(v))),
+            _ => None,
+        }
+    }
+
+    /// The cases of enum `name` with the types of their fields (for bound inference).
+    pub(crate) fn case_types(&self, name: &str) -> Vec<(String, Vec<Type>)> {
+        let Some(en) = self.enum_info(name) else { return Vec::new() };
+        en.variants
+            .iter()
+            .map(|(n, shape)| {
+                let ts = match shape {
+                    VariantShape::Unit => Vec::new(),
+                    VariantShape::Tuple(ts) => ts.clone(),
+                    VariantShape::Named(fs) => fs.iter().map(|(_, t)| t.clone()).collect(),
+                };
+                (n.clone(), ts)
+            })
+            .collect()
+    }
+
+    /// The `where` clause of an impl of a trait for a generic class: `wc` with the bounds the
+    /// bodies of `fns` need for the class's type parameters. A trait's methods keep its
+    /// signature, so these go on the impl (`impl<T> Display for P<T> where T: Display`).
+    fn impl_where(&self, wc: &str, fns: &[&FunDecl]) -> String {
+        let Some(c) = self.class.as_ref() else { return wc.to_string() };
+        if !c.generics.iter().any(|g| matches!(g, GenericParam::Type { .. })) {
+            return wc.to_string();
+        }
+        let fields: Vec<(String, Type)> = c.fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
+        let cases = self.case_types(&c.name);
+        let own: HashSet<&str> = c.generics.iter().filter_map(|g| if let GenericParam::Type { name, .. } = g { Some(name.as_str()) } else { None }).collect();
+        let mut preds: Vec<String> = Vec::new();
+        for f in fns {
+            // only the class's parameters: the method's own stay as the trait declares them
+            let mut bare = (*f).clone();
+            bare.generics = Generics::default();
+            let out = crate::bounds::with_inferred_bounds(&bare, &c.generics, &fields, &cases);
+            for w in &out.generics.where_clause {
+                if let WherePred::Type { ty, bounds } = w {
+                    if !ty.single_name().is_some_and(|n| own.contains(n)) {
+                        continue;
+                    }
+                    let text = format!("{}: {}", self.ty(ty, TyPos::Plain), self.bounds(bounds));
+                    if !preds.contains(&text) && !wc.contains(&text) {
+                        preds.push(text);
+                    }
+                }
+            }
+        }
+        match (preds.is_empty(), wc.is_empty()) {
+            (true, _) => wc.to_string(),
+            (false, true) => format!(" where {}", preds.join(", ")),
+            (false, false) => format!("{}, {}", wc, preds.join(", ")),
+        }
+    }
+
     fn trait_impl_block(&mut self, tr: &Type, members: &[&Item], class_name: Span, g: &str, self_ty: &str, wc: &str) {
+        let fns: Vec<&FunDecl> = members.iter().filter_map(|m| if let ItemKind::Fun(f) = &m.kind { Some(f) } else { None }).collect();
+        let wc = &self.impl_where(wc, &fns);
         self.e.nl();
         if tr.last_name() == Some("__Display") {
             if let Some(m) = members.first() {
@@ -2275,7 +2789,7 @@ impl<'a> Lowerer<'a> {
                         .filter(|_| f.self_param.is_none() && !f.mods.is_mut && !f.mods.is_static)
                         .map(|m| m.recv)
                         .unwrap_or_else(|| self.recv_of(&owner, f));
-                    self.pending_trait_ret = trait_info.as_ref().and_then(|t| t.methods.get(&f.name)).and_then(|m| m.ret.clone());
+                    self.pending_trait_ret = trait_ret(tr, trait_info.as_ref(), &f.name);
                     self.method(m, f, recv, false, None);
                 }
                 _ => self.assoc_item(m, false),
@@ -2367,6 +2881,7 @@ impl<'a> Lowerer<'a> {
             (Some(r), false) if r != "Self" && r != self_ty => format!("::std::ops::{}<{}>", tr, r),
             _ => format!("::std::ops::{}", tr),
         };
+        let wc = self.impl_where(wc, &[f]);
         self.e.nl();
         self.e.w(&format!("impl{} {} for {}{} {{", g, trait_text, self_ty, wc));
         self.e.indent();
@@ -2384,7 +2899,9 @@ impl<'a> Lowerer<'a> {
         let recv = if is_assign { Recv::RefMut } else { Recv::Value };
         let mut it2 = m.clone();
         it2.attrs.push(Attr::Oxie { name: "inline".into(), args: None, span: Span::default() });
+        let saved = std::mem::replace(&mut self.trait_impl, true);
         self.method(&it2, &f2, recv, false, Some(method));
+        self.trait_impl = saved;
         self.e.dedent();
         self.e.w("}");
         self.e.nl();
@@ -2451,6 +2968,8 @@ impl<'a> Lowerer<'a> {
         let wc = self.where_clause(&t.generics);
         let self_ty = format!("{}{}", t.name, gn);
         let (derived, impl_traits, members_by_trait, inherent) = self.split_members(t);
+        // operators get their own impls
+        let inherent: Vec<&Item> = inherent.into_iter().filter(|m| !matches!(&m.kind, ItemKind::Fun(f) if f.mods.is_operator)).collect();
         let mut derives: Vec<String> = self.auto_derives(&t.name);
         for d in derived {
             if !derives.contains(&d) {
@@ -2531,6 +3050,17 @@ impl<'a> Lowerer<'a> {
     }
 
     fn error_enum_impls(&mut self, t: &TypeDecl, g: &str, self_ty: &str, wc: &str) {
+        // text and numbers show as they are, other values as `Debug` (every error is `Debug`)
+        fn field_spec(t: &Type) -> &'static str {
+            let t = match t {
+                Type::Ref { inner, .. } => inner,
+                t => t,
+            };
+            match t.single_name() {
+                Some(n) if crate::lower::PRIMITIVES.contains(&n) || matches!(n, "String" | "str") => "{}",
+                _ => "{:?}",
+            }
+        }
         // which variants wrap a source error
         let wraps_error = |ty: &Type| ty.last_name().is_some_and(|n| n.ends_with("Error") && n != "AnyError");
         let mut from_counts: HashMap<String, usize> = HashMap::new();
@@ -2565,7 +3095,7 @@ impl<'a> Lowerer<'a> {
                     let parts: Vec<String> = (0..ts.len())
                         .map(|i| {
                             let n = format!("__{}", i);
-                            if used.contains(&n) || (v.message.is_none() && ts.len() == 1) {
+                            if used.contains(&n) || v.message.is_none() {
                                 self.bind_name(&n, None);
                                 n
                             } else {
@@ -2578,7 +3108,7 @@ impl<'a> Lowerer<'a> {
                 VariantFields::Named(fs) => {
                     let mut parts: Vec<String> = Vec::new();
                     for f in fs {
-                        if used.contains(&f.name) {
+                        if used.contains(&f.name) || v.message.is_none() {
                             // a field named `f` is bound as `__f`, so it doesn't hide the formatter
                             let name = if f.name == "f" { "__f" } else { &f.name };
                             self.bind_name(name, None);
@@ -2604,6 +3134,17 @@ impl<'a> Lowerer<'a> {
                 }
                 None => match &v.fields {
                     VariantFields::Tuple(ts) if ts.len() == 1 => self.e.w("::std::fmt::Display::fmt(__0, f)"),
+                    // the values of the fields follow the case's name: "too many (count: 5, max: 3)"
+                    VariantFields::Tuple(ts) => {
+                        let specs: Vec<&str> = ts.iter().map(field_spec).collect();
+                        let args: Vec<String> = (0..ts.len()).map(|i| format!("__{}", i)).collect();
+                        self.e.w(&format!("write!(f, \"{} ({})\", {})", humanize(&v.name), specs.join(", "), args.join(", ")));
+                    }
+                    VariantFields::Named(fs) if !fs.is_empty() => {
+                        let specs: Vec<String> = fs.iter().map(|x| format!("{}: {}", x.name, field_spec(&x.ty))).collect();
+                        let args: Vec<String> = fs.iter().map(|x| if x.name == "f" { "__f".to_string() } else { esc(&x.name) }).collect();
+                        self.e.w(&format!("write!(f, \"{} ({})\", {})", humanize(&v.name), specs.join(", "), args.join(", ")));
+                    }
                     _ => self.e.w(&format!("f.write_str(\"{}\")", humanize(&v.name))),
                 },
             }
@@ -2625,14 +3166,19 @@ impl<'a> Lowerer<'a> {
             .variants
             .iter()
             .filter_map(|v| {
-                let explicit = v.attrs.iter().any(|a| a.name() == "from" || a.name() == "source");
+                // `@from` alone converts from any type; only an error is a source
+                let explicit = v.attrs.iter().any(|a| a.name() == "source");
                 match &v.fields {
-                    VariantFields::Tuple(ts) if ts.len() == 1 && (explicit || wraps_error(&ts[0])) => Some((format!("Self::{}(e)", v.name), "e".to_string())),
+                    // a case without a message shows its error's text, so its causes are that error's
+                    VariantFields::Tuple(ts) if ts.len() == 1 && (explicit || wraps_error(&ts[0])) && v.message.is_none() => {
+                        Some((format!("Self::{}(e)", v.name), "::std::error::Error::source(e)".to_string()))
+                    }
+                    VariantFields::Tuple(ts) if ts.len() == 1 && (explicit || wraps_error(&ts[0])) => Some((format!("Self::{}(e)", v.name), "Some(e)".to_string())),
                     VariantFields::Named(fs) => fs
                         .iter()
                         .find(|f| f.name == "source" || f.name == "cause")
                         .filter(|f| f.ty.last_name().is_some_and(|n| n != "AnyError" && n != "Box"))
-                        .map(|f| (format!("Self::{} {{ {}: e, .. }}", v.name, esc(&f.name)), "e".to_string())),
+                        .map(|f| (format!("Self::{} {{ {}: e, .. }}", v.name, esc(&f.name)), "Some(e)".to_string())),
                     _ => None,
                 }
             })
@@ -2652,7 +3198,7 @@ impl<'a> Lowerer<'a> {
             self.e.indent();
             for (p, b) in &sources {
                 self.e.nl();
-                self.e.w(&format!("{} => Some({}),", p, b));
+                self.e.w(&format!("{} => {},", p, b));
             }
             self.e.nl();
             self.e.w("#[allow(unreachable_patterns)]\n_ => None,");
@@ -2716,7 +3262,10 @@ impl<'a> Lowerer<'a> {
             is_static: false,
             generics: Vec::new(),
             trait_methods: None,
+            consts: t.members.iter().filter_map(|m| if let ItemKind::Const(c) = &m.kind { Some(c.name.clone()) } else { None }).collect(),
         });
+        let saved_items = std::mem::replace(&mut self.in_trait_items, true);
+        let mut methods: Vec<(&FunDecl, Recv)> = Vec::new();
         for m in &t.members {
             self.e.nl();
             match &m.kind {
@@ -2733,15 +3282,79 @@ impl<'a> Lowerer<'a> {
                     } else {
                         recv
                     };
+                    methods.push((f, recv));
                     self.method(m, f, recv, false, None);
                 }
                 _ => self.assoc_item(m, false),
             }
         }
+        self.in_trait_items = saved_items;
         self.class = saved;
         self.e.dedent();
         self.e.w("}");
         self.e.nl();
+        self.forwarding_impls(t, &methods);
+    }
+
+    /// `impl<T: Shape + ?Sized> Shape for Box<T>`, and `for &T` when every method takes `&self`,
+    /// forwarding each method to the value inside: a boxed interface value (an element of a
+    /// `Vec<Shape>`) can then be passed where the interface or a reference to it is expected.
+    /// Only for interfaces that allow it (see `TraitInfo::forward`), as do their supertraits.
+    fn forwarding_impls(&mut self, t: &TraitDecl, methods: &[(&FunDecl, Recv)]) {
+        let Some((true, by_ref)) = self.forwardable(&t.name, &mut HashSet::new()) else { return };
+        let by_ref = by_ref && methods.iter().all(|(_, r)| *r == Recv::Ref);
+        let tv = if self.k.is_user_type("T") || self.k.traits.contains_key("T") { "Inner" } else { "T" };
+        let mut bodies = Vec::new();
+        let saved_sig = std::mem::replace(&mut self.iface_sig, true);
+        for (f, recv) in methods {
+            let f = &auto_lifetimes(&self.with_inferred_ret(f, None), true, &|n| self.k.type_lifetimes_in(n, &self.module));
+            let recv_text = if *recv == Recv::RefMut { "&mut self" } else { "&self" };
+            self.push_scope();
+            let params = self.params_parts(f, Some(recv_text.to_string()));
+            let ret = self.ret_type(f, TyPos::Ret);
+            self.pop_scope();
+            let g = self.generics_decl(&f.generics);
+            let args: Vec<String> = f.params.iter().filter_map(|p| p.name().map(esc)).collect();
+            let ret = ret.map(|r| format!(" -> {}", r)).unwrap_or_default();
+            bodies.push(format!("    fn {}{}({}){} {{\n        (**self).{}({})\n    }}\n", esc(&f.name), g, params.join(", "), ret, esc(&f.name), args.join(", ")));
+        }
+        self.iface_sig = saved_sig;
+        let name = esc(&t.name);
+        let targets = if by_ref { vec![format!("Box<{}>", tv), format!("&{}", tv)] } else { vec![format!("Box<{}>", tv)] };
+        for target in targets {
+            self.e.nl();
+            self.e.w(&format!("impl<{tv}: {name} + ?Sized> {name} for {target} {{\n{}}}", bodies.join("\n")));
+            self.e.nl();
+        }
+    }
+
+    /// Whether the interface `name` can be implemented for `Box<T>` and for `&T` by forwarding
+    /// its methods (see `forwarding_impls`), with its supertraits. `None` for other traits.
+    fn forwardable(&self, name: &str, seen: &mut HashSet<String>) -> Option<(bool, bool)> {
+        if !seen.insert(name.to_string()) {
+            return Some((true, true));
+        }
+        let info = self.k.traits.get(name)?;
+        if self.k.ambiguous.contains(name) {
+            return None;
+        }
+        let Some(own_by_ref) = info.forward else { return Some((false, false)) };
+        // receivers are inferred across the crate: `fun grow()` is `&mut self` when an
+        // implementation changes its object
+        let (mut boxed, mut by_ref) = (true, own_by_ref && info.methods.values().all(|m| m.recv == Recv::Ref));
+        for s in &info.supertraits {
+            match s.as_str() {
+                "Display" | "Debug" | "Sync" => {}
+                // `&T` is `'static` or `Send` only for some `T`
+                "'static" | "Send" => by_ref = false,
+                n => {
+                    let (b, r) = self.forwardable(n, seen).unwrap_or((false, false));
+                    boxed &= b;
+                    by_ref &= r;
+                }
+            }
+        }
+        Some((boxed, by_ref))
     }
 
     fn impl_decl(&mut self, it: &Item, imp: &ImplDecl) {
@@ -2772,6 +3385,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         let tinfo = imp.trait_.as_ref().and_then(|t| t.last_name()).and_then(|n| self.k.traits.get(n)).cloned();
+        let saved_items = std::mem::replace(&mut self.in_trait_items, imp.trait_.is_some());
         for m in &imp.members {
             self.e.nl();
             match &m.kind {
@@ -2782,12 +3396,13 @@ impl<'a> Lowerer<'a> {
                         .filter(|_| f.self_param.is_none() && !f.mods.is_mut && !f.mods.is_static)
                         .map(|m| m.recv)
                         .unwrap_or_else(|| self.recv_of(&owner, f));
-                    self.pending_trait_ret = tinfo.as_ref().and_then(|t| t.methods.get(&f.name)).and_then(|m| m.ret.clone());
+                    self.pending_trait_ret = imp.trait_.as_ref().and_then(|tr| trait_ret(tr, tinfo.as_ref(), &f.name));
                     self.method(m, f, recv, imp.trait_.is_none(), None);
                 }
                 _ => self.assoc_item(m, imp.trait_.is_none()),
             }
         }
+        self.in_trait_items = saved_items;
         self.class = saved;
         self.e.dedent();
         self.e.w("}");

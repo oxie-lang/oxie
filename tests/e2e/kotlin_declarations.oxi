@@ -1,0 +1,14 @@
+// Kotlin's `enum class` is an enum, and an interface without members needs no braces.
+
+enum class Color { Red, Green }
+
+interface Marker
+
+class Tag : Marker
+
+fun mark(_m: &Marker): &str = "marked"
+
+fun main() {
+    println("${Color.Red:?} ${Color.Green == Color.Green}")
+    println(mark(&Tag()))
+}

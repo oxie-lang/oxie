@@ -1,0 +1,28 @@
+// Classes, data classes and enums declared inside function bodies work like top-level ones
+class Report(title: String) {
+    fun render(): String {
+        data class Line(label: String, n: i32)
+        val lines = vec[Line("a", 1), Line("b", 2)]
+        return "$title: ${lines:?}"
+    }
+}
+
+fun main() {
+    data class Loc(a: i32)
+    val l = Loc(3)
+    enum Dir { Up, Down }
+    class Counter(var n: i32) {
+        fun bump() { n += 1 }
+    }
+    var c = Counter(0)
+    c.bump()
+    c.bump()
+    println("${l:?} ${Dir.Up:?} ${Dir.Down == Dir.Down} ${c.n} ${l.a} ${l == Loc(3)}")
+    if (c.n > 1) {
+        data class Pair2(x: i32, y: i32)
+        val p = Pair2(1, 2)
+        val q = p
+        println("${p:?} ${q.x + p.y}")
+    }
+    println(Report("r").render())
+}

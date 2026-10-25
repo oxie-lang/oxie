@@ -23,3 +23,8 @@ shared class Watcher : Listener {
     }
 }
 // error: 21: `register` implements an interface method, so it can't pass `this` on
+
+fun check(x: i32) {
+    if (x < 0) throw "negative"
+}
+// error: 28: `throw` in a function that doesn't declare `throws`

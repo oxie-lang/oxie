@@ -1,0 +1,24 @@
+// `val (a, b) = value` on a data class takes its fields in constructor order, as in Kotlin.
+
+data class Point(x: i32, y: i32)
+data class User(name: String, age: u32, city: String)
+
+fun origin(): Point = Point(0, 0)
+
+fun main() {
+    val (x, y) = Point(3, 4)
+    println("$x $y")
+    val p = Point(5, 6)
+    var (a, b) = p
+    a += 1
+    println("$a $b ${p.x}")
+    val u = User("Ada", 36, "London")
+    val (name, _, city) = &u
+    println("$name $city ${u.age}")
+    val (n2, age) = u
+    println("$n2 $age")
+    val (ox, oy) = origin()
+    println("$ox $oy")
+    val (t1, t2) = (1, "pair")
+    println("$t1 $t2")
+}

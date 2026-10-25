@@ -1,0 +1,21 @@
+// Body properties computed from constructor parameters or earlier properties.
+
+class Shop(name: String) {
+    val code: String = name.to_uppercase()
+    var visits = 0
+}
+class A(start: i32) {
+    var items: Vec<i32> = vec[start]
+    var first: i32 = items[0] + 1
+    init { items.push(first) }
+}
+shared class Node(label: String) {
+    var tag: String = "#$label"
+}
+fun main() {
+    val s = Shop("corner")
+    println("${s.name} ${s.code} ${s.visits}")
+    val a = A(4)
+    println("${a.items:?} ${a.first}")
+    println(Node("x").tag)
+}

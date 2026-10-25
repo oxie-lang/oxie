@@ -3,7 +3,6 @@
 use crate::ast::*;
 use crate::diag::{Diag, Span};
 use crate::lower::*;
-use crate::parser::is_type_like;
 use crate::sema::{ParamInfo, Recv, VariantShape};
 use crate::visit;
 
@@ -85,6 +84,18 @@ fn branch_target(e: &Expr) -> Target {
     }
 }
 
+/// An argument that reads the same when written twice: a literal, a variable, a field of one,
+/// or arithmetic and comparisons of those.
+fn is_plain_read(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Path { .. } | ExprKind::SelfValue => true,
+        ExprKind::Field { recv, safe: false, .. } => is_plain_read(recv),
+        ExprKind::Paren(x) | ExprKind::Unary(UnOp::Neg | UnOp::Not, x) => is_plain_read(x),
+        ExprKind::Binary(_, l, r) => is_plain_read(l) && is_plain_read(r),
+        _ => is_literal(e),
+    }
+}
+
 fn is_ok_err_call(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Call { callee, .. } => matches!(callee.ident(), Some("Ok") | Some("Err")),
@@ -119,8 +130,32 @@ fn is_scalar_literal(e: &Expr) -> bool {
 #[derive(PartialEq)]
 enum Contains {
     Key,
+    Set,
     Text,
     Value,
+}
+
+/// The two forms of text a collection holds: `String` or `&str`.
+#[derive(PartialEq, Clone, Copy)]
+enum TextForm {
+    Owned,
+    Str,
+}
+
+/// The references around a type, and the form of the text below them, if it is text.
+fn ref_depth(t: &Type) -> (usize, Option<TextForm>) {
+    let mut d = 0;
+    let mut t = t;
+    while let Type::Ref { inner, .. } = t {
+        d += 1;
+        t = inner;
+    }
+    let text = match t.single_name() {
+        Some("String") => Some(TextForm::Owned),
+        Some("str") if d > 0 => Some(TextForm::Str),
+        _ => None,
+    };
+    (d, text)
 }
 
 fn is_string_lit(e: &Expr) -> bool {
@@ -188,6 +223,10 @@ const NEVER_COPY: &[&str] = &[
     "Cell", "RefCell", "Mutex", "RwLock",
 ];
 
+/// Methods of text and numbers that only convert the value, so they can run after a call that
+/// changes `this` without noticing (`ids.insert(name.to_string(), alloc())`).
+const PLAIN_CONVERSIONS: &[&str] = &["to_string", "to_owned", "clone", "len", "as_str", "to_uppercase", "to_lowercase", "trim", "is_empty", "abs"];
+
 /// The method or function a call like `next_id()`, `this.next_id()` or `next_id()?` calls.
 fn called_name(e: &Expr) -> Option<&str> {
     match &e.kind {
@@ -212,7 +251,7 @@ fn replace_moved(e: &mut Expr, moved: &[(Span, String)]) {
             args.iter_mut().for_each(|a| replace_moved(&mut a.value, moved));
         }
         ExprKind::Paren(x) | ExprKind::Cast(x, _) | ExprKind::Unary(_, x) | ExprKind::Field { recv: x, .. } | ExprKind::Try(x) | ExprKind::Unwrap(x) | ExprKind::Await(x) => replace_moved(x, moved),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Pair(a, b) => {
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Pair(a, b) | ExprKind::Assign(None, a, b) => {
             replace_moved(a, moved);
             replace_moved(b, moved);
         }
@@ -232,6 +271,93 @@ fn replace_moved(e: &mut Expr, moved: &[(Span, String)]) {
         }
         _ => {}
     }
+}
+
+/// `var acc = ""` that a later statement appends to (`acc += x`) starts as `String::from("")`:
+/// a `&str` can't grow, so the variable could never compile as one.
+fn appended_text_var(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
+    let Stmt::Let { pat: pat @ Pat::Ident { name, mutable: true, sub: None, .. }, ty: None, init: Some(init @ Expr { kind: ExprKind::Str(_), .. }), else_: None, span, .. } = s else { return None };
+    let mut appended = false;
+    for s in rest {
+        visit::walk_stmt(s, &mut |e| {
+            if let ExprKind::Assign(Some(BinOp::Add), lhs, _) = &e.kind {
+                appended |= lhs.ident() == Some(name.as_str());
+            }
+            !appended
+        });
+    }
+    if !appended {
+        return None;
+    }
+    let sp = init.span;
+    let string = Expr::new(ExprKind::Path { segs: vec!["String".into()], generics: None, global: false }, sp);
+    let from = ExprKind::MethodCall { recv: Box::new(string), name: "from".into(), generics: None, args: vec![Arg { name: None, value: init.clone(), trailing: false }], safe: false };
+    Some(Stmt::Let { pat: pat.clone(), mutable: false, ty: None, init: Some(Expr::new(from, sp)), else_: None, span: *span })
+}
+
+/// `var (x, y) = ...` whose `y` never changes afterwards destructures to `let (mut x, y)`: Rust
+/// would warn about the `mut` of `y`, which Oxie can't drop on its own.
+fn unchanged_parts(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
+    let Stmt::Let { pat, .. } = s else { return None };
+    if matches!(pat, Pat::Ident { .. }) {
+        return None;
+    }
+    let mut names = Vec::new();
+    pat.bindings(&mut names);
+    // a name each later statement may change: assigned to, borrowed with `&mut`, a method
+    // called on it, passed to a call (which may borrow it mutably), looped over or in Rust code
+    fn root(e: &Expr) -> Option<&str> {
+        match &e.kind {
+            ExprKind::Field { recv: r, .. } | ExprKind::Index(r, _) | ExprKind::Paren(r) | ExprKind::Unary(UnOp::Deref, r) => root(r),
+            _ => e.ident(),
+        }
+    }
+    let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in rest {
+        visit::walk_stmt(s, &mut |e| {
+            let mut roots = Vec::new();
+            match &e.kind {
+                ExprKind::Assign(_, lhs, _) | ExprKind::Unary(UnOp::RefMut, lhs) => roots.push(root(lhs)),
+                ExprKind::MethodCall { recv, args, .. } => roots.extend(std::iter::once(root(recv)).chain(args.iter().map(|a| root(&a.value)))),
+                ExprKind::Call { args, .. } => roots.extend(args.iter().map(|a| root(&a.value))),
+                ExprKind::For { iter, .. } => roots.push(root(iter)),
+                ExprKind::Macro { text, .. } | ExprKind::Raw(text) => changed.extend(names.iter().filter(|n| crate::sema::contains_word(text, n)).cloned()),
+                _ => {}
+            }
+            changed.extend(roots.into_iter().flatten().map(str::to_string));
+            true
+        });
+    }
+    fn keep(p: &mut Pat, changed: &std::collections::HashSet<String>, any: &mut bool) {
+        match p {
+            Pat::Ident { name, mutable, sub, .. } => {
+                if *mutable && !changed.contains(name.as_str()) {
+                    *mutable = false;
+                    *any = true;
+                }
+                if let Some(s) = sub {
+                    keep(s, changed, any);
+                }
+            }
+            Pat::Tuple(v) | Pat::Slice(v) => v.iter_mut().for_each(|p| keep(p, changed, any)),
+            Pat::TupleStruct { elems, .. } => elems.iter_mut().for_each(|p| keep(p, changed, any)),
+            Pat::Struct { fields, .. } => fields.iter_mut().filter_map(|(_, p)| p.as_mut()).for_each(|p| keep(p, changed, any)),
+            Pat::Typed { pat, .. } => keep(pat, changed, any),
+            _ => {}
+        }
+    }
+    let mut s = s.clone();
+    let Stmt::Let { pat, .. } = &mut s else { return None };
+    let mut any = false;
+    keep(pat, &changed, &mut any);
+    any.then_some(s)
+}
+
+/// See `text_when`.
+enum TextWhen {
+    Deref,
+    AsStr,
+    AsDeref,
 }
 
 impl<'a> Lowerer<'a> {
@@ -265,8 +391,21 @@ impl<'a> Lowerer<'a> {
                     self.e.mark(expr.span);
                     self.tail_moving_args(expr, tail.unwrap());
                 }
+            } else if let Some(s) = appended_text_var(s, &stmts[i + 1..]).or_else(|| unchanged_parts(s, &stmts[i + 1..])) {
+                self.stmt(&s);
             } else {
+                // `if (x == null) return` unwraps `x` only for a rest of the block that uses it
+                if let Stmt::Expr { expr, .. } = s {
+                    if let ExprKind::If { cond, else_: None, .. } = &expr.kind {
+                        if let Cond::Expr(c) = &**cond {
+                            let mut checks = Vec::new();
+                            or_operands(c, &mut checks);
+                            self.unused_after_check = checks.iter().filter_map(|p| self.null_check(p, BinOp::Eq)).filter(|x| !visit::stmts_use(&stmts[i + 1..], x)).map(str::to_string).collect();
+                        }
+                    }
+                }
                 self.stmt(s);
+                self.unused_after_check.clear();
             }
         }
         self.local_funs.truncate(outer_funs);
@@ -323,10 +462,15 @@ impl<'a> Lowerer<'a> {
     }
 
     fn let_stmt(&mut self, pat: &Pat, ty: Option<&Type>, init: Option<&Expr>, else_: Option<&Block>) {
+        let fields = self.data_class_destructuring(pat, ty.cloned().or_else(|| init.and_then(|e| self.infer_type(e))));
+        let pat = fields.as_ref().unwrap_or(pat);
         let mut p = self.pat(pat);
-        // closures that assign to captured variables are FnMut and must be `let mut` to be called
-        if let (Some(Expr { kind: ExprKind::Lambda { body, .. }, .. }), Pat::Ident { mutable: false, .. }) = (init, pat) {
-            if visit::has_assignment(body) {
+        // closures that assign to captured variables or change them are FnMut and must be
+        // `let mut` to be called
+        if let (Some(Expr { kind: ExprKind::Lambda { body, params, .. }, .. }), Pat::Ident { mutable: false, .. }) = (init, pat) {
+            let mut own = vec!["it".to_string()];
+            params.iter().for_each(|p| p.pat.bindings(&mut own));
+            if visit::has_assignment(body) || self.changes_captured(body, &own) {
                 p = format!("mut {}", p);
             }
         }
@@ -368,15 +512,58 @@ impl<'a> Lowerer<'a> {
         self.bind_pat(pat, known);
     }
 
+    /// Does a lambda's body change a variable it captures (one in scope where the lambda is
+    /// declared, or a field of `this`; not its parameters `own`): call a mutating method on it (`log.push(s)`, or an Oxie
+    /// class's `&mut self` method), or pass it to a `&mut` parameter (`fill(log)`)?
+    fn changes_captured(&self, body: &Expr, own: &[String]) -> bool {
+        let captured = |e: &Expr| {
+            let mut cur = e;
+            while let ExprKind::Field { recv, safe: false, .. } | ExprKind::Index(recv, _) | ExprKind::Paren(recv) = &cur.kind {
+                cur = recv;
+            }
+            cur.ident().is_some_and(|n| !own.iter().any(|o| o == n) && (self.is_local(n) || self.implicit_field(n).is_some()))
+        };
+        let mut found = false;
+        visit::walk_expr(body, &mut |x| {
+            match &x.kind {
+                ExprKind::MethodCall { recv, name, safe: false, .. } => {
+                    if captured(recv) {
+                        let direct = recv.ident().is_some();
+                        let ty = if direct { self.infer_type(recv) } else { None };
+                        found |= crate::sema::MUTATING_METHODS.contains(&name.as_str()) || direct && self.changing_methods(ty.as_ref()).contains(name);
+                    }
+                }
+                ExprKind::Call { callee, args } => {
+                    if let Some(f) = callee.ident().filter(|n| !self.is_local(n)).and_then(|n| self.fun_info(n)) {
+                        for (a, p) in args.iter().zip(&f.params) {
+                            found |= a.name.is_none() && matches!(p.ty, Type::Ref { mutable: true, .. }) && a.value.ident().is_some() && captured(&a.value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            !found
+        });
+        found
+    }
+
     /// The calls to move into locals before a statement `e` that calls a method on a field of
     /// `this` (`items.push(next_id())`) whose arguments call methods of `this` taking `&mut self`.
     /// Rust borrows the field for the call before it runs the arguments, so rustc rejects the
     /// statement as written. Only when the call borrows the field (`borrowed_by`): a `Copy`
     /// field would be copied first and the statement compile. Also returns the field's name.
     fn args_changing_this<'e>(&self, e: &'e Expr) -> Option<(Vec<&'e Expr>, &'e str)> {
-        let ExprKind::MethodCall { recv, name, args, safe: false, .. } = &e.kind else { return None };
+        let (recv, name, args): (&Expr, &str, Vec<&Expr>) = match &e.kind {
+            ExprKind::MethodCall { recv, name, args, safe: false, .. } if args.iter().all(|a| a.name.is_none()) => (recv, name, args.iter().map(|a| &a.value).collect()),
+            // `m[k] = v` on a map field is `m.insert(k, v)`
+            ExprKind::Assign(None, target, value) if self.map_entry_types(target).is_some() => {
+                let ExprKind::Index(m, k) = &target.kind else { return None };
+                (m, "insert", vec![k, value])
+            }
+            _ => return None,
+        };
         let c = self.class.as_ref()?;
-        if c.is_static || self.self_by_value || args.iter().any(|a| a.name.is_some()) {
+        if c.is_static || self.self_by_value {
             return None;
         }
         let field = match &recv.kind {
@@ -394,7 +581,7 @@ impl<'a> Lowerer<'a> {
         let mut calls = Vec::new();
         let mut ran = false;
         for a in args {
-            self.calls_changing_this(&a.value, &mut calls, &mut ran)?;
+            self.calls_changing_this(a, &mut calls, &mut ran)?;
         }
         (!calls.is_empty()).then_some((calls, field))
     }
@@ -510,6 +697,8 @@ impl<'a> Lowerer<'a> {
                 }
                 *ran = true;
             }
+            // a conversion of a local's text or number can't tell that a call changed `this`
+            ExprKind::MethodCall { recv, name, args, safe: false, .. } if args.is_empty() && PLAIN_CONVERSIONS.contains(&name.as_str()) && self.is_plain_local(recv) => {}
             ExprKind::MethodCall { recv, args, safe: false, .. } if args.iter().all(|a| a.name.is_none()) => {
                 self.calls_changing_this(recv, calls, ran)?;
                 for a in args {
@@ -532,6 +721,25 @@ impl<'a> Lowerer<'a> {
         Some(())
     }
 
+    /// A text or number literal, or a local or parameter holding text or a number (not a field).
+    fn is_plain_local(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Char(_) | ExprKind::Bool(_) => true,
+            ExprKind::Paren(x) => self.is_plain_local(x),
+            _ => {
+                let Some(Some(t)) = e.ident().and_then(|n| self.local(n)) else { return false };
+                let mut t = t;
+                while let Type::Ref { inner, .. } = t {
+                    t = inner;
+                }
+                matches!(
+                    t.single_name(),
+                    Some("str" | "String" | "char" | "bool" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64")
+                )
+            }
+        }
+    }
+
     /// Moves the calls that change `this` out of the statement `e` (`args_changing_this`): emits
     /// a `let` for each, named after its method (`let next_id = self.next_id();`), and returns
     /// `e` reading the locals, which stay bound until `unbind_moved`. `taken`: names the
@@ -542,7 +750,7 @@ impl<'a> Lowerer<'a> {
         }
         let (calls, field) = self.args_changing_this(e)?;
         let (calls, field): (Vec<Expr>, String) = (calls.into_iter().cloned().collect(), field.to_string());
-        let method = called_name(e).unwrap_or_default().to_string();
+        let method = if matches!(e.kind, ExprKind::Assign(..)) { "insert" } else { called_name(e).unwrap_or_default() }.to_string();
         let mut moved: Vec<(Span, String)> = Vec::new();
         for c in &calls {
             let base = called_name(c).unwrap_or("value").to_string();
@@ -604,53 +812,114 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Should `for (x in iter)` borrow `iter`? Yes for an owned collection in a local variable that
-    /// is used after the loop, and for a collection field (moving it out of `&self` is an error).
+    /// is used after the loop, for a collection field (moving it out of `&self` is an error), and
+    /// for a collection field of a local that is a reference or is used after the loop.
     /// `Some(true)` when the elements are `Copy`, so the loop can still bind them by value.
     fn loop_borrow(&self, iter: &Expr) -> Option<bool> {
+        let of_self = || self.self_by_value || self.class.as_ref().is_none_or(|c| c.is_static);
         let ty = match &iter.kind {
             ExprKind::Path { .. } => {
                 let n = iter.ident()?;
                 match self.local(n) {
+                    // a shared reference is copied into the loop; a `&mut` one is reborrowed
+                    Some(Some(Type::Ref { mutable: false, .. })) => return None,
+                    Some(Some(Type::Ref { mutable: true, inner, .. })) if self.reused_iters.contains_key(&iter.span.start) => (**inner).clone(),
                     Some(t) if self.reused_iters.contains_key(&iter.span.start) => t.clone()?,
                     Some(_) => return None,
+                    None if of_self() => return None,
                     None => {
                         self.implicit_field(n)?;
                         self.class.as_ref()?.fields.get(n)?.clone()
                     }
                 }
             }
-            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => self.class.as_ref()?.fields.get(name)?.clone(),
+            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => {
+                if of_self() {
+                    return None;
+                }
+                self.class.as_ref()?.fields.get(name)?.clone()
+            }
+            ExprKind::Field { recv, name, safe: false } => {
+                let root = field_root(iter)?;
+                let by_ref = matches!(self.local(root)?, Some(Type::Ref { .. }));
+                if !by_ref && !self.reused_iters.contains_key(&iter.span.start) || self.shared_field(recv, name).is_some() {
+                    return None;
+                }
+                self.infer_type(iter)?
+            }
             _ => return None,
         };
-        if matches!(iter.kind, ExprKind::Field { .. }) || self.local(iter.ident()?).is_none() {
-            if self.self_by_value || self.class.as_ref()?.is_static {
-                return None;
-            }
+        if let Type::Slice(t) = &ty {
+            return Some(self.copy_elem(t));
         }
         let Type::Path { segs, .. } = &ty else { return None };
-        let [seg] = segs.as_slice() else { return None };
+        let Some(seg) = segs.last().filter(|_| segs.len() == 1 || segs[0].name == "std") else { return None };
         match seg.name.as_str() {
             "Vec" | "VecDeque" | "LinkedList" | "HashSet" | "BTreeSet" | "BinaryHeap" => {}
             "HashMap" | "BTreeMap" => return Some(false),
             _ => return None,
         }
-        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
         Some(match seg.generics.as_deref() {
-            Some([GenericArg::Type(t)]) => crate::sema::is_copy_simple(t, &copy),
+            Some([GenericArg::Type(t)]) => self.copy_elem(t),
             _ => false,
         })
+    }
+
+    /// The methods of the Oxie class or interface `t` names that change their object (`&mut self`).
+    pub(crate) fn changing_methods(&self, t: Option<&Type>) -> std::collections::HashSet<String> {
+        let Some(n) = t.and_then(|t| t.single_name()) else { return Default::default() };
+        let methods = match self.class_info(n) {
+            Some(c) if !c.is_shared => Some(&c.methods),
+            Some(_) => None,
+            None => self.k.traits.get(n).filter(|_| self.is_trait_name(n)).map(|t| &t.methods),
+        };
+        methods.into_iter().flatten().filter(|(_, m)| m.recv == crate::sema::Recv::RefMut).map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Is a collection element of type `t` bound by value in a loop that borrows the collection?
+    fn copy_elem(&self, t: &Type) -> bool {
+        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+        crate::sema::is_copy_simple(t, &copy)
+    }
+
+    /// For `for (x in xs)` over a `Vec` parameter that Oxie lends as `&[T]`: the element type,
+    /// and whether it is `Copy` (bound by value, as before the parameter was lent).
+    fn lent_elems(&self, iter: &Expr) -> Option<(Type, bool)> {
+        let n = iter.ident()?;
+        if !self.lent.iter().any(|l| l == n) {
+            return None;
+        }
+        let Some(Type::Ref { inner, .. }) = self.local(n)? else { return None };
+        let t = match &**inner {
+            Type::Slice(t) => (**t).clone(),
+            // an element of such a parameter, in a loop over it
+            Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Vec" => match segs[0].generics.as_deref() {
+                Some([GenericArg::Type(t)]) => t.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let copy = self.copy_elem(&t);
+        Some((t, copy))
     }
 
     /// Why `for (x in iter)` borrows `iter` (just written): it is used after the loop, a loop
     /// around this one uses it again, or it is a field of `this`.
     fn loop_borrow_decision(&mut self, iter: &Expr) {
-        let name = match &iter.kind {
-            ExprKind::Field { name, .. } => name.clone(),
+        let root = match &iter.kind {
+            ExprKind::Field { recv, .. } if !matches!(recv.kind, ExprKind::SelfValue) => field_root(iter),
+            _ => None,
+        };
+        let name = match (&iter.kind, root) {
+            (ExprKind::Field { .. }, Some(_)) => field_text(iter),
+            (ExprKind::Field { name, .. }, None) => name.clone(),
             _ => iter.ident().unwrap_or_default().to_string(),
         };
+        let used = root.map_or(name.as_str(), |r| r).to_string();
         let (why, cause) = match self.reused_iters.get(&iter.span.start) {
-            Some(Some(at)) if self.local(&name).is_some() => (format!("`{}` is used after the loop", name), Some(Span::new(*at as usize, *at as usize + name.len()))),
-            Some(None) if self.local(&name).is_some() => (format!("the loop around this one uses `{}` again", name), None),
+            _ if root.is_some_and(|r| matches!(self.local(r), Some(Some(Type::Ref { .. })))) => (format!("`{}` is a reference", used), None),
+            Some(Some(at)) if self.local(&used).is_some() => (format!("`{}` is used after the loop", used), Some(Span::new(*at as usize, *at as usize + used.len()))),
+            Some(None) if self.local(&used).is_some() => (format!("the loop around this one uses `{}` again", used), None),
             _ => (format!("`{}` belongs to `this`", name), None),
         };
         self.e.decide(iter.span, format!("&{}", name), why, cause);
@@ -701,6 +970,11 @@ impl<'a> Lowerer<'a> {
             return true;
         }
         match &e.kind {
+            // `a?.b = v` is an `if let`
+            ExprKind::Assign(_, target, _) if has_safe_link(target) && matches!(self.resolve_question_dots(target).kind, ExprKind::Field { safe: true, .. }) => {
+                self.expr(e, P_LOWEST);
+                true
+            }
             ExprKind::If { cond, then, else_ } => {
                 self.if_expr(cond, then, else_.as_deref(), None);
                 true
@@ -868,6 +1142,14 @@ impl<'a> Lowerer<'a> {
 
     /// Emits `e` converted to `ty` where Oxie allows implicit conversion.
     pub(crate) fn coerce(&mut self, e: &Expr, ty: &Type, pos: TyPos) {
+        // an alias of a function type is a boxed function wherever it is used
+        if let Type::Path { segs, .. } = ty {
+            if let [seg] = &segs[..] {
+                if let Some(f) = self.fn_aliases.get(&seg.name).filter(|_| seg.generics.is_none()).cloned() {
+                    return self.coerce(e, &f, TyPos::Field);
+                }
+            }
+        }
         // a block ending in a lambda (`{ [a] -> ... }`) for an `impl Fn` parameter stays unboxed
         let unboxed_fn = matches!(ty, Type::Fn { .. }) && !matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local);
         if matches!(e.kind, ExprKind::If { .. } | ExprKind::When { .. } | ExprKind::Block(_) | ExprKind::LabeledBlock { .. }) && !matches!(&e.kind, ExprKind::If { else_: None, .. }) && !unboxed_fn {
@@ -892,6 +1174,22 @@ impl<'a> Lowerer<'a> {
                     self.e.w(if *mutable { "&mut " } else { "&" });
                     self.e.w(stars);
                     self.expr(e, P_UNARY);
+                    return;
+                }
+            }
+        }
+        // `&[a, b]` for a `&[Shape]` parameter: each element is boxed
+        if let (Type::Ref { inner, .. }, ExprKind::Unary(UnOp::Ref, lit)) = (ty, &e.kind) {
+            if let (Type::Slice(elem), ExprKind::Array(items) | ExprKind::VecLit(items)) = (&**inner, &lit.kind) {
+                if self.is_impl_type(elem) && !items.iter().any(|x| matches!(x.kind, ExprKind::ArrayRepeat(..))) {
+                    self.e.w(if matches!(lit.kind, ExprKind::Array(_)) { "&[" } else { "&vec![" });
+                    for (i, x) in items.iter().enumerate() {
+                        if i > 0 {
+                            self.e.w(", ");
+                        }
+                        self.coerce(x, elem, TyPos::Generic);
+                    }
+                    self.e.w("]");
                     return;
                 }
             }
@@ -967,7 +1265,7 @@ impl<'a> Lowerer<'a> {
                     if boxed {
                         self.e.w(")");
                     }
-                } else if boxed && matches!(e.kind, ExprKind::Path { .. }) && !self.is_place(e) {
+                } else if boxed && matches!(e.kind, ExprKind::Path { .. }) && (!self.is_place(e) || e.ident().is_some_and(|n| self.is_impl_param(n))) {
                     self.e.w("Box::new(");
                     self.expr(e, P_LOWEST);
                     self.e.w(")");
@@ -995,7 +1293,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Type::Path { segs, .. }
-                if segs.len() == 1 && matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local) && self.is_trait_name(&segs[0].name) && self.is_constructed_value(e) =>
+                if segs.len() == 1 && matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local) && self.is_trait_name(&segs[0].name) && self.boxes_into(e, &segs[0].name) =>
             {
                 self.e.w("Box::new(");
                 self.expr(e, P_LOWEST);
@@ -1146,6 +1444,30 @@ impl<'a> Lowerer<'a> {
         self.fns.last().is_some_and(|f| f.throws && !f.is_lambda)
     }
 
+    /// `val (x, y) = point` on a data class: its fields in constructor order, as Kotlin's
+    /// `component1()`, `component2()`: `let Point { x, y, .. } = point;`.
+    fn data_class_destructuring(&self, pat: &Pat, ty: Option<Type>) -> Option<Pat> {
+        let Pat::Tuple(parts) = pat else { return None };
+        let ty = match ty? {
+            Type::Ref { inner, .. } => *inner,
+            t => t,
+        };
+        let name = ty.last_name()?.to_string();
+        let c = self.class_info(&name).filter(|c| c.is_data && !c.is_shared && !c.is_tuple)?;
+        let params = c.ctor_params();
+        if parts.len() > params.len() || parts.iter().any(|p| matches!(p, Pat::Rest)) {
+            return None;
+        }
+        let fields: Vec<(String, Option<Pat>)> = params
+            .iter()
+            .zip(parts)
+            .filter(|(_, p)| !matches!(p, Pat::Wild))
+            .map(|(f, p)| (f.name.clone().unwrap_or_default(), Some(p.clone())))
+            .collect();
+        let rest = fields.len() < c.fields.len();
+        Some(Pat::Struct { path: vec![name], fields, rest, span: Default::default() })
+    }
+
     /// A variable known to be `&str`, which converts to a `String` with `.to_string()`.
     fn is_str_var(&self, e: &Expr) -> bool {
         matches!(e.kind, ExprKind::Path { .. })
@@ -1166,18 +1488,82 @@ impl<'a> Lowerer<'a> {
 
     /// Constructor calls: `Point(1, 2)`, `Shape.Circle(1.0)`, `Point { .. }`, and variants and
     /// classes without fields: `Status.Done`, `Marker`.
+    /// Does `e` become a `Box<dyn I>` where one is expected: a newly built value, a value of an
+    /// Oxie class or enum that implements `iface`, or an `impl I` parameter?
+    fn boxes_into(&self, e: &Expr, iface: &str) -> bool {
+        if self.is_constructed_value(e) || e.ident().is_some_and(|n| self.is_impl_param(n)) {
+            return true;
+        }
+        let Some(owner) = self.infer_type(e).filter(|t| matches!(t, Type::Path { .. })).and_then(|t| self.type_owner(&t)) else { return false };
+        let interfaces = self.class_at(&owner).map(|c| &c.interfaces).or_else(|| self.enum_at(&owner).map(|e| &e.interfaces));
+        interfaces.is_some_and(|is| is.iter().any(|i| i == iface))
+    }
+
+    /// The interface method `name` of a value: of its interface (`Shape`, `&Shape`, `Box<Shape>`)
+    /// or of one its class or enum implements.
+    fn iface_method(&self, recv: &Expr, name: &str) -> Option<crate::sema::MethodInfo> {
+        let mut t = self.infer_type(recv)?;
+        loop {
+            t = match &t {
+                Type::Ref { inner, .. } => (**inner).clone(),
+                Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Box" => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(inner)]) => inner.clone(),
+                    _ => return None,
+                },
+                _ => break,
+            };
+        }
+        let mut ifaces: Vec<String> = match t.single_name() {
+            Some(n) if self.is_oxie_iface(&t) => vec![n.to_string()],
+            _ => {
+                let owner = self.type_owner(&t)?;
+                self.class_at(&owner).map(|c| c.interfaces.clone()).or_else(|| self.enum_at(&owner).map(|e| e.interfaces.clone()))?
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        while let Some(i) = ifaces.pop() {
+            if !seen.insert(i.clone()) {
+                continue;
+            }
+            let Some(ti) = self.k.traits.get(&i) else { continue };
+            if let Some(m) = ti.methods.get(name) {
+                return Some(m.clone());
+            }
+        }
+        None
+    }
+
+    /// For a call that puts a value into a collection of interface values or functions
+    /// (`shapes.push(s)`, `rules.insert(0, f)`, `by_name.insert(k, s)`): the index of that
+    /// argument and the element type, which boxes it.
+    fn stored_elem(&self, recv: &Expr, name: &str, n_args: usize) -> Option<(usize, Type)> {
+        let mut t = self.infer_type(recv)?;
+        while let Type::Ref { inner, .. } = t {
+            t = *inner;
+        }
+        let Type::Path { segs, .. } = &t else { return None };
+        let [seg] = segs.as_slice() else { return None };
+        let (i, elem) = match (seg.name.as_str(), seg.generics.as_deref(), name, n_args) {
+            ("Vec" | "VecDeque", Some([GenericArg::Type(t)]), "push" | "push_back" | "push_front", 1) => (0, t),
+            ("Vec" | "VecDeque", Some([GenericArg::Type(t)]), "insert", 2) => (1, t),
+            ("HashMap" | "BTreeMap", Some([_, GenericArg::Type(t)]), "insert", 2) => (1, t),
+            _ => return None,
+        };
+        self.is_impl_type(elem).then(|| (i, elem.clone()))
+    }
+
     fn is_constructed_value(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::StructLit { .. } => true,
             ExprKind::Call { callee, .. } => match &callee.kind {
                 ExprKind::Path { segs, .. } => {
                     let last = segs.last().map(|s| s.as_str()).unwrap_or("");
-                    is_type_like(last) && !matches!(last, "Some" | "Ok" | "Err" | "None" | "Box" | "Rc" | "Arc")
+                    (self.k.is_type_name(last) || self.k.variant_owner.contains_key(last)) && !matches!(last, "Some" | "Ok" | "Err" | "None" | "Box" | "Rc" | "Arc")
                 }
                 _ => false,
             },
             ExprKind::MethodCall { recv, name, .. } => {
-                is_type_like(name) && matches!(self.as_path(recv), Some((_, PathKind::Type)))
+                (self.k.is_type_name(name) || self.k.variant_owner.contains_key(name)) && matches!(self.as_path(recv), Some((_, PathKind::Type)))
             }
             ExprKind::Path { .. } | ExprKind::Field { .. } => self.is_unit_variant(e) || self.is_unit_class_value(e),
             _ => false,
@@ -1192,6 +1578,10 @@ impl<'a> Lowerer<'a> {
         let Some(Type::Path { segs, .. }) = &f.ret else { return None };
         if segs.len() != 1 || segs[0].generics.is_some() || segs[0].fn_sugar.is_some() || !self.is_trait_name(&segs[0].name) {
             return None;
+        }
+        // an interface method returns its interface boxed, like each implementation
+        if self.iface_sig && self.is_oxie_iface(f.ret.as_ref()?) {
+            return Some(true);
         }
         let Some(body) = f.body.as_ref().filter(|_| !f.mods.is_override) else { return Some(false) };
         let mut classes: Vec<String> = Vec::new();
@@ -1270,7 +1660,8 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn is_place(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Path { segs, generics: None, .. } => {
-                segs.len() == 1 && !is_type_like(&segs[0]) && !self.k.is_fun_name(&segs[0]) || is_const_like(segs.last().unwrap())
+                let last = segs.last().unwrap();
+                segs.len() == 1 && !self.k.is_type_name(&segs[0]) && !self.k.is_fun_name(&segs[0]) || is_const_like(last) && !self.k.is_type_name(last)
             }
             ExprKind::SelfValue => true,
             ExprKind::Field { recv, safe: false, .. } => self.as_path(e).is_none() && self.is_place(recv),
@@ -1278,6 +1669,83 @@ impl<'a> Lowerer<'a> {
             ExprKind::Paren(x) => self.is_place(x),
             ExprKind::Unary(UnOp::Deref, x) => self.is_place(x),
             _ => false,
+        }
+    }
+
+    /// `x!!` on a variable or field, followed by a method call that borrows the value, unwraps
+    /// a reference instead of moving the value out (as `?.` does): `x.as_ref().unwrap()`, or
+    /// `x.as_mut().unwrap()` for a method that changes it. Also through fields: `a!!.b!!.len()`.
+    /// A `Copy` value and a method that takes the value (`into_bytes`) unwrap as they are.
+    fn unwrap_for_call(&self, recv: &Expr, method: &str) -> Option<Expr> {
+        if method.starts_with("into_") || method.starts_with("unwrap") || matches!(method, "expect" | "join" | "await") {
+            return None;
+        }
+        let value_ty = |x: &Expr| {
+            let mut t = self.through_unwraps_type(x)?;
+            while let Type::Ref { inner, .. } = t {
+                t = *inner;
+            }
+            Some(t)
+        };
+        let mut x = strip_paren(recv);
+        while let ExprKind::Field { recv, safe: false, .. } = &x.kind {
+            x = strip_paren(recv);
+        }
+        let ExprKind::Unwrap(_) = &x.kind else { return None };
+        let recv_ty = value_ty(strip_paren(recv));
+        let class_recv = recv_ty.as_ref().and_then(|t| self.type_owner(t)).and_then(|o| self.class_at(&o)).and_then(|c| c.methods.get(method)).map(|m| m.recv.clone());
+        let mutating = match class_recv {
+            Some(crate::sema::Recv::Value) => return None,
+            Some(r) => r == crate::sema::Recv::RefMut,
+            None => crate::sema::MUTATING_METHODS.contains(&method) && method != "replace",
+        };
+        self.unwrap_places(recv, if mutating { "as_mut" } else { "as_ref" })
+    }
+
+    /// `e` with each `x!!` on a place in its chain of fields unwrapping a reference.
+    fn unwrap_places(&self, e: &Expr, borrow: &str) -> Option<Expr> {
+        match &e.kind {
+            ExprKind::Paren(x) => self.unwrap_places(x, borrow),
+            ExprKind::Field { recv, name, safe: false } if self.as_path(e).is_none() => {
+                let r = self.unwrap_places(recv, borrow)?;
+                Some(Expr::new(ExprKind::Field { recv: Box::new(r), name: name.clone(), safe: false }, e.span))
+            }
+            ExprKind::Unwrap(x) => {
+                let x = strip_paren(x);
+                let place = match &x.kind {
+                    ExprKind::Field { safe: false, .. } => self.as_path(x).is_none(),
+                    ExprKind::Path { .. } | ExprKind::Index(..) | ExprKind::SelfValue => self.is_place(x),
+                    _ => false,
+                };
+                let inner = self.unwrap_places(x, borrow);
+                let copy = self.through_unwraps_type(x).and_then(|t| option_inner(&t)).is_some_and(|t| {
+                    let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+                    crate::sema::is_copy_simple(&t, &copy)
+                });
+                if !place || copy {
+                    return inner.map(|i| Expr::new(ExprKind::Unwrap(Box::new(i)), e.span));
+                }
+                let x = inner.unwrap_or_else(|| x.clone());
+                let call = Expr::new(ExprKind::MethodCall { recv: Box::new(x), name: borrow.to_string(), generics: None, args: Vec::new(), safe: false }, e.span);
+                Some(Expr::new(ExprKind::Unwrap(Box::new(call)), e.span))
+            }
+            _ => None,
+        }
+    }
+
+    /// The type of `e`, also through fields read after `!!` (`a!!.b`).
+    fn through_unwraps_type(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Paren(x) => self.through_unwraps_type(x),
+            ExprKind::Unwrap(x) => option_inner(&self.through_unwraps_type(x)?),
+            ExprKind::Field { recv, name, safe: false } if matches!(strip_paren(recv).kind, ExprKind::Unwrap(_) | ExprKind::Field { .. }) => {
+                let mut t = self.through_unwraps_type(recv)?;
+                while let Type::Ref { inner, .. } = t {
+                    t = *inner;
+                }
+                self.class_info(t.single_name()?)?.fields.iter().find(|f| &f.name == name).map(|f| f.ty.clone()).filter(|t| *t != Type::Infer)
+            }
+            _ => self.chain_value_type(e),
         }
     }
 
@@ -1312,6 +1780,20 @@ impl<'a> Lowerer<'a> {
             Cast(..) => P_CAST,
             Unary(..) => P_UNARY,
             Is { negated: true, .. } | In { negated: true, .. } => P_UNARY,
+            // `x in a..b` is `a <= x && x < b`, a comparison with one bound, or a block that
+            // evaluates `x` once
+            In { item, coll, .. } if matches!(strip_paren(coll).kind, Range { .. }) => {
+                let Range { start, end, .. } = &strip_paren(coll).kind else { unreachable!() };
+                if !self.is_place(item) && !is_literal(item) {
+                    P_PRIMARY
+                } else if start.is_some() && end.is_some() {
+                    BinOp::And.prec()
+                } else if start.is_some() || end.is_some() {
+                    BinOp::Eq.prec()
+                } else {
+                    P_PRIMARY
+                }
+            }
             Try(_) if self.in_try_block() => P_PRIMARY,
             Try(_) | Unwrap(_) | Await(_) | Field { .. } | MethodCall { .. } | Call { .. } | Index(..) | In { .. } => P_POSTFIX,
             Paren(x) => self.prec_of(x),
@@ -1337,6 +1819,7 @@ impl<'a> Lowerer<'a> {
             Elvis(_, r) => !is_literal(r),
             Try(_) => self.in_try_block(),
             MethodCall { name, args, .. } => (name == "copy" && !args.is_empty() && args.iter().all(|a| a.name.is_some())) || name == "let",
+            In { item, coll, negated: false } => matches!(strip_paren(coll).kind, Range { .. }) && !self.is_place(item) && !is_literal(item),
             Paren(x) => self.emits_block_like(x),
             _ => false,
         }
@@ -1374,6 +1857,16 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn expr_inner(&mut self, e: &Expr) {
         use ExprKind::*;
+        // `x!!.len()` reads through the value: `x.as_ref().unwrap().len()`
+        if let MethodCall { recv, name, safe: false, .. } = &e.kind {
+            if let Some(r) = self.unwrap_for_call(recv, name) {
+                let mut e = e.clone();
+                if let MethodCall { recv, .. } = &mut e.kind {
+                    **recv = r;
+                }
+                return self.expr_inner(&e);
+            }
+        }
         // fields of shared-class handles
         match &e.kind {
             Field { safe: false, .. } | Index(..) | MethodCall { safe: false, .. } if self.shared_access(e) => return,
@@ -1431,6 +1924,19 @@ impl<'a> Lowerer<'a> {
                 self.expr(x, P_POSTFIX);
                 self.e.w(if *op == BinOp::Eq { ".is_none()" } else { ".is_some()" });
             }
+            Binary(op @ (BinOp::Or | BinOp::And), l, r) if self.null_guard(*op, l, r).is_some() => {
+                let (x, ty, by_value) = self.null_guard(*op, l, r).unwrap();
+                self.e.w(&esc(&x));
+                if !by_value {
+                    self.e.w(".as_ref()");
+                }
+                self.e.w(&format!("{}|{}| ", if *op == BinOp::Or { ".map_or(true, " } else { ".is_some_and(" }, esc(&x)));
+                self.push_scope();
+                self.bind_name(&x, Some(ty));
+                self.expr(r, P_LOWEST);
+                self.pop_scope();
+                self.e.w(")");
+            }
             Binary(op, l, r) => {
                 if *op == BinOp::Add && self.is_string_concat(e) {
                     self.string_concat(e);
@@ -1466,6 +1972,10 @@ impl<'a> Lowerer<'a> {
                     )),
                 );
                 self.expr(target, P_LOWEST);
+            }
+            Assign(op, target, value) if has_safe_link(target) && matches!(self.resolve_question_dots(target).kind, Field { safe: true, .. }) => {
+                let target = self.resolve_question_dots(target);
+                self.safe_assign(*op, &target, value);
             }
             Assign(op, target, value) => {
                 let target_ty = self.assign_target_type(target);
@@ -1515,7 +2025,10 @@ impl<'a> Lowerer<'a> {
                 self.e.w("[");
                 // a list indexed with another integer type: `as usize` costs nothing, and a
                 // negative index fails the bounds check like one past the end
-                if self.int_index(r, i) {
+                if self.map_entry_types(e).is_some() {
+                    // a variable of unknown type is often a `&str` (`for (w in line.split(' '))`)
+                    self.map_key(i, false);
+                } else if self.int_index(r, i) {
                     self.expr(i, P_CAST);
                     self.e.w(" as usize");
                     self.e.decide(i.span, "as usize", "indexes are `usize`", None);
@@ -1554,31 +2067,15 @@ impl<'a> Lowerer<'a> {
                 self.e.w(&format!(" as {}", tt));
             }
             Elvis(l, r) => self.elvis(l, r),
-            In { item, coll, negated } if matches!(strip_paren(coll).kind, Range { .. }) => {
-                let Range { start, end, inclusive } = &strip_paren(coll).kind else { unreachable!() };
+            In { item, coll, negated } if matches!(range_in(coll).kind, Range { .. }) => {
+                let Range { start, end, inclusive } = &range_in(coll).kind else { unreachable!() };
                 self.in_range(item, start.as_deref(), end.as_deref(), *inclusive, *negated);
             }
             In { item, coll, negated } => {
                 if *negated {
                     self.e.w("!");
                 }
-                self.expr(coll, P_POSTFIX);
-                let kind = self.contains_kind(coll);
-                self.e.w(if kind == Contains::Key { ".contains_key(" } else { ".contains(" });
-                // a key that already is a reference (`"ada"`, a `&str`) is looked up as it is, so it
-                // works for `String` keys too
-                let lend = match kind {
-                    Contains::Key => self.auto_borrow(item, false),
-                    Contains::Text => !is_string_lit(coll) && !self.is_char(item),
-                    Contains::Value => true,
-                };
-                if lend {
-                    self.e.w("&");
-                    self.expr(item, P_UNARY);
-                } else {
-                    self.expr(item, P_LOWEST);
-                }
-                self.e.w(")");
+                self.contains(coll, item);
             }
             Is { expr, pat, negated } => {
                 if *negated {
@@ -1586,7 +2083,7 @@ impl<'a> Lowerer<'a> {
                 }
                 self.e.w("matches!(");
                 self.expr(expr, P_LOWEST);
-                let p = self.pat(pat);
+                let p = self.pat_against(pat, Some(expr));
                 self.e.w(&format!(", {})", p));
             }
             Pair(a, b) => {
@@ -1703,8 +2200,18 @@ impl<'a> Lowerer<'a> {
                 let borrows = self.loop_borrow(iter);
                 // the body changes the elements: borrowed mutably (for a field, sema makes the
                 // method `&mut self` by the same rule)
-                let writes_elements = borrows.is_some()
-                    && matches!(pat, Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } if visit::writes_through(body, name));
+                let changing = self.changing_methods(self.elem_type(iter).as_ref());
+                let changes = |m: &str| changing.contains(m);
+                let writes_elements = borrows.is_some() && {
+                    let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
+                    let mut names = Vec::new();
+                    if plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)) {
+                        pat.bindings(&mut names);
+                    }
+                    names.iter().any(|n| visit::writes_through(body, n, &changes))
+                };
+                // a `&mut` reference used again after the loop is reborrowed, not moved into it
+                let reborrow = iter.ident().is_some_and(|n| matches!(self.local(n), Some(Some(Type::Ref { mutable: true, .. }))));
                 // an element of a list of interface values is a box: `Box<dyn Shape>`, or a
                 // reference to one when the loop borrows the list
                 let boxed = match pat {
@@ -1718,24 +2225,37 @@ impl<'a> Lowerer<'a> {
                     }
                     _ => None,
                 };
+                let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
+                let lent = if borrows.is_none() { self.lent_elems(iter) } else { None };
+                let lent_copy = lent.as_ref().is_some_and(|(_, copy)| *copy) && (plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)));
                 match borrows {
                     // a collection used again after the loop is borrowed, not consumed; mutably
                     // when the body changes the elements (`for (x in xs) x.qty += 1`)
                     Some(copy) => {
-                        let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
                         let by_value = copy && (plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)));
+                        let (shared, unique) = if reborrow { ("&*", "&mut *") } else { ("&", "&mut ") };
                         if writes_elements {
-                            self.e.w(&format!("for {} in &mut ", p));
+                            self.e.w(&format!("for {} in {}", p, unique));
                         } else if by_value {
-                            self.e.w(&format!("for &{} in &", p));
+                            self.e.w(&format!("for &{} in {}", p, shared));
                         } else {
-                            self.e.w(&format!("for {} in &", p));
+                            self.e.w(&format!("for {} in {}", p, shared));
                         }
                         self.expr(iter, P_POSTFIX);
                         self.loop_borrow_decision(iter);
                     }
+                    // a `Vec` parameter that Oxie lends still gives its `Copy` elements by value
+                    None if lent_copy => {
+                        self.e.w(&format!("for &{} in ", p));
+                        self.expr(iter, P_LOWEST);
+                    }
                     None => {
-                        self.e.w(&format!("for {} in ", p));
+                        // an element taken out of a local collection and changed is a `mut` variable
+                        let owned = iter.ident().and_then(|n| self.local(n)).is_some_and(|t| {
+                            matches!(t, Some(Type::Path { segs, .. }) if segs.len() == 1 && matches!(segs[0].name.as_str(), "Vec" | "VecDeque" | "LinkedList"))
+                        });
+                        let changed = owned && matches!(pat, Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } if visit::writes_through(body, name, &changes));
+                        self.e.w(&format!("for {}{} in ", if changed { "mut " } else { "" }, p));
                         let needs_parens = contains_struct_lit(iter);
                         if needs_parens {
                             self.e.w("(");
@@ -1753,16 +2273,34 @@ impl<'a> Lowerer<'a> {
                     (Pat::Ident { by_ref: false, sub: None, .. }, Some(copy)) => {
                         self.elem_type(iter).map(|t| if copy && !writes_elements { t } else { Type::Ref { lifetime: None, mutable: writes_elements, inner: Box::new(t) } })
                     }
-                    (Pat::Ident { by_ref: false, sub: None, .. }, None) if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
+                    (Pat::Ident { by_ref: false, sub: None, .. }, None) if lent.is_some() => lent.clone().map(|(t, copy)| if lent_copy && copy { t } else { Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) } }),
+                    // `for (s in &names)` and `names.iter()`: references to the elements
+                    (Pat::Ident { by_ref: false, sub: None, .. }, None) => match &strip_paren(iter).kind {
+                        Unary(op @ (UnOp::Ref | UnOp::RefMut), x) => self.elem_type(x).map(|t| Type::Ref { lifetime: None, mutable: *op == UnOp::RefMut, inner: Box::new(t) }),
+                        MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "iter" | "iter_mut") => {
+                            self.elem_type(recv).map(|t| Type::Ref { lifetime: None, mutable: name == "iter_mut", inner: Box::new(t) })
+                        }
+                        _ if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 self.bind_pat(pat, elem);
                 if let Some((name, t)) = boxed {
                     self.bind_name(&name, Some(t));
                 }
+                // the elements of a lent parameter are lent too (`for (row in grid) for (x in row)`)
+                let lent_elem = match pat {
+                    Pat::Ident { name, by_ref: false, sub: None, .. } if lent.is_some() && !lent_copy => Some(name.clone()),
+                    _ => None,
+                };
+                self.lent.extend(lent_elem.clone());
                 self.loops.push(LoopCtx { dowhile_label: None });
                 self.block_stmt(body);
                 self.loops.pop();
+                if lent_elem.is_some() {
+                    self.lent.pop();
+                }
                 self.pop_scope();
             }
             Lambda { .. } => self.lambda(e, None, None),
@@ -1790,6 +2328,16 @@ impl<'a> Lowerer<'a> {
                     self.expr(x, P_POSTFIX);
                     self.e.w(".into())");
                 } else {
+                    // a function that returns `()` or another value can't return an error
+                    if let Some(f) = self.fns.last() {
+                        let result = f.ret.as_ref().and_then(|t| t.last_name()).is_some_and(|n| n == "Result");
+                        if !f.throws && !f.is_lambda && !result {
+                            self.diags.push(
+                                Diag::error(e.span, "`throw` in a function that doesn't declare `throws`")
+                                    .with_help("declare that the function can fail: `fun name(...) throws { ... }`, or `fun name(...): T throws` with a result type"),
+                            );
+                        }
+                    }
                     self.e.w("return Err(");
                     self.expr(x, P_POSTFIX);
                     self.e.w(".into())");
@@ -1886,14 +2434,20 @@ impl<'a> Lowerer<'a> {
         let cmp = p == 5;
         let lp = if cmp { p + 1 } else { p };
         let by_value = matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem);
+        // text compares as `&str`, whatever the references around the parameter
+        let text = |x: &Expr| cmp && matches!(x.kind, ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Template(_));
         if by_value && is_scalar_literal(r) && self.is_ref_lambda_param(l) {
             self.read_value(l);
+        } else if text(r) && self.is_ref_lambda_param(l) {
+            self.read_text(l);
         } else {
             self.operand(l, lp, matches!(op, BinOp::Lt | BinOp::Shl));
         }
         self.e.w(&format!(" {} ", op.as_str()));
         if by_value && is_scalar_literal(l) && self.is_ref_lambda_param(r) {
             self.read_value(r);
+        } else if text(l) && self.is_ref_lambda_param(r) {
+            self.read_text(r);
         } else {
             self.operand(r, p + 1, before_lt);
         }
@@ -1923,14 +2477,18 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `x in a..b` -> `a <= x && x < b` (x is evaluated once)
+    /// `x in a..b` -> `a <= x && x < b` (x is evaluated once). In parentheses only after the `!`
+    /// of `!in`: `prec_of` tells `expr` where it needs them.
     fn in_range(&mut self, item: &Expr, start: Option<&Expr>, end: Option<&Expr>, inclusive: bool, negated: bool) {
         let simple = self.is_place(item) || is_literal(item);
         let var = if simple { None } else { Some(self.fresh("x")) };
+        let parens = negated && simple;
         if negated {
             self.e.w("!");
         }
-        self.e.w("(");
+        if parens {
+            self.e.w("(");
+        }
         if let Some(v) = &var {
             self.e.w(&format!("{{ let {} = ", v));
             self.expr(item, P_LOWEST);
@@ -1962,7 +2520,9 @@ impl<'a> Lowerer<'a> {
         if var.is_some() {
             self.e.w(" }");
         }
-        self.e.w(")");
+        if parens {
+            self.e.w(")");
+        }
     }
 
     fn comma_list(&mut self, v: &[Expr]) {
@@ -2013,6 +2573,60 @@ impl<'a> Lowerer<'a> {
         self.e.w(")");
     }
 
+    /// `a?.b = v` assigns only when `a` isn't null: `if let Some(x) = a.as_mut() { x.b = v; }`,
+    /// with an `if let` for each `?.` (`a?.b?.c = v`).
+    fn safe_assign(&mut self, op: Option<BinOp>, target: &Expr, value: &Expr) {
+        let ExprKind::Field { recv, name, .. } = &target.kind else { return };
+        let (base, links) = chain_links(recv);
+        let (prefix, segs) = Self::split_segments(&links);
+        let mut opened = 0;
+        // the value before the first `?.`, borrowed mutably when it is a variable or field
+        let mut v = self.fresh("v");
+        self.e.w(&format!("if let Some({}) = ", v));
+        match prefix.last() {
+            Some(l) => self.expr(l, P_POSTFIX),
+            None => self.expr(base, P_POSTFIX),
+        }
+        if self.is_place(base) && prefix.iter().all(|x| matches!(x.kind, ExprKind::Field { .. } | ExprKind::Index(..))) {
+            self.e.w(".as_mut()");
+        }
+        self.open_block();
+        opened += 1;
+        for seg in &segs {
+            let next = self.fresh("v");
+            self.e.w(&format!("if let Some({}) = {}", next, v));
+            self.segment_links(seg);
+            if matches!(seg.last().unwrap().kind, ExprKind::Field { .. } | ExprKind::Index(..)) {
+                self.e.w(".as_mut()");
+            }
+            self.open_block();
+            opened += 1;
+            v = next;
+        }
+        self.e.w(&format!("{}.{}", v, esc(name)));
+        match op {
+            Some(o) => self.e.w(&format!(" {}= ", o.as_str())),
+            None => self.e.w(" = "),
+        }
+        let field_ty = self.link_recv_type(recv, true).and_then(|t| self.class_info(t.single_name()?)?.fields.iter().find(|f| &f.name == name).map(|f| f.ty.clone())).filter(|t| *t != Type::Infer);
+        match (op, field_ty) {
+            (None, Some(t)) => self.coerce(value, &t, TyPos::Local),
+            _ => self.expr(value, P_LOWEST),
+        }
+        self.e.w(";");
+        for _ in 0..opened {
+            self.e.dedent();
+            self.e.nl();
+            self.e.w("}");
+        }
+    }
+
+    fn open_block(&mut self) {
+        self.e.w(" {");
+        self.e.indent();
+        self.e.nl();
+    }
+
     fn assign_target_type(&self, target: &Expr) -> Option<Type> {
         match &target.kind {
             ExprKind::Path { .. } => {
@@ -2023,6 +2637,8 @@ impl<'a> Lowerer<'a> {
                 self.class.as_ref().and_then(|c| if c.is_static { None } else { c.fields.get(n).cloned() })
             }
             ExprKind::Field { recv, name, .. } if matches!(recv.kind, ExprKind::SelfValue) => self.class.as_ref().and_then(|c| c.fields.get(name).cloned()),
+            // a field of another value of an Oxie class (`p.age = 5`, `h.other = Square(3.0)`)
+            ExprKind::Field { safe: false, .. } => self.infer_type(target),
             _ => None,
         }
         .filter(|t| *t != Type::Infer)
@@ -2059,12 +2675,12 @@ impl<'a> Lowerer<'a> {
             Cond::Let { pat, expr, implicit_some } => {
                 let end = guards_end(1);
                 self.e.w("match ");
-                self.expr(expr, P_LOWEST + 1);
+                self.let_subject(pat, expr, *implicit_some);
                 self.e.w(" {");
                 self.e.indent();
                 self.e.nl();
                 self.push_scope();
-                let p = self.pat(pat);
+                let p = self.let_cond_pat(pat, expr, *implicit_some);
                 if *implicit_some {
                     self.e.w(&format!("Some({})", p));
                 } else {
@@ -2162,12 +2778,19 @@ impl<'a> Lowerer<'a> {
         and_operands(e, &mut parts);
         let mut typed = Vec::new();
         let mut out = Vec::new();
-        for p in parts {
-            match self.null_check(p, BinOp::Ne).and_then(|x| self.narrowable(x, then).map(|t| (x, t))) {
+        for (i, &p) in parts.iter().enumerate() {
+            // a branch (and rest of the condition) that doesn't use `x` keeps the check (`x.is_some()`)
+            let used = |x: &&str| {
+                let mut names = Vec::new();
+                parts[i + 1..].iter().for_each(|c| visit::idents_in(c, &mut names));
+                names.iter().any(|n| n == x) || visit::stmts_use(&then.stmts, x)
+            };
+            match self.null_check(p, BinOp::Ne).filter(used).and_then(|x| self.narrowable(x, then).map(|t| (x, t))) {
                 Some((x, inner)) => {
                     let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
                     let by_value = crate::sema::is_copy_simple(&inner, &copy);
-                    let mutable = !by_value && visit::writes_through(then, x);
+                    let changing = self.changing_methods(Some(&inner));
+                    let mutable = !by_value && visit::writes_through(then, x, &|m| changing.contains(m));
                     let var = Expr::new(ExprKind::Path { segs: vec![x.to_string()], generics: None, global: false }, p.span);
                     let expr = if by_value { var } else { Expr::new(ExprKind::Unary(if mutable { UnOp::RefMut } else { UnOp::Ref }, Box::new(var)), p.span) };
                     let ty = if by_value { inner } else { Type::Ref { lifetime: None, mutable, inner: Box::new(inner) } };
@@ -2182,6 +2805,33 @@ impl<'a> Lowerer<'a> {
         }
         let cond = if out.len() == 1 { out.pop().unwrap() } else { Cond::Chain(out) };
         (Some(cond), typed)
+    }
+
+    /// `x == null || r` (`op` `Or`) or `x != null && r` (`And`) on a local `T?` that `r` uses:
+    /// `x` is the value in `r` (`x.as_ref().map_or(true, |x| r)`). Returns `x`, its type in `r`,
+    /// and whether it is used by value (a `Copy` value).
+    fn null_guard(&self, op: BinOp, l: &Expr, r: &Expr) -> Option<(String, Type, bool)> {
+        let x = self.null_check(l, if op == BinOp::Or { BinOp::Eq } else { BinOp::Ne })?;
+        let mut names = Vec::new();
+        visit::idents_in(r, &mut names);
+        if !names.iter().any(|n| n == x) {
+            return None;
+        }
+        // `r` becomes a lambda's body: nothing in it may leave the function or a loop
+        let mut leaves = false;
+        visit::walk_expr(r, &mut |e| {
+            leaves |= matches!(e.kind, ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) | ExprKind::Try(_) | ExprKind::Throw(_) | ExprKind::Assign(..) | ExprKind::Lambda { .. });
+            !leaves
+        });
+        if leaves || self.is_throwing_call(r) || uses_as_optional(r, x) {
+            return None;
+        }
+        let body = Block { stmts: vec![Stmt::Expr { expr: r.clone(), semi: false }], span: r.span };
+        let inner = self.narrowable(x, &body)?;
+        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+        let by_value = crate::sema::is_copy_simple(&inner, &copy);
+        let ty = if by_value { inner } else { Type::Ref { lifetime: None, mutable: false, inner: Box::new(inner) } };
+        Some((x.to_string(), ty, by_value))
     }
 
     /// `x == null` / `null == x` (or `!=`), for a variable `x`: its name.
@@ -2224,16 +2874,33 @@ impl<'a> Lowerer<'a> {
     fn narrowing_exit(&mut self, e: &Expr) -> bool {
         let ExprKind::If { cond, then, else_: None } = &e.kind else { return false };
         let Cond::Expr(c) = &**cond else { return false };
-        let Some(x) = self.null_check(c, BinOp::Eq) else { return false };
+        // `x == null`, or `a == null || b == null`
+        let mut checks = Vec::new();
+        or_operands(c, &mut checks);
+        let Some(names) = checks.iter().map(|p| self.null_check(p, BinOp::Eq).map(str::to_string)).collect::<Option<Vec<String>>>() else { return false };
+        if names.iter().enumerate().any(|(i, n)| names[..i].contains(n)) || names.iter().all(|n| self.unused_after_check.contains(n)) {
+            return false;
+        }
         let exits = matches!(then.stmts.last(), Some(Stmt::Expr { expr, .. }) if expr.diverges());
         let empty = Block { stmts: Vec::new(), span: then.span };
-        let Some(inner) = self.narrowable(x, &empty).filter(|_| exits) else { return false };
-        let x = x.to_string();
-        self.e.w(&format!("let Some({}) = {} else ", esc(&x), esc(&x)));
+        let Some(inner) = names.iter().map(|x| self.narrowable(x, &empty)).collect::<Option<Vec<Type>>>().filter(|_| exits) else { return false };
+        // a name the rest of the block doesn't use is checked, not bound
+        let pats: Vec<String> = names.iter().map(|x| format!("Some({})", if self.unused_after_check.contains(x) { "_".to_string() } else { esc(x) })).collect();
+        let vals: Vec<String> = names.iter().map(|x| esc(x)).collect();
+        if names.len() == 1 {
+            self.e.w(&format!("let {} = {} else ", pats[0], vals[0]));
+        } else {
+            self.e.w(&format!("let ({}) = ({}) else ", pats.join(", "), vals.join(", ")));
+        }
         self.block_stmt(then);
         self.e.w(";");
-        self.e.decide(c.span, format!("let Some({}) = {} else", x, x), format!("`{}` is not null after this line", x), None);
-        self.bind_name(&x, Some(inner));
+        let shown = names.iter().map(|x| format!("`{}`", x)).collect::<Vec<_>>().join(" and ");
+        self.e.decide(c.span, format!("let {} = {} else", pats.join(", "), vals.join(", ")), format!("{} {} not null after this line", shown, if names.len() == 1 { "is" } else { "are" }), None);
+        for (x, t) in names.iter().zip(inner) {
+            if !self.unused_after_check.contains(x) {
+                self.bind_name(x, Some(t));
+            }
+        }
         true
     }
 
@@ -2259,16 +2926,98 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Cond::Let { pat, expr, implicit_some } => {
-                let p = self.pat(pat);
+                let p = self.let_cond_pat(pat, expr, *implicit_some);
                 if *implicit_some {
                     self.e.w(&format!("let Some({}) = ", p));
                 } else {
                     self.e.w(&format!("let {} = ", p));
                 }
-                self.expr(expr, P_LOWEST + 1);
+                self.let_subject(pat, expr, *implicit_some);
                 self.bind_pat(pat, None);
             }
         }
+    }
+
+    /// Is `subject` a field of `this` that arms with `pats` would move a value out of? A method
+    /// borrows `this`, so the field is matched by reference instead (`match &self.state`), as
+    /// `for` borrows a field.
+    fn match_field_by_ref(&mut self, subject: &Expr, pats: &[&Pat]) -> bool {
+        if self.self_by_value {
+            return false;
+        }
+        let name = match &strip_paren(subject).kind {
+            ExprKind::Path { segs, generics: None, global: false } if segs.len() == 1 && self.implicit_field(&segs[0]).is_some() => &segs[0],
+            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => name,
+            _ => return false,
+        };
+        let Some(ty) = self.class.as_ref().and_then(|c| c.fields.get(name)).cloned() else { return false };
+        if matches!(ty, Type::Ref { .. }) {
+            return false;
+        }
+        pats.iter().any(|p| self.pat_moves(p, Some(ty.clone())))
+    }
+
+    /// Does pattern `p`, matching a value of type `ty`, bind a part of it that isn't `Copy`?
+    fn pat_moves(&mut self, p: &Pat, ty: Option<Type>) -> bool {
+        let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+        let saved = std::mem::replace(&mut self.pat_ty, ty.clone());
+        let moves = match p {
+            Pat::Ident { by_ref: false, sub, .. } => ty.as_ref().is_some_and(|t| !crate::sema::is_copy_simple(t, &copy)) || sub.as_ref().is_some_and(|s| self.pat_moves(s, ty.clone())),
+            Pat::Or(ps) => ps.iter().any(|p| self.pat_moves(p, ty.clone())),
+            Pat::Tuple(ps) => match &ty {
+                Some(Type::Tuple(ts)) if ts.len() == ps.len() => ps.iter().zip(ts.clone()).any(|(p, t)| self.pat_moves(p, Some(t))),
+                _ => false,
+            },
+            Pat::TupleStruct { path, elems, .. } => {
+                let (_, shape) = self.resolve_variant_path(path);
+                let tys = self.tuple_pat_types(path, shape.as_ref());
+                !elems.iter().any(|e| matches!(e, Pat::Rest)) && elems.iter().enumerate().any(|(i, e)| self.pat_moves(e, tys.get(i).cloned().flatten()))
+            }
+            Pat::Struct { path, fields, .. } => {
+                let (_, shape) = self.resolve_variant_path(path);
+                let field_ty = |n: &str| match &shape {
+                    Some(VariantShape::Named(fs)) => fs.iter().find(|(f, _)| f == n).map(|(_, t)| t.clone()),
+                    _ => None,
+                };
+                fields.iter().any(|(n, sub)| match sub {
+                    Some(sp) => self.pat_moves(sp, field_ty(n)),
+                    None => field_ty(n).is_some_and(|t| !crate::sema::is_copy_simple(&t, &copy)),
+                })
+            }
+            _ => false,
+        };
+        self.pat_ty = saved;
+        moves
+    }
+
+    /// The value of `if (val pat = expr)`: a field `pat` would move a value out of is borrowed.
+    fn let_subject(&mut self, pat: &Pat, expr: &Expr, implicit_some: bool) {
+        if !implicit_some && self.match_field_by_ref(expr, &[pat]) {
+            self.e.w("&");
+            self.expr(expr, P_UNARY);
+            self.e.decide(expr.span, "&", "the pattern takes a value out of the field, which a method can only borrow", None);
+        } else {
+            self.expr(expr, P_LOWEST + 1);
+        }
+    }
+
+    /// The pattern of `if (val pat = expr)`, matched against the value (inside its `Some` when
+    /// `implicit_some`).
+    fn let_cond_pat(&mut self, pat: &Pat, expr: &Expr, implicit_some: bool) -> String {
+        let ty = self.infer_type(expr);
+        let ty = if implicit_some {
+            match ty {
+                Some(Type::Option(inner)) => Some(*inner),
+                Some(Type::Path { segs, .. }) if segs.len() == 1 && segs[0].name == "Option" => match segs[0].generics.as_deref() {
+                    Some([GenericArg::Type(t)]) => Some(t.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else {
+            ty
+        };
+        self.pat_typed(pat, ty)
     }
 
     // ------------------------------------------------------------------ paths
@@ -2289,7 +3038,10 @@ impl<'a> Lowerer<'a> {
                 self.e.w(field);
                 return;
             }
-            if !self.is_local(n) && !self.k.is_class_name(n) && !self.k.is_fun_name(n) {
+            // a constant of the class or companion object being lowered
+            if !self.is_local(n) && self.class.as_ref().is_some_and(|c| c.consts.contains(n)) {
+                s.push_str("Self::");
+            } else if !self.is_local(n) && !self.k.is_class_name(n) && !self.k.is_fun_name(n) {
                 if let Some(en) = self.variant_enum(n) {
                     s.push_str(&format!("{}::{}", en.name, n));
                     self.e.w(&s);
@@ -2344,7 +3096,11 @@ impl<'a> Lowerer<'a> {
                 if n == "Self" || crate::lower::PRIMITIVES.contains(&n.as_str()) {
                     return Some((segs.clone(), PathKind::Type));
                 }
-                if is_type_like(n) {
+                // Kotlin's names of the number types: `Int.MAX` is `i32::MAX`
+                if let Some(a) = crate::lower::kotlin_alias(n).filter(|a| *a != "()" && !self.k.is_user_type(n)) {
+                    return Some((vec![a.to_string()], PathKind::Type));
+                }
+                if self.k.is_type_name(n) {
                     // a unit variant is a value with members; `Extension.instantiate(..)` with a
                     // tuple variant `Extension(..)` goes through a type of that name
                     let unit = self.variant_enum(n).and_then(|en| en.variant(n)).is_some_and(|v| matches!(v, VariantShape::Unit));
@@ -2359,7 +3115,7 @@ impl<'a> Lowerer<'a> {
                 None
             }
             // `Stack::<i32>.new()`: a type with explicit generic arguments
-            ExprKind::Path { segs, generics: Some(g), global: false } if is_type_like(segs.last().unwrap()) && !self.is_local(&segs[0]) => {
+            ExprKind::Path { segs, generics: Some(g), global: false } if self.k.is_type_name(segs.last().unwrap()) && !self.is_local(&segs[0]) => {
                 let mut p = segs.clone();
                 let last = p.pop().unwrap();
                 p.push(format!("{}::{}", last, self.generic_args_text(g)));
@@ -2367,7 +3123,7 @@ impl<'a> Lowerer<'a> {
             }
             ExprKind::Path { segs, generics: None, .. } => {
                 let last = segs.last().unwrap();
-                let kind = if is_type_like(last) {
+                let kind = if self.k.is_type_name(last) {
                     PathKind::Type
                 } else if is_const_like(last) {
                     PathKind::Value
@@ -2380,7 +3136,7 @@ impl<'a> Lowerer<'a> {
                 let (mut p, k) = self.as_path(recv)?;
                 match k {
                     PathKind::Module => {
-                        let kind = if is_type_like(name) {
+                        let kind = if self.k.is_type_name(name) {
                             PathKind::Type
                         } else if is_const_like(name) {
                             PathKind::Value
@@ -2391,7 +3147,17 @@ impl<'a> Lowerer<'a> {
                         Some((p, kind))
                     }
                     PathKind::Type => {
-                        p.push(name.clone());
+                        // and Kotlin's names of their constants: `Long.MAX_VALUE` is `i64::MAX`
+                        let primitive = p.len() == 1 && crate::lower::PRIMITIVES.contains(&p[0].as_str());
+                        let name = match name.as_str() {
+                            "MAX_VALUE" if primitive => "MAX",
+                            "MIN_VALUE" if primitive => "MIN",
+                            "POSITIVE_INFINITY" if primitive => "INFINITY",
+                            "NEGATIVE_INFINITY" if primitive => "NEG_INFINITY",
+                            "NaN" if primitive => "NAN",
+                            n => n,
+                        };
+                        p.push(name.to_string());
                         Some((p, PathKind::Value))
                     }
                     PathKind::Value => None,
@@ -2522,8 +3288,100 @@ impl<'a> Lowerer<'a> {
         }
         match t.and_then(|t| t.last_name()) {
             Some("HashMap" | "BTreeMap") => Contains::Key,
+            Some("HashSet" | "BTreeSet") => Contains::Set,
             Some("str" | "String") => Contains::Text,
             _ => Contains::Value,
+        }
+    }
+
+    /// A key looked up in a map or set, in a borrowed form the lookup takes: `"ada"` and a
+    /// `&String` as they are, a `String` or a number lent, a `&&str` read through once. A
+    /// variable of unknown type is lent only with `lend_unknown`.
+    fn map_key(&mut self, key: &Expr, lend_unknown: bool) {
+        let refs = self.infer_type(key).map_or(0, |t| ref_depth(&t).0);
+        let literal = match &strip_paren(key).kind {
+            ExprKind::Bool(_) | ExprKind::Char(_) => true,
+            ExprKind::Unary(UnOp::Neg, x) => matches!(x.kind, ExprKind::Int(_) | ExprKind::Float(_)),
+            _ => false,
+        };
+        if refs >= 2 {
+            self.e.w("*");
+            self.expr(key, P_UNARY);
+        } else if literal || self.auto_borrow(key, false) && (lend_unknown || !key.ident().is_some_and(|n| matches!(self.local(n), Some(None)))) {
+            self.e.w("&");
+            self.expr(key, P_UNARY);
+        } else {
+            self.expr(key, P_LOWEST);
+        }
+    }
+
+    /// `coll.contains(..)` for `item in coll` (written without the `!` of `!in`).
+    fn contains(&mut self, coll: &Expr, item: &Expr) {
+        let kind = self.contains_kind(coll);
+        let item_ty = self.infer_type(item);
+        let (item_refs, item_text) = item_ty.as_ref().map_or((0, None), ref_depth);
+        match kind {
+            // a map's or set's lookup takes any borrowed form of the key: `"ada"` and a `&String`
+            // as they are, a `String` lent, a `&&str` read through once
+            Contains::Key | Contains::Set => {
+                self.expr(coll, P_POSTFIX);
+                self.e.w(if kind == Contains::Key { ".contains_key(" } else { ".contains(" });
+                self.map_key(item, true);
+                self.e.w(")");
+            }
+            Contains::Text => {
+                self.expr(coll, P_POSTFIX);
+                self.e.w(".contains(");
+                if !is_string_lit(coll) && !self.is_char(item) {
+                    self.e.w("&");
+                    self.expr(item, P_UNARY);
+                } else {
+                    self.expr(item, P_LOWEST);
+                }
+                self.e.w(")");
+            }
+            // a list's `contains` takes a reference to exactly its element type
+            Contains::Value => {
+                let (elem_refs, elem_text) = self.elem_type(coll).as_ref().map_or((None, None), |t| {
+                    let (d, text) = ref_depth(t);
+                    (Some(d), text)
+                });
+                self.expr(coll, P_POSTFIX);
+                match (elem_text, item_text) {
+                    // `String`s and a `&str`: compared one by one
+                    (Some(TextForm::Owned), Some(TextForm::Str)) => {
+                        let mut names = Vec::new();
+                        visit::idents_in(item, &mut names);
+                        let e = ["e", "x", "elem"].into_iter().find(|n| !names.iter().any(|m| m == n)).unwrap_or("e");
+                        self.e.w(&format!(".iter().any(|{e}| {e} == "));
+                        self.expr(item, 6);
+                        self.e.w(")");
+                    }
+                    // `&str`s and a `String`
+                    (Some(TextForm::Str), Some(TextForm::Owned)) => {
+                        self.e.w(".contains(&");
+                        self.expr(item, P_POSTFIX);
+                        self.e.w(".as_str())");
+                    }
+                    _ => {
+                        // an item that already is a reference to an element (a loop variable over
+                        // a borrowed list) is passed as it is
+                        let as_is = match elem_refs {
+                            _ if self.is_ref_lambda_param(item) => true,
+                            Some(d) => item_ty.is_some() && item_refs == d + 1,
+                            None => item_refs > 0 && item_text != Some(TextForm::Str),
+                        };
+                        self.e.w(".contains(");
+                        if as_is {
+                            self.expr(item, P_LOWEST);
+                        } else {
+                            self.e.w("&");
+                            self.expr(item, P_UNARY);
+                        }
+                        self.e.w(")");
+                    }
+                }
+            }
         }
     }
 
@@ -2536,7 +3394,7 @@ impl<'a> Lowerer<'a> {
         // `(self.on_click)(x)` calls the function stored in a field; without the parentheses
         // Rust would look for a method
         if let ExprKind::Paren(inner) = &callee.kind {
-            if matches!(inner.kind, ExprKind::Field { .. }) {
+            if !matches!(inner.kind, ExprKind::Lambda { .. }) {
                 self.e.w("(");
                 self.expr(inner, P_LOWEST);
                 self.e.w(")");
@@ -2634,7 +3492,7 @@ impl<'a> Lowerer<'a> {
                         return;
                     }
                 }
-                if is_type_like(&name) && args.is_empty() && !matches!(name.as_str(), "Some" | "None" | "Ok" | "Err") {
+                if self.k.is_type_name(&name) && args.is_empty() && !matches!(name.as_str(), "Some" | "None" | "Ok" | "Err") {
                     let g = generics.as_ref().map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                     self.e.w(&format!("{}{}::new()", esc(&name), g));
                     return;
@@ -2746,12 +3604,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             VariantShape::Tuple(types) => {
-                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
+                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false }).collect();
                 self.e.w(path);
                 self.arg_list(args, Some(&params), TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
-                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new() }).collect();
+                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false }).collect();
                 let slots = self.fill_args(args, &params, span);
                 self.e.w(&format!("{} {{ ", path));
                 for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
@@ -2776,12 +3634,15 @@ impl<'a> Lowerer<'a> {
         let mut next = 0;
         // a context the callee doesn't use is named `_cx`, and still passed as `cx`
         let named = |p: &ParamInfo, n: &str| p.name.as_deref() == Some(n) || p.context.is_some() && p.name.as_deref().and_then(|x| x.strip_prefix('_')) == Some(n);
+        // a trailing lambda goes to the last parameter, as in Kotlin, past any with defaults
+        let last = params.iter().rposition(|p| p.context.is_none() && p.name.as_deref() != Some("__this"));
         for a in args {
             match &a.name {
                 Some(n) => match params.iter().position(|p| named(p, n)) {
                     Some(i) => slots[i] = Some(a.value.clone()),
                     None => self.error(a.value.span, format!("no parameter named `{}`", n)),
                 },
+                None if a.trailing && last.is_some_and(|i| i >= next && slots[i].is_none()) => slots[last.unwrap()] = Some(a.value.clone()),
                 None => {
                     while next < slots.len() && slots[next].is_some() {
                         next += 1;
@@ -2818,7 +3679,7 @@ impl<'a> Lowerer<'a> {
                     }
                     slots[i] = Some(Expr::new(d.kind.clone(), span));
                 } else if let Some(d) = &p.default {
-                    slots[i] = Some(d.clone());
+                    slots[i] = Some(self.default_in_callee_scope(p.name.as_deref().unwrap_or_default(), d, params, &slots, span));
                 } else {
                     let n = p.name.clone().unwrap_or_else(|| format!("#{}", i + 1));
                     self.error(span, format!("missing argument `{}`", n));
@@ -2826,6 +3687,31 @@ impl<'a> Lowerer<'a> {
             }
         }
         slots
+    }
+
+    /// A default value as the callee sees it: a name of another parameter
+    /// (`verbose: bool = retries > 2`) is that parameter's argument, not a variable of the caller
+    /// that happens to have its name. Only arguments that read the same twice (literals,
+    /// variables, fields, arithmetic on them) are copied in; for others the default can't be
+/// filled in here.
+    fn default_in_callee_scope(&mut self, param: &str, d: &Expr, params: &[ParamInfo], slots: &[Option<Expr>], span: Span) -> Expr {
+        let mut d = d.clone();
+        let mut complex = None;
+        visit::walk_expr_mut(&mut d, &mut |e| {
+            let Some(n) = e.ident() else { return true };
+            let Some(j) = params.iter().position(|p| p.name.as_deref() == Some(n) && p.context.is_none()) else { return true };
+            match &slots[j] {
+                Some(a) if is_plain_read(a) => *e = a.clone(),
+                Some(_) => complex = Some(n.to_string()),
+                // a later parameter's default: not reachable in Kotlin either
+                None => complex = Some(n.to_string()),
+            }
+            false
+        });
+        if let Some(n) = complex {
+            self.error(span, format!("the default value of `{}` uses the parameter `{}`, whose argument here would run twice: store the argument in a `val` first, or pass `{}` yourself", param, n, param));
+        }
+        d
     }
 
     /// The arguments and parameters of a call to a method of this shared class that takes the
@@ -2836,8 +3722,8 @@ impl<'a> Lowerer<'a> {
             if self.this_recv.is_none() {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
-            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new() });
-            args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span) });
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false });
+            args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span), trailing: false });
         }
         (args, params)
     }
@@ -2858,7 +3744,7 @@ impl<'a> Lowerer<'a> {
                         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
                             self.expr(a, P_LOWEST);
                         } else {
-                            self.coerce(a, &p.ty, pos);
+                            self.coerce(a, &p.ty, if p.boxed { TyPos::Generic } else { pos });
                         }
                     }
                 }
@@ -3013,6 +3899,23 @@ impl<'a> Lowerer<'a> {
             if lead > 0 {
                 self.e.w(", ");
             }
+            // `println("total:", n)`: text without `{}` placeholders is no format string, so the
+            // values are printed after it, separated by spaces, as without the text
+            let print = matches!(name, "println" | "print" | "eprintln" | "eprint");
+            let text: Option<Vec<TemplatePart>> = match &rest[0].value.kind {
+                ExprKind::Str(parts) => Some(vec![TemplatePart::Lit(crate::lower::lit_parts(parts))]),
+                ExprKind::Template(parts) => Some(parts.clone()),
+                _ => None,
+            };
+            if let Some(mut parts) = text.filter(|ps| print && rest.len() > 1 && !ps.iter().any(|p| matches!(p, TemplatePart::Lit(s) if s.contains('{')))) {
+                for a in &rest[1..] {
+                    parts.push(TemplatePart::Lit(" ".into()));
+                    parts.push(TemplatePart::Expr(a.value.clone(), None));
+                }
+                self.format_args(&parts);
+                self.e.w(")");
+                return;
+            }
             match &rest[0].value.kind {
                 ExprKind::Template(parts) => {
                     self.format_args(parts);
@@ -3143,9 +4046,15 @@ impl<'a> Lowerer<'a> {
             self.e.w(&format!("{{ let mut {} = ", v));
             self.expr(recv, P_POSTFIX);
             self.e.w(".clone();");
+            let class = self.infer_type(recv).and_then(|t| self.type_owner(&t)).and_then(|o| self.class_at(&o)).filter(|c| !c.has_generics);
             for a in args {
-                self.e.w(&format!(" {}.{} = ", v, esc(a.name.as_ref().unwrap())));
-                self.expr(&a.value, P_LOWEST);
+                let field = a.name.as_ref().unwrap();
+                self.e.w(&format!(" {}.{} = ", v, esc(field)));
+                // a `T?` field takes a plain value as `Some(..)`, as in the constructor
+                match class.as_ref().and_then(|c| c.fields.iter().find(|f| f.name == *field)).map(|f| f.ty.clone()).filter(|t| *t != Type::Infer) {
+                    Some(t) => self.coerce(&a.value, &t, TyPos::Local),
+                    None => self.expr(&a.value, P_LOWEST),
+                }
                 self.e.w(";");
             }
             self.e.w(&format!(" {} }}", v));
@@ -3156,6 +4065,20 @@ impl<'a> Lowerer<'a> {
             let owner = self.infer_type(recv).and_then(|t| self.type_owner(&t));
             let m = owner.as_ref().and_then(|o| self.class_at(o).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(o).and_then(|e| e.methods.get(name)))).cloned();
             if let Some(m) = m {
+                self.expr(recv, P_POSTFIX);
+                self.e.w(&format!(".{}", esc(name)));
+                if let Some(g) = generics {
+                    let gt = self.generic_args_text(g);
+                    self.e.w(&format!("::{}", gt));
+                }
+                self.arg_list(args, Some(&m.params), TyPos::Param, span);
+                return;
+            }
+        }
+        // an interface's method with interface parameters, which take boxes, on an interface
+        // value or a value whose class inherits it
+        if !matches!(recv.kind, ExprKind::SelfValue) {
+            if let Some(m) = self.iface_method(recv, name).filter(|m| m.params.iter().any(|p| p.boxed)) {
                 self.expr(recv, P_POSTFIX);
                 self.e.w(&format!(".{}", esc(name)));
                 if let Some(g) = generics {
@@ -3184,6 +4107,25 @@ impl<'a> Lowerer<'a> {
                     return;
                 }
             }
+        }
+        // a value put into a `Vec<Shape>` or `Vec<(i32) -> bool>` is boxed
+        if let Some((idx, elem)) = self.stored_elem(recv, name, args.len()).filter(|_| generics.is_none() && args.iter().all(|a| a.name.is_none())) {
+            self.expr(recv, P_POSTFIX);
+            self.e.w(&format!(".{}(", member(name)));
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    self.e.w(", ");
+                }
+                if i == idx {
+                    self.coerce(&a.value, &elem, TyPos::Generic);
+                } else if self.is_shared_place(&a.value) {
+                    self.shared_copy(&a.value);
+                } else {
+                    self.expr(&a.value, P_LOWEST);
+                }
+            }
+            self.e.w(")");
+            return;
         }
         let args = self.fix_lambda_arity(recv, name, args);
         self.expr(recv, P_POSTFIX);
@@ -3299,10 +4241,14 @@ impl<'a> Lowerer<'a> {
                 let ret = callee.ident().and_then(|n| self.fun_info(n)).and_then(|f| f.ret.clone());
                 matches!(ret, Some(Type::Option(inner)) if matches!(*inner, Type::Ref { .. }))
             }
-            ExprKind::MethodCall { name, .. } => matches!(
-                name.as_str(),
-                "get" | "first" | "last" | "find" | "iter" | "max_by_key" | "min_by_key" | "max_by" | "min_by" | "max" | "min" | "get_mut" | "peek" | "next" | "as_ref" | "as_deref" | "last_mut" | "first_mut"
-            ),
+            // a method declared to return `&T?` (`fun leader(): &Player?`)
+            ExprKind::MethodCall { name, .. } => match self.link_type(e).and_then(|t| option_inner(&t)) {
+                Some(inner) => matches!(inner, Type::Ref { .. }),
+                None => matches!(
+                    name.as_str(),
+                    "get" | "first" | "last" | "find" | "find_last" | "iter" | "max_by_key" | "min_by_key" | "max_by" | "min_by" | "max" | "min" | "get_mut" | "peek" | "next" | "next_back" | "as_ref" | "as_deref" | "last_mut" | "first_mut" | "front" | "back" | "front_mut" | "back_mut"
+                ),
+            },
             ExprKind::Paren(x) => self.yields_borrowed_option(x),
             _ => false,
         }
@@ -3341,9 +4287,20 @@ impl<'a> Lowerer<'a> {
         let n = segs.len();
         for (i, seg) in segs.iter().enumerate() {
             let last = i == n - 1;
-            let flatten = !last || self.segment_yields_option(seg);
+            // a link known to give a plain value is mapped (Kotlin's `?.` after a non-null
+            // value acts like `.`), one that gives a `T?` flattened; an unknown one after
+            // another `?.` is taken to be optional, as `?.` suggests
+            let lam = Self::let_lambda(seg);
+            let known = match &lam {
+                Some(lam) => {
+                    let ExprKind::MethodCall { recv, .. } = &seg[0].kind else { unreachable!() };
+                    self.let_yields_option(lam, recv)
+                }
+                None => self.link_is_option(seg.last().unwrap()),
+            };
+            let flatten = known.unwrap_or_else(|| !last || self.segment_yields_option(seg));
             let method = if flatten { "and_then" } else { "map" };
-            if let Some(lam) = Self::let_lambda(seg) {
+            if let Some(lam) = lam {
                 self.e.w(&format!(".{}(", method));
                 self.lambda(&lam, None, None);
                 self.e.w(")");
@@ -3361,7 +4318,7 @@ impl<'a> Lowerer<'a> {
                 self.e.w(".as_ref()");
             }
             self.e.w(")");
-            borrowed = flatten && ends_in_field;
+            borrowed = ends_in_field && (flatten || amp);
         }
     }
 
@@ -3400,6 +4357,103 @@ impl<'a> Lowerer<'a> {
         self.class_info(t.single_name()?)?.fields.iter().find(|f| &f.name == name).map(|f| f.ty.clone())
     }
 
+    /// The type of a link of a `?.` chain as its member declares it, without the `?` that
+    /// earlier `?.` links add: `name` in `n?.name` is a `String` when `Node.name` is one.
+    fn link_type(&self, l: &Expr) -> Option<Type> {
+        if !has_safe_link(l) {
+            return self.chain_value_type(l);
+        }
+        match &l.kind {
+            ExprKind::Field { recv, name, safe } => {
+                let rt = self.link_recv_type(recv, *safe)?;
+                self.class_info(rt.single_name()?)?.fields.iter().find(|f| &f.name == name).map(|f| f.ty.clone()).filter(|t| *t != Type::Infer)
+            }
+            ExprKind::MethodCall { recv, name, safe, args, .. } => {
+                let rt = self.link_recv_type(recv, *safe);
+                if let Some(owner) = rt.as_ref().and_then(|t| self.type_owner(t)) {
+                    let m = self.class_at(&owner).filter(|c| !c.has_generics).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(&owner).filter(|e| !e.has_type_params).and_then(|e| e.methods.get(name)));
+                    if let Some(m) = m {
+                        return match m.ret.clone()? {
+                            _ if m.throws => None,
+                            t if t.single_name() == Some("Self") => Some(Type::simple(owner.last()?)),
+                            t => Some(t),
+                        };
+                    }
+                }
+                let str_ref = || Type::Ref { lifetime: None, mutable: false, inner: Box::new(Type::simple("str")) };
+                match name.as_str() {
+                    "len" | "count" | "capacity" => Some(Type::simple("usize")),
+                    "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "replace" | "join" | "concat" | "trim_string" => Some(Type::simple("String")),
+                    "trim" | "trim_start" | "trim_end" | "as_str" => Some(str_ref()),
+                    "is_empty" | "contains" | "contains_key" | "starts_with" | "ends_with" | "is_some" | "is_none" | "is_ok" | "is_err" => Some(Type::simple("bool")),
+                    "let" => None,
+                    "clone" | "to_vec" if args.is_empty() => rt.map(|t| match t {
+                        Type::Ref { inner, .. } => *inner,
+                        t => t,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The type of the value a `?.` link is called on; `safe`: through `?.`, so the value
+    /// inside the `T?`. References are looked through.
+    fn link_recv_type(&self, recv: &Expr, safe: bool) -> Option<Type> {
+        let mut t = self.link_type(recv)?;
+        while let Type::Ref { inner, .. } = t {
+            t = *inner;
+        }
+        if safe {
+            t = option_inner(&t)?;
+            while let Type::Ref { inner, .. } = t {
+                t = *inner;
+            }
+        }
+        Some(t)
+    }
+
+    /// Does this `?.` link give a `T?` (`Some(true)`), a plain value (`Some(false)`), or is that
+    /// unknown?
+    fn link_is_option(&self, l: &Expr) -> Option<bool> {
+        if let Some(t) = self.link_type(l) {
+            return Some(option_inner(&t).is_some());
+        }
+        None
+    }
+
+    /// Does the block of `x?.let { .. }` give a `T?`? `Some(true)` when one of its values is
+    /// `null`, `Some(..)` or optional, `Some(false)` when they are all known plain values.
+    /// `recv` is the chain before the `let`.
+    fn let_yields_option(&mut self, lam: &Expr, recv: &Expr) -> Option<bool> {
+        let ExprKind::Lambda { params, body, .. } = &lam.kind else { return None };
+        let mut tails = Vec::new();
+        value_tails(body, &mut tails);
+        if tails.iter().any(|t| matches!(t.kind, ExprKind::Null) || matches!(&t.kind, ExprKind::Call { callee, .. } if callee.ident() == Some("Some"))) {
+            return Some(true);
+        }
+        let it_ty = self.link_recv_type(recv, true).map(|t| if self.is_place(recv) || self.yields_borrowed_option(recv) { Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) } } else { t });
+        self.push_scope();
+        match params.as_slice() {
+            [] => self.bind_name("it", it_ty),
+            [p] => self.bind_pat(&p.pat, p.ty.clone().or(it_ty)),
+            ps => ps.iter().for_each(|p| self.bind_pat(&p.pat, p.ty.clone())),
+        }
+        let mut known = Some(false);
+        for t in &tails {
+            if self.is_option_expr(t) {
+                known = Some(true);
+                break;
+            }
+            if self.infer_type(t).is_none() {
+                known = None;
+            }
+        }
+        self.pop_scope();
+        known
+    }
+
     /// Is `recv.field` (in a `?.` chain) a field of a shared class, reached through a `T?` or
     /// a reference? Returns whether the class is `@sync`.
     fn optional_shared_field(&self, recv: &Expr, field: &str) -> Option<bool> {
@@ -3425,7 +4479,8 @@ impl<'a> Lowerer<'a> {
             // `?.` after a property declared non-nullable is just `.` (as in Kotlin)
             if safe && cur_is_option {
                 if let ExprKind::Field { name, .. } = &cur.kind {
-                    if self.field_known_non_option(name) {
+                    let known = self.link_type(&cur).map(|t| option_inner(&t).is_none());
+                    if known.unwrap_or_else(|| self.field_known_non_option(name)) {
                         safe = false;
                         if let ExprKind::Field { safe: s, .. } | ExprKind::MethodCall { safe: s, .. } = &mut node.kind {
                             *s = false;
@@ -3570,16 +4625,24 @@ impl<'a> Lowerer<'a> {
             any
         };
         let method_opt = |name: &str| {
-            let mut any = false;
+            let mut any = None;
             for c in self.k.classes.values() {
                 if let Some(m) = c.methods.get(name) {
                     match &m.ret {
-                        Some(t) if is_opt(t) => any = true,
+                        Some(t) if is_opt(t) => any = Some(true),
                         _ => return false,
                     }
                 }
             }
-            any
+            // std methods that give an `Option`: `s?.chars().next()` is a `char?`
+            any.unwrap_or_else(|| {
+                matches!(
+                    name,
+                    "next" | "next_back" | "first" | "last" | "get" | "get_mut" | "pop" | "pop_front" | "pop_back" | "find" | "find_map"
+                        | "position" | "nth" | "peek" | "strip_prefix" | "strip_suffix" | "split_once" | "rsplit_once" | "ok" | "err"
+                        | "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "to_digit"
+                )
+            })
         };
         let mut opt = false;
         for (_i, l) in seg.iter().enumerate() {
@@ -3669,7 +4732,14 @@ impl<'a> Lowerer<'a> {
             return false;
         }
         let borrowed_text = |o: &Expr| matches!(self.infer_type(o), Some(Type::Ref { inner, .. }) if matches!(inner.single_name(), Some("str" | "String")));
-        ops.iter().any(|o| is_string_lit(o)) || borrowed_text(ops[0]) || ops[1..].iter().any(|o| self.is_owned_string(o))
+        // text plus a number or char (`name + n`) puts it in the text, as a template would
+        let number_or_char = |o: &Expr| self.infer_type(o).is_some_and(|t| t.single_name().is_some_and(|n| n == "char" || crate::lower::PRIMITIVES.contains(&n) && !matches!(n, "bool" | "str")));
+        // a `String` parameter that Oxie lends as `&str` is still joined as text
+        let lent_text = |o: &Expr| o.ident().is_some_and(|n| self.lent.iter().any(|l| l == n)) && borrowed_text(o);
+        ops.iter().any(|o| is_string_lit(o))
+            || borrowed_text(ops[0])
+            || ops[1..].iter().any(|o| self.is_owned_string(o) || lent_text(o))
+            || self.is_owned_string(ops[0]) && ops[1..].iter().any(|o| number_or_char(o))
     }
 
     /// Is `e` known to be an owned `String`?
@@ -3735,6 +4805,29 @@ impl<'a> Lowerer<'a> {
     fn elvis(&mut self, l: &Expr, r: &Expr) {
         let saved = self.force_safe;
         self.force_safe = true;
+        // `a ?: b` with an optional `b` is optional too (`a ?: b ?: 0`): `a.or(b)`, and
+        // `a.or_else(|| f())` so that `f()` runs only when `a` is null
+        let r_opt = matches!(strip_paren(r).kind, ExprKind::Null) || has_safe_link(r) || self.place_is_option(r) || self.infer_type(r).is_some_and(|t| option_inner(&t).is_some());
+        if r_opt {
+            let left_opt = self.is_option_expr(l);
+            if !left_opt {
+                self.e.w(&format!("{}::Elvis::opt(", RT));
+            }
+            self.expr(l, if left_opt { P_POSTFIX } else { P_LOWEST });
+            self.force_safe = saved;
+            if !left_opt {
+                self.e.w(")");
+            }
+            if self.is_plain_default(r) {
+                self.e.w(".or(");
+                self.expr(r, P_LOWEST);
+            } else {
+                self.e.w(".or_else(|| ");
+                self.expr(r, P_LOWEST);
+            }
+            self.e.w(")");
+            return;
+        }
         if self.is_plain_default(r) {
             self.e.w(&format!("{}::ElvisOr::or_val(", RT));
             self.expr(l, P_LOWEST);
@@ -3813,6 +4906,23 @@ impl<'a> Lowerer<'a> {
 
     /// `mode`: None = statement, Some(target) = value.
     fn if_expr(&mut self, cond: &Cond, then: &Block, else_: Option<&Expr>, mode: Option<&Target>) {
+        // `if (x == null) a else b` unwraps `x` in `b`: `if let Some(x) = x { b } else { a }`
+        if let (Cond::Expr(c), Some(el)) = (cond, else_) {
+            if let Some(x) = self.null_check(c, BinOp::Eq) {
+                let other = match &el.kind {
+                    ExprKind::Block(b) => b.clone(),
+                    _ => Block { stmts: vec![Stmt::Expr { expr: el.clone(), semi: false }], span: el.span },
+                };
+                let optional_use = other.stmts.iter().any(|st| matches!(st, Stmt::Expr { expr, .. } if uses_as_optional(expr, x)));
+                if visit::stmts_use(&other.stmts, x) && !optional_use && self.narrowable(x, &other).is_some() {
+                    let ExprKind::Binary(_, l, r) = &strip_paren(c).kind else { unreachable!() };
+                    let swapped = Cond::Expr(Expr::new(ExprKind::Binary(BinOp::Ne, l.clone(), r.clone()), c.span));
+                    let first = Expr::new(ExprKind::Block(then.clone()), then.span);
+                    self.if_expr(&swapped, &other, Some(&first), mode);
+                    return;
+                }
+            }
+        }
         // `x != null` unwraps `x` in the branch
         let (narrowed, typed) = self.narrow_cond(cond, then);
         let cond = narrowed.as_ref().unwrap_or(cond);
@@ -3897,8 +5007,9 @@ impl<'a> Lowerer<'a> {
         self.e.w("}");
     }
 
-    /// A `when` on a `String` (`Some(false)`) or `&String` (`Some(true)`) with a string literal arm.
-    fn text_when(&self, subject: &Expr, arms: &[WhenArm]) -> Option<bool> {
+    /// How a `when` with string literal arms reaches the `&str` its literals have: `&*s` for a
+    /// `String`, `s.as_str()` for a `&String`, `s.as_deref()` for a `String?` with `Some("..")` arms.
+    fn text_when(&self, subject: &Expr, arms: &[WhenArm]) -> Option<TextWhen> {
         fn text(p: &Pat) -> bool {
             match p {
                 Pat::Lit(e) => matches!(e.kind, ExprKind::Str(_) | ExprKind::RawStr(_)),
@@ -3906,14 +5017,27 @@ impl<'a> Lowerer<'a> {
                 _ => false,
             }
         }
-        if !arms.iter().any(|a| a.conds.iter().any(|c| matches!(c, WhenCond::Pat(p) if text(p)))) {
+        fn some_text(p: &Pat) -> bool {
+            match p {
+                Pat::TupleStruct { path, elems, .. } => path.last().is_some_and(|n| n == "Some") && elems.len() == 1 && text(&elems[0]),
+                Pat::Or(ps) => ps.iter().any(some_text),
+                _ => false,
+            }
+        }
+        let has = |f: fn(&Pat) -> bool| arms.iter().any(|a| a.conds.iter().any(|c| matches!(c, WhenCond::Pat(p) if f(p))));
+        let is_string = |t: &Type| t.single_name() == Some("String");
+        let t = self.infer_type(subject)?;
+        let owned = match &t {
+            Type::Ref { inner, .. } => &**inner,
+            t => t,
+        };
+        if has(some_text) {
+            return matches!(owned, Type::Option(x) if is_string(x)).then_some(TextWhen::AsDeref);
+        }
+        if !has(text) || !is_string(owned) {
             return None;
         }
-        let is_string = |t: &Type| t.single_name() == Some("String");
-        match self.infer_type(subject)? {
-            Type::Ref { inner, .. } => is_string(&inner).then_some(true),
-            t => is_string(&t).then_some(false),
-        }
+        Some(if matches!(t, Type::Ref { .. }) { TextWhen::AsStr } else { TextWhen::Deref })
     }
 
     fn when_expr(&mut self, subject: Option<&Expr>, arms: &[WhenArm], rust_match: bool, mode: Option<&Target>, span: Span) {
@@ -3941,18 +5065,33 @@ impl<'a> Lowerer<'a> {
                 // text arms on a `String` compare it as `&str`, the type of the literals: `&*s`
                 // (which a `&str` the inference took for a `String` gives too), `s.as_str()` for
                 // a `&String`
-                match self.text_when(s, arms) {
-                    Some(true) => {
+                let text_kind = self.text_when(s, arms);
+                match text_kind {
+                    Some(TextWhen::AsStr) => {
                         self.expr(s, P_POSTFIX);
                         self.e.w(".as_str()");
                         self.e.decide(s.span, ".as_str()", "the arms compare text", None);
                     }
-                    Some(false) => {
+                    Some(TextWhen::AsDeref) => {
+                        self.expr(s, P_POSTFIX);
+                        self.e.w(".as_deref()");
+                        self.e.decide(s.span, ".as_deref()", "the arms compare optional text", None);
+                    }
+                    Some(TextWhen::Deref) => {
                         self.e.w("&*");
                         self.expr(s, P_UNARY);
                         self.e.decide(s.span, "&*", "the arms compare text", None);
                     }
-                    None => self.expr(s, P_LOWEST),
+                    None => {
+                        let pats: Vec<&Pat> = arms.iter().flat_map(|a| a.conds.iter()).filter_map(|c| if let WhenCond::Pat(p) = c { Some(p) } else { None }).collect();
+                        if self.match_field_by_ref(s, &pats) {
+                            self.e.w("&");
+                            self.expr(s, P_UNARY);
+                            self.e.decide(s.span, "&", "an arm takes a value out of the field, which a method can only borrow", None);
+                        } else {
+                            self.expr(s, P_LOWEST);
+                        }
+                    }
                 }
                 self.e.w(" {");
                 self.e.indent();
@@ -3979,13 +5118,18 @@ impl<'a> Lowerer<'a> {
                             }
                         }
                         self.e.w(&format!("ref {} if ", w));
+                        // `a || b && (guard)` would bind the guard to the last check only
+                        let grouped = checks.len() > 1 && arm.guard.is_some();
+                        if grouped {
+                            self.e.w("(");
+                        }
                         for (i, c) in checks.iter().enumerate() {
                             if i > 0 {
                                 self.e.w(" || ");
                             }
                             match c {
                                 WhenCond::In { expr, negated } => {
-                                    if let ExprKind::Range { start, end, inclusive } = &strip_paren(expr).kind {
+                                    if let ExprKind::Range { start, end, inclusive } = &range_in(expr).kind {
                                         let item = Expr::new(ExprKind::Unary(UnOp::Deref, Box::new(Expr::new(ExprKind::Path { segs: vec![w.clone()], generics: None, global: false }, expr.span))), expr.span);
                                         self.push_scope();
                                         self.bind_name(&w, None);
@@ -3995,21 +5139,45 @@ impl<'a> Lowerer<'a> {
                                         if *negated {
                                             self.e.w("!");
                                         }
-                                        self.expr(expr, P_POSTFIX);
                                         // `w` is a reference to the subject
-                                        match self.contains_kind(expr) {
-                                            Contains::Key => self.e.w(&format!(".contains_key({})", w)),
-                                            Contains::Text if subject.is_some_and(|s| self.is_char(s)) => self.e.w(&format!(".contains(*{})", w)),
-                                            _ => self.e.w(&format!(".contains({})", w)),
+                                        if self.contains_kind(expr) == Contains::Text {
+                                            self.expr(expr, P_POSTFIX);
+                                            if subject.is_some_and(|s| self.is_char(s)) {
+                                                self.e.w(&format!(".contains(*{})", w));
+                                            } else {
+                                                self.e.w(&format!(".contains({})", w));
+                                            }
+                                        } else {
+                                            let subject_ty = match text_kind {
+                                                Some(TextWhen::AsStr | TextWhen::Deref) => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(Type::simple("str")) }),
+                                                _ => subject.and_then(|s| self.infer_type(s)),
+                                            };
+                                            match subject_ty {
+                                                Some(t) => {
+                                                    let item = Expr::new(ExprKind::Path { segs: vec![w.clone()], generics: None, global: false }, expr.span);
+                                                    self.push_scope();
+                                                    self.bind_name(&w, Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) }));
+                                                    self.contains(expr, &item);
+                                                    self.pop_scope();
+                                                }
+                                                None => {
+                                                    self.expr(expr, P_POSTFIX);
+                                                    let method = if self.contains_kind(expr) == Contains::Key { "contains_key" } else { "contains" };
+                                                    self.e.w(&format!(".{}({})", method, w));
+                                                }
+                                            }
                                         }
                                     }
                                 }
                                 WhenCond::Pat(p) => {
-                                    let ps = self.pat(p);
+                                    let ps = self.pat_against(p, subject);
                                     self.e.w(&format!("matches!({}, {})", w, ps));
                                 }
                                 _ => {}
                             }
+                        }
+                        if grouped {
+                            self.e.w(")");
                         }
                         if let Some(g) = &arm.guard {
                             self.e.w(" && (");
@@ -4028,7 +5196,7 @@ impl<'a> Lowerer<'a> {
                                     if arm.guard.is_none() && matches!(p, Pat::Wild | Pat::Ident { sub: None, .. }) {
                                         has_catch_all = true;
                                     }
-                                    self.pat(p)
+                                    self.pat_against(p, subject)
                                 }
                                 WhenCond::Else => {
                                     has_catch_all = arm.guard.is_none() || has_catch_all;
@@ -4049,7 +5217,19 @@ impl<'a> Lowerer<'a> {
                         }
                         if let Some(g) = &arm.guard {
                             self.e.w(" if ");
+                            // the arm's bindings can be references (a subject behind `&`):
+                            // comparing one with a literal reads its value, as in a predicate
+                            let mut names = Vec::new();
+                            for c in &arm.conds {
+                                if let WhenCond::Pat(p) = c {
+                                    p.bindings(&mut names);
+                                }
+                            }
+                            let depth = self.scopes.len() - 1;
+                            let before = self.lambda_params.len();
+                            self.lambda_params.extend(names.into_iter().map(|n| (depth, n)));
                             self.expr(g, P_LOWEST);
+                            self.lambda_params.truncate(before);
                         }
                     }
                     self.e.w(" => ");
@@ -4251,6 +5431,14 @@ impl<'a> Lowerer<'a> {
         self.e.w(")");
     }
 
+    /// Reads text through any number of references as a `&str`: `crate::__oxie::val(&it)`.
+    fn read_text(&mut self, e: &Expr) {
+        self.e.mark(e.span);
+        self.e.w("crate::__oxie::val(&");
+        self.expr(e, P_UNARY);
+        self.e.w(")");
+    }
+
     pub(crate) fn lambda(&mut self, e: &Expr, param_tys: Option<&[Type]>, ret_ty: Option<&Type>) {
         let ExprKind::Lambda { params, ret, body, is_move, is_async, implicit_it: braces, .. } = &e.kind else {
             self.expr(e, P_LOWEST);
@@ -4280,6 +5468,11 @@ impl<'a> Lowerer<'a> {
                 self.untyped_params.push((depth, "it".into()));
             }
             self.bind_name("it", ty);
+        } else if *braces && params.is_empty() {
+            // `{ println("hi") }` for a `(String) -> Unit`: the closure takes the argument anyway
+            for t in param_tys.unwrap_or_default() {
+                ps.push(format!("_: {}", self.ty(t, TyPos::Local)));
+            }
         }
         for (i, p) in params.iter().enumerate() {
             let pt = self.pat(&p.pat);
@@ -4398,10 +5591,67 @@ fn type_mentions(t: &Type, names: &[String]) -> bool {
     text.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| names.iter().any(|n| n == w))
 }
 
+/// The value type of a `T?` (`Option<T>`).
+fn option_inner(t: &Type) -> Option<Type> {
+    match t {
+        Type::Option(inner) => Some((**inner).clone()),
+        Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Option" => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(inner)]) => Some(inner.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The expressions whose value a block or branch gives (the last expression of each branch of
+/// an `if` or `when`); branches that leave (`return`, `throw`) give none.
+fn value_tails<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Paren(x) => value_tails(x, out),
+        ExprKind::Block(b) => match b.stmts.last() {
+            Some(Stmt::Expr { expr, semi: false }) => value_tails(expr, out),
+            _ => {}
+        },
+        ExprKind::If { then, else_: Some(el), .. } => {
+            if let Some(Stmt::Expr { expr, semi: false }) = then.stmts.last() {
+                value_tails(expr, out);
+            }
+            value_tails(el, out);
+        }
+        ExprKind::When { arms, .. } => arms.iter().for_each(|a| value_tails(&a.body, out)),
+        _ if e.diverges() => {}
+        _ => out.push(e),
+    }
+}
+
+/// The variable a field chain starts from: `t` for `t.team.members`.
+fn field_root(e: &Expr) -> Option<&str> {
+    match &e.kind {
+        ExprKind::Field { recv, safe: false, .. } => field_root(recv),
+        _ => e.ident(),
+    }
+}
+
+/// `t.team.members`, for a field chain.
+fn field_text(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Field { recv, name, .. } => format!("{}.{}", field_text(recv), name),
+        _ => e.ident().unwrap_or("this").to_string(),
+    }
+}
+
 fn strip_paren(e: &Expr) -> &Expr {
     match &e.kind {
         ExprKind::Paren(x) => strip_paren(x),
         _ => e,
+    }
+}
+
+/// The range an `in` checks: `10 downTo 0` is `(0..=10).rev()`, which holds the same numbers.
+fn range_in(e: &Expr) -> &Expr {
+    match &strip_paren(e).kind {
+        ExprKind::MethodCall { recv, name, args, safe: false, .. } if name == "rev" && args.is_empty() && matches!(strip_paren(recv).kind, ExprKind::Range { .. }) => strip_paren(recv),
+        _ => strip_paren(e),
     }
 }
 
@@ -4429,6 +5679,40 @@ fn contains_struct_lit(e: &Expr) -> bool {
 }
 
 /// The operands of an `&&` chain, left to right.
+/// Does `e` use the variable `x` as a `T?` (`x.unwrap()`, `x!!`, `x?.len()`, `x ?: 0`, `x == null`),
+/// so a null check before it must not unwrap `x`?
+fn uses_as_optional(e: &Expr, x: &str) -> bool {
+    let mut found = false;
+    visit::walk_expr(e, &mut |e| {
+        let is_x = |r: &Expr| strip_paren(r).ident() == Some(x);
+        found |= match &e.kind {
+            ExprKind::MethodCall { recv, name, safe, .. } => {
+                is_x(recv)
+                    && (*safe
+                        || matches!(
+                            name.as_str(),
+                            "as_ref" | "as_mut" | "as_deref" | "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "is_some" | "is_none" | "is_some_and" | "map" | "and_then" | "take" | "replace" | "ok_or" | "ok_or_else" | "or" | "or_else" | "map_or" | "filter" | "iter" | "insert" | "get_or_insert_with"
+                        ))
+            }
+            ExprKind::Field { recv, safe: true, .. } | ExprKind::Unwrap(recv) | ExprKind::Elvis(recv, _) => is_x(recv),
+            ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r) => (is_x(l) && matches!(r.kind, ExprKind::Null)) || (is_x(r) && matches!(l.kind, ExprKind::Null)),
+            _ => false,
+        };
+        !found
+    });
+    found
+}
+
+fn or_operands<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &strip_paren(e).kind {
+        ExprKind::Binary(BinOp::Or, l, r) => {
+            or_operands(l, out);
+            or_operands(r, out);
+        }
+        _ => out.push(e),
+    }
+}
+
 fn and_operands<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
     match &e.kind {
         ExprKind::Binary(BinOp::And, l, r) => {

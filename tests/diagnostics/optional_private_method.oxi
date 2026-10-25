@@ -1,0 +1,18 @@
+// `len()` on a `String?` (rustc: "method `len` is private", since `Option` has one) is explained
+// as an optional value, without rustc's `?`, which would read as Oxie's `?.`.
+
+fun longest(words: Vec<String>): String? {
+    var best: String? = null
+    for (w in words) {
+        if (best == null) best = w.clone()
+        else if (w.len() > best.len()) best = w.clone()
+        // error: 8: `best` is optional (`String?`), so it has no `len()` until it is unwrapped
+        // not: 8: best?.len()) best
+        // not: 8: private method
+    }
+    best
+}
+
+fun main() {
+    println("${longest(vec["a".to_string()]):?}")
+}

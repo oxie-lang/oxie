@@ -93,9 +93,12 @@ fun main() {
 * `= "template"` is the message; `$field` refers to the case's fields and `$0` to positional ones.
 * A case with a single field whose type is an error (its name ends in `Error`) gets a `From`
   conversion, so `?` turns that error into this case, and `source()` returns it. Mark a case
-  `@from` to get the conversion for other types.
-* A case without a message shows its wrapped error, or its name in words (`NotFound` →
-  "not found").
+  `@from` to get the conversion for other types (`source()` then stays empty unless the wrapped
+  type is an error).
+* A case without a message shows its wrapped error (and passes on that error's own `source()`),
+  its fields' values (`TooMany(count: usize, max: usize)` → "too many (count: 5, max: 3)"), or
+  its name in words (`NotFound` → "not found").
+* `main() throws` prints each cause once, even when a case shows its wrapped error.
 
 A single error type can be a class:
 

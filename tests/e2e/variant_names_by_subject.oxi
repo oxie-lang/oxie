@@ -1,0 +1,50 @@
+// A bare case name in a pattern is a case of the matched value's enum first, even when a class
+// or another enum has a case of that name.
+
+class Circle(r: f64)
+
+enum Shape {
+    Circle(radius: f64),
+    Square(side: f64);
+
+    fun area(): f64 = when (this) {
+        Circle(r) -> 3.0 * r * r
+        Square(a) -> a * a
+    }
+}
+
+enum Token { Ident(String), Number(f64) }
+
+enum Ast { Number(f64), Neg(Box<Ast>) }
+
+fun side(s: &Shape): f64 = when (s) {
+    Circle(r) -> *r
+    Square(a) -> *a
+}
+
+fun num(t: &Token): f64 = when (t) {
+    Number(n) -> *n
+    else -> 0.0
+}
+
+fun eval(a: &Ast): f64 = when (a) {
+    Number(n) -> *n
+    Neg(x) -> -eval(x)
+}
+
+fun first(t: Option<&Token>): f64 {
+    if (val Some(Number(n)) = t) return *n
+    -1.0
+}
+
+fun main() {
+    println("${side(&Shape.Circle(1.0))} ${side(&Shape.Square(2.0))} ${Circle(3.0).r}")
+    println("${Shape.Circle(1.0).area()} ${Shape.Square(2.0).area()}")
+    val t = Token.Number(4.0)
+    val id = Token.Ident("x".to_string())
+    println("${num(&t)} ${num(&id)}")
+    if (val Number(n) = &t) println(n)
+    println("${t is Number(_)} ${id is Number(_)}")
+    println(eval(&Ast.Neg(Box.new(Ast.Number(5.0)))))
+    println("${first(Some(&t))} ${first(Some(&id))}")
+}

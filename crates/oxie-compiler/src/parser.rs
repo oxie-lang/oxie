@@ -44,11 +44,31 @@ pub struct Parser<'a> {
     /// An error message template, where `$0` is the case's first positional field; elsewhere
     /// it is text (`"cost $5"`).
     positional: bool,
+    /// Type names this file declares that don't look like types (`class DB`, `enum HTTP`).
+    caps_types: std::collections::HashSet<String>,
+}
+
+/// Names declared by `class`/`enum`/`interface`/... in `toks` that are all capitals (`DB`, `V8`),
+/// which `is_type_like` would take for constants.
+fn caps_type_names(toks: &[Token]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for w in toks.windows(2) {
+        if let (Tok::Ident(kw), Tok::Ident(name)) = (&w[0].tok, &w[1].tok) {
+            if matches!(kw.as_str(), "class" | "enum" | "interface" | "trait" | "struct" | "typealias" | "union")
+                && !is_type_like(name)
+                && name.starts_with(|c: char| c.is_uppercase())
+            {
+                out.insert(name.clone());
+            }
+        }
+    }
+    out
 }
 
 pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
+    let caps_types = caps_type_names(&toks);
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types };
     let file = p.file();
     // one error per place: recovering at the end of the file may report the same one again
     for d in p.diags.drain(..) {
@@ -95,7 +115,8 @@ fn unclosed_brace(src: &str, toks: &[lexer::Token]) -> Option<u32> {
 /// Parses a standalone expression (used for tests and tooling).
 pub fn parse_expr_str(src: &str) -> (Expr, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
+    let caps_types = caps_type_names(&toks);
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types };
     let e = p.expr().unwrap_or(Expr::new(ExprKind::Error, Span::default()));
     diags.append(&mut p.diags);
     (e, diags)
@@ -105,6 +126,11 @@ type PResult<T> = Result<T, ()>;
 
 impl<'a> Parser<'a> {
     // ------------------------------------------------------------------ token helpers
+
+    /// Whether `s` names a type: it looks like one, or this file declares it (`class DB`).
+    fn type_like(&self, s: &str) -> bool {
+        is_type_like(s) || self.caps_types.contains(s)
+    }
 
     fn tok(&self) -> &Tok {
         &self.toks[self.pos].tok
@@ -380,9 +406,18 @@ impl<'a> Parser<'a> {
             let start = self.pos;
             match self.item() {
                 Ok(Some(item)) => items.push(item),
+                Ok(None) if self.is_kw("var") => {
+                    let sp = self.span();
+                    self.diags.push(Diag::error(sp, "a file can't declare a `var`").with_help(
+                        "a value every function can change is a `static var`, which only `unsafe` code may use; an atomic (`static COUNT: AtomicI32 = AtomicI32.new(0)`) or a `Mutex` is safe. Or pass the value to the functions that change it.",
+                    ));
+                    self.recover_stmt();
+                }
                 Ok(None) => {
-                    let found = self.describe();
-                    self.err::<()>(format!("expected a declaration (fun, class, val, import, ...), found {}", found)).ok();
+                    if !self.global_var() {
+                        let found = self.describe();
+                        self.err::<()>(format!("expected a declaration (fun, class, val, import, ...), found {}", found)).ok();
+                    }
                     self.recover_stmt();
                 }
                 Err(()) => self.recover_stmt(),
@@ -495,6 +530,10 @@ impl<'a> Parser<'a> {
         while (self.is_kw("open") || self.is_kw("final") || self.is_kw("inline") || self.is_kw("sealed") || self.is_kw("abstract"))
             && matches!(self.tok_at(1), Tok::Ident(_))
         {
+            if (self.is_kw("open") || self.is_kw("abstract")) && (self.is_kw_at(1, "class") || self.is_kw_at(2, "class")) {
+                let m = if self.is_kw("open") { "open" } else { "abstract" };
+                self.diags.push(Diag::warning(self.span(), format!("`{}` has no effect: Oxie has no class inheritance, so no class extends another; share behavior with an interface or a field", m)));
+            }
             self.bump();
         }
         let kind = if self.is_fun_start() {
@@ -675,8 +714,10 @@ impl<'a> Parser<'a> {
             match self.item() {
                 Ok(Some(i)) => items.push(i),
                 Ok(None) => {
-                    let f = self.describe();
-                    self.err::<()>(format!("expected a declaration, found {}", f)).ok();
+                    if !self.global_var() {
+                        let f = self.describe();
+                        self.err::<()>(format!("expected a declaration, found {}", f)).ok();
+                    }
                     self.recover_stmt();
                 }
                 Err(()) => self.recover_stmt(),
@@ -686,6 +727,17 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(items)
+    }
+
+    /// A `var` outside functions and classes (at the top level, in an `object` or a companion
+    /// object): reports that Oxie has no mutable globals.
+    fn global_var(&mut self) -> bool {
+        if !self.is_kw("var") {
+            return false;
+        }
+        let msg = "a `var` outside a function or class would be a mutable global, which Rust allows only in `unsafe` code: keep the value in a class, or use a `static` holding a `Mutex` or an atomic (`static COUNT: AtomicI32 = AtomicI32(0)`)";
+        self.diags.push(Diag::error(self.span(), msg));
+        true
     }
 
     fn test_decl(&mut self, is_async: bool) -> PResult<TestDecl> {
@@ -1307,12 +1359,16 @@ impl<'a> Parser<'a> {
                     }
                     continue;
                 }
+                let start = self.span();
                 let t = self.ty_path()?;
-                // Kotlin `Base()` super constructor call: ignore the parens
+                // Kotlin's `Base(name)` super constructor call (reported, and the supertype left out)
                 if self.is_punct("(") {
                     self.raw_group()?;
+                    let name = t.last_name().unwrap_or("it").to_string();
+                    self.diags.push(Diag::error(start.to(self.prev_span()), crate::diag::no_inheritance(&name)));
+                } else {
+                    out.push(t);
                 }
-                out.push(t);
                 if !(self.eat_punct(",") || self.eat_punct("+")) {
                     break;
                 }
@@ -1529,6 +1585,10 @@ impl<'a> Parser<'a> {
 
     fn enum_decl(&mut self, is_error: bool) -> PResult<TypeDecl> {
         self.bump(); // enum
+        // Kotlin's `enum class Color`
+        if self.is_kw("class") && self.is_ident_at(1) {
+            self.bump();
+        }
         let name_span = self.span();
         let name = self.ident()?;
         let mut generics = self.generics_opt()?;
@@ -1676,8 +1736,8 @@ impl<'a> Parser<'a> {
         if self.peek_past_newlines_kw("where") {
             self.where_clause(&mut generics)?;
         }
-        self.skip_nl_only();
-        let members = self.trait_body()?;
+        // `interface Marker`: no members
+        let members = if self.peek_past_newlines_punct("{") { self.trait_body()? } else { Vec::new() };
         Ok(TraitDecl { name, name_span, generics, supertraits, members, is_unsafe })
     }
 
@@ -1724,6 +1784,25 @@ impl<'a> Parser<'a> {
                     let c = self.const_body(false)?;
                     items.push(Item { docs, attrs, vis, kind: ItemKind::Const(c), span: istart.to(self.prev_span()) });
                     return Ok(());
+                }
+                // Kotlin's abstract property: `val name: String`
+                if (self.is_kw("val") || self.is_kw("var")) && self.is_ident_at(1) {
+                    let at = self.span();
+                    let prop = match self.tok_at(1) {
+                        Tok::Ident(n) => n.clone(),
+                        _ => String::new(),
+                    };
+                    let mut i = 2;
+                    while !matches!(self.tok_at(i), Tok::Newline | Tok::Eof | Tok::Punct("}") | Tok::Punct("=") | Tok::Punct(";")) {
+                        i += 1;
+                    }
+                    if self.is_kw("var") || !self.is_punct_at(i, "=") {
+                        let ty = self.src.get(self.toks[self.pos + 1].span.end as usize..self.toks[self.pos + i - 1].span.end as usize).unwrap_or("").trim().trim_start_matches(':').trim().to_string();
+                        let ty = if ty.is_empty() { "T".to_string() } else { ty };
+                        self.diags.push(Diag::error(at, format!("an interface has no properties: declare `fun {}(): {}`, which each class implements (`override fun {}() = {}`)", prop, ty, prop, prop)));
+                        self.recover_stmt();
+                        return Ok(());
+                    }
                 }
                 self.pos = save;
                 match self.item()? {
@@ -1969,9 +2048,21 @@ impl<'a> Parser<'a> {
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
+        // a doc comment on a local (`/// the step` before `val step = 2`) is only a comment: items
+        // keep theirs
+        let doc_start = self.pos;
+        if matches!(self.tok(), Tok::DocOuter(_)) {
+            while matches!(self.tok(), Tok::DocOuter(_) | Tok::Newline) {
+                self.bump();
+            }
+            let attrs = self.is_punct("@") || (self.is_punct("#") && self.is_punct_at(1, "["));
+            if !attrs && (self.is_item_start() || matches!(self.tok(), Tok::Ident(s) if matches!(s.as_str(), "pub" | "private" | "internal" | "public"))) {
+                self.pos = doc_start;
+            }
+        }
         // attributes on a statement (`@cfg(debug_assertions) println(...)`, `#[allow(...)] val x = ...`)
         if self.is_punct("@") || (self.is_punct("#") && self.is_punct_at(1, "[")) {
-            let save = self.pos;
+            let save = doc_start;
             let nd = self.diags.len();
             let (_, attrs) = self.docs_and_attrs()?;
             let declaration = self.is_item_start() || self.is_fun_start() || matches!(self.tok(), Tok::Ident(s) if matches!(s.as_str(), "pub" | "private" | "internal" | "public"));
@@ -1997,7 +2088,10 @@ impl<'a> Parser<'a> {
             if self.eat_kw("mut") {
                 mutable = true;
             }
-            let mut pat = self.pattern()?;
+            let (mut pat, typed) = match self.typed_tuple_pattern() {
+                Some((p, t)) => (p, Some(t)),
+                None => (self.pattern()?, None),
+            };
             if mutable {
                 if let Pat::Ident { mutable: m, .. } = &mut pat {
                     *m = true;
@@ -2006,7 +2100,7 @@ impl<'a> Parser<'a> {
                 }
                 mutable = false;
             }
-            let ty = if self.eat_punct(":") { Some(self.ty()?) } else { None };
+            let ty = if typed.is_none() && self.eat_punct(":") { Some(self.ty()?) } else { typed };
             let init = if self.eat_punct("=") {
                 self.skip_nl_only();
                 Some(self.expr()?)
@@ -2233,7 +2327,7 @@ impl<'a> Parser<'a> {
                         _ => lhs,
                     };
                     let n = Expr::new(ExprKind::Cast(Box::new(rhs), Type::simple("usize")), sp);
-                    Expr::new(ExprKind::MethodCall { recv: Box::new(recv), name: "step_by".into(), generics: None, args: vec![Arg { name: None, value: n }], safe: false }, sp)
+                    Expr::new(ExprKind::MethodCall { recv: Box::new(recv), name: "step_by".into(), generics: None, args: vec![Arg { name: None, value: n, trailing: false }], safe: false }, sp)
                 }
             };
         }
@@ -2340,6 +2434,12 @@ impl<'a> Parser<'a> {
 
     fn unary_expr(&mut self) -> PResult<Expr> {
         let start = self.span();
+        // Kotlin's `++n` and `--n`
+        if let Tok::Punct(p @ ("++" | "--")) = self.tok().clone() {
+            self.bump();
+            let e = self.unary_expr()?;
+            return Ok(self.step_by_one(e, p, start));
+        }
         let op = match self.tok() {
             Tok::Punct("-") => Some(UnOp::Neg),
             Tok::Punct("!") => Some(UnOp::Not),
@@ -2401,7 +2501,7 @@ impl<'a> Parser<'a> {
                         let lam = self.lambda_braces()?;
                         let sp = e.span.to(lam.span);
                         e = Expr::new(
-                            ExprKind::MethodCall { recv: Box::new(e), name: "let".into(), generics: None, args: vec![Arg { name: None, value: lam }], safe },
+                            ExprKind::MethodCall { recv: Box::new(e), name: "let".into(), generics: None, args: vec![Arg { name: None, value: lam, trailing: true }], safe },
                             sp,
                         );
                         continue;
@@ -2423,7 +2523,7 @@ impl<'a> Parser<'a> {
                         }
                     }
                     // `Shape.Rect { w: 1.0, h: 2.0 }`: a struct literal of a variant or nested type
-                    let struct_path = if !safe && is_type_like(&name) && self.is_punct("{") && !self.no_struct && self.looks_like_struct_lit() && !self.braces_have_arrow() {
+                    let struct_path = if !safe && (self.type_like(&name) || self.is_capitalized_struct_lit(&name)) && self.is_punct("{") && !self.no_struct && self.looks_like_struct_lit() && !self.braces_have_arrow() {
                         dot_path(&e)
                     } else {
                         None
@@ -2435,14 +2535,14 @@ impl<'a> Parser<'a> {
                     } else if self.is_punct("(") {
                         let mut args = self.call_args()?;
                         if self.trailing_lambda_ok() {
-                            args.push(Arg { name: None, value: self.lambda_braces()? });
+                            args.push(Arg { name: None, value: self.lambda_braces()?, trailing: true });
                         }
                         let sp = e.span.to(self.prev_span());
                         e = Expr::new(ExprKind::MethodCall { recv: Box::new(e), name, generics, args, safe }, sp);
                     } else if self.trailing_lambda_ok() {
                         let lam = self.lambda_braces()?;
                         let sp = e.span.to(lam.span);
-                        e = Expr::new(ExprKind::MethodCall { recv: Box::new(e), name, generics, args: vec![Arg { name: None, value: lam }], safe }, sp);
+                        e = Expr::new(ExprKind::MethodCall { recv: Box::new(e), name, generics, args: vec![Arg { name: None, value: lam, trailing: true }], safe }, sp);
                     } else if let (Some(g), Some(mut segs)) = (generics.clone(), dot_path(&e)) {
                         // `std.collections.HashMap::<K, V>.new()`: a type path with arguments
                         segs.push(name);
@@ -2456,7 +2556,7 @@ impl<'a> Parser<'a> {
                 Tok::Punct("(") => {
                     let mut args = self.call_args()?;
                     if self.trailing_lambda_ok() {
-                        args.push(Arg { name: None, value: self.lambda_braces()? });
+                        args.push(Arg { name: None, value: self.lambda_braces()?, trailing: true });
                     }
                     let sp = e.span.to(self.prev_span());
                     e = Expr::new(ExprKind::Call { callee: Box::new(e), args }, sp);
@@ -2476,6 +2576,10 @@ impl<'a> Parser<'a> {
                     let sp = e.span.to(self.prev_span());
                     e = Expr::new(ExprKind::Try(Box::new(e)), sp);
                 }
+                Tok::Punct(p @ ("++" | "--")) => {
+                    let at = self.bump().span;
+                    e = self.step_by_one(e, p, at);
+                }
                 Tok::Punct("!!") if !stop_at_try => {
                     self.bump();
                     let sp = e.span.to(self.prev_span());
@@ -2484,12 +2588,22 @@ impl<'a> Parser<'a> {
                 Tok::Punct("{") if self.trailing_lambda_ok() && is_lambda_callee(&e) => {
                     let lam = self.lambda_braces()?;
                     let sp = e.span.to(lam.span);
-                    e = Expr::new(ExprKind::Call { callee: Box::new(e), args: vec![Arg { name: None, value: lam }] }, sp);
+                    e = Expr::new(ExprKind::Call { callee: Box::new(e), args: vec![Arg { name: None, value: lam, trailing: true }] }, sp);
                 }
                 _ => break,
             }
         }
         Ok(e)
+    }
+
+    /// `n++` and `--n`, which Oxie doesn't have: an error saying `n += 1`, read as that.
+    fn step_by_one(&mut self, e: Expr, op: &str, at: Span) -> Expr {
+        let target = self.src.get(e.span.start as usize..e.span.end as usize).unwrap_or("n");
+        let fix = format!("{} {}= 1", target, &op[..1]);
+        self.diags.push(Diag::error(at, format!("Oxie has no `{}`", op)).with_help(format!("write `{}`", fix)));
+        let sp = e.span.to(at);
+        let one = Expr::new(ExprKind::Int("1".into()), at);
+        Expr::new(ExprKind::Assign(Some(if op == "++" { BinOp::Add } else { BinOp::Sub }), Box::new(e), Box::new(one)), sp)
     }
 
     fn trailing_lambda_ok(&self) -> bool {
@@ -2513,7 +2627,7 @@ impl<'a> Parser<'a> {
                 None
             };
             let value = self.expr()?;
-            args.push(Arg { name, value });
+            args.push(Arg { name, value, trailing: false });
             if !self.eat_punct(",") {
                 if self.expect_punct(")").is_err() {
                     self.no_struct = saved;
@@ -2541,7 +2655,7 @@ impl<'a> Parser<'a> {
                 let pat = self.pattern()?;
                 self.expect_punct("=")?;
                 let expr = self.expr()?;
-                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. });
+                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. } | Pat::Tuple(_));
                 return Ok(Cond::Let { pat, expr, implicit_some });
             }
             return Ok(Cond::Expr(self.expr()?));
@@ -2554,7 +2668,7 @@ impl<'a> Parser<'a> {
                 let pat = self.pattern()?;
                 self.expect_punct("=")?;
                 let expr = self.cmp_expr()?;
-                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. });
+                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. } | Pat::Tuple(_));
                 parts.push(Cond::Let { pat, expr, implicit_some });
             } else {
                 parts.push(Cond::Expr(self.cmp_expr()?));
@@ -2675,27 +2789,9 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.string_expr(parts, start)
             }
-            Tok::Lifetime(label) if self.is_punct_at(1, ":") => {
-                self.bump();
-                self.bump();
-                let label = Some(label);
-                if self.is_kw("loop") {
-                    self.bump();
-                    let body = self.block()?;
-                    return Ok(Expr::new(ExprKind::Loop { label, body }, start.to(self.prev_span())));
-                }
-                if self.is_kw("while") {
-                    return self.while_expr(label, start);
-                }
-                if self.is_kw("for") {
-                    return self.for_expr(label, start);
-                }
-                if self.is_punct("{") {
-                    let block = self.block()?;
-                    return Ok(Expr::new(ExprKind::LabeledBlock { label: label.unwrap(), block }, start.to(self.prev_span())));
-                }
-                self.expected("`loop`, `while`, `for` or `{` after label")
-            }
+            // `'outer: for`, and Kotlin's `outer@ for`
+            Tok::Lifetime(label) if self.is_punct_at(1, ":") => self.labeled(label, start),
+            Tok::Ident(label) if self.is_punct_at(1, "@") && (["for", "while", "loop"].iter().any(|k| self.is_kw_at(2, k)) || self.is_punct_at(2, "{")) => self.labeled(label, start),
             Tok::Punct("(") => self.paren_or_lambda(),
             Tok::Punct("[") => {
                 self.bump();
@@ -2745,9 +2841,10 @@ impl<'a> Parser<'a> {
                 "match" => self.match_expr(),
                 "for" => self.for_expr(None, start),
                 "while" => self.while_expr(None, start),
-                "do" if self.is_punct_at(1, "{") => {
+                // `do { } while (c)`, or with a single statement: `do x += 1 while (c)`
+                "do" if self.is_punct_at(1, "{") || self.can_start_expr_at(1) => {
                     self.bump();
-                    let body = self.block()?;
+                    let body = self.branch_body(true)?;
                     if !self.peek_past_newlines_kw("while") {
                         return self.expected("`while` after `do { }`");
                     }
@@ -2793,6 +2890,15 @@ impl<'a> Parser<'a> {
                 }
                 "return" => {
                     self.bump();
+                    // Kotlin's `return@for_each` leaves a lambda, which a `return` in it does
+                    if self.is_punct("@") && matches!(self.tok_at(1), Tok::Ident(_)) {
+                        let at = self.bump().span;
+                        let Tok::Ident(l) = self.bump().tok else { unreachable!() };
+                        self.diags.push(
+                            Diag::error(at.to(self.prev_span()), format!("Oxie has no `return@{}`", l))
+                                .with_help("`return` in a lambda already returns from the lambda: write `return`. To leave a loop, label it (`outer@ for (...)`) and `break@outer`."),
+                        );
+                    }
                     let v = if self.can_start_expr() && !self.is_punct("}") && !self.is_punct(")") && !self.is_punct(",") && !self.is_punct(";") {
                         Some(Box::new(self.expr()?))
                     } else {
@@ -2807,12 +2913,7 @@ impl<'a> Parser<'a> {
                 }
                 "break" => {
                     self.bump();
-                    let label = if let Tok::Lifetime(l) = self.tok().clone() {
-                        self.bump();
-                        Some(l)
-                    } else {
-                        None
-                    };
+                    let label = self.jump_label();
                     let v = if self.can_start_expr() && !self.is_punct("}") && !self.is_punct(")") && !self.is_punct(",") && !self.is_punct(";") {
                         Some(Box::new(self.expr()?))
                     } else {
@@ -2822,12 +2923,7 @@ impl<'a> Parser<'a> {
                 }
                 "continue" => {
                     self.bump();
-                    let label = if let Tok::Lifetime(l) = self.tok().clone() {
-                        self.bump();
-                        Some(l)
-                    } else {
-                        None
-                    };
+                    let label = self.jump_label();
                     Ok(Expr::new(ExprKind::Continue(label), start.to(self.prev_span())))
                 }
                 "const" if self.is_punct_at(1, "{") => {
@@ -2938,7 +3034,7 @@ impl<'a> Parser<'a> {
                 StrPart::Interp { src: s, offset, spec } => {
                     let (toks, mut diags) = lexer::lex_at(&s, offset);
                     self.diags.append(&mut diags);
-                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true };
+                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, caps_types: self.caps_types.clone() };
                     let e = sub.expr();
                     if e.is_ok() && !matches!(sub.tok(), Tok::Newline | Tok::Eof) {
                         let sp = sub.span();
@@ -3005,7 +3101,7 @@ impl<'a> Parser<'a> {
             break;
         }
         // Type<Args>::item or Type<Args>(...) without turbofish
-        if generics.is_none() && self.is_punct("<") && is_type_like(segs.last().unwrap()) {
+        if generics.is_none() && self.is_punct("<") && self.type_like(segs.last().unwrap()) {
             let save = self.pos;
             let nd = self.diags.len();
             match self.generic_args() {
@@ -3068,7 +3164,7 @@ impl<'a> Parser<'a> {
             return Ok(Expr::new(ExprKind::VecLit(elems), sp.to(self.prev_span())));
         }
         // struct literal
-        if self.is_punct("{") && !self.no_struct && is_type_like(segs.last().unwrap()) && self.looks_like_struct_lit() {
+        if self.is_punct("{") && !self.no_struct && (self.type_like(segs.last().unwrap()) || self.is_capitalized_struct_lit(segs.last().unwrap())) && self.looks_like_struct_lit() {
             return self.struct_lit(segs, generics, sp);
         }
         Ok(Expr::new(ExprKind::Path { segs, generics, global }, sp))
@@ -3093,6 +3189,18 @@ impl<'a> Parser<'a> {
             }
             i += 1;
         }
+    }
+
+    /// `V2 { x: 1 }` with a capitalized name declared elsewhere: a field name and `:` follow.
+    fn is_capitalized_struct_lit(&self, name: &str) -> bool {
+        if !name.starts_with(|c: char| c.is_uppercase()) {
+            return false;
+        }
+        let mut i = 1;
+        while matches!(self.tok_at(i), Tok::Newline) {
+            i += 1;
+        }
+        matches!(self.tok_at(i), Tok::Ident(_)) && matches!(self.tok_at(i + 1), Tok::Punct(":"))
     }
 
     fn looks_like_struct_lit(&self) -> bool {
@@ -3400,7 +3508,13 @@ impl<'a> Parser<'a> {
         let start = self.bump().span;
         let (cond, parens) = self.if_header()?;
         let then = self.branch_body(parens)?;
-        let else_ = if self.peek_past_newlines_kw("else") {
+        // `else ->` is the next arm of an enclosing `when`, not this `if`'s else
+        let mut n = 0;
+        while matches!(self.tok_at(n), Tok::Newline) {
+            n += 1;
+        }
+        let when_arm = self.is_punct_at(n + 1, "->");
+        let else_ = if !when_arm && self.peek_past_newlines_kw("else") {
             self.bump();
             if self.is_kw("if") {
                 Some(Box::new(self.if_expr()?))
@@ -3416,6 +3530,45 @@ impl<'a> Parser<'a> {
             None
         };
         Ok(Expr::new(ExprKind::If { cond: Box::new(cond), then, else_ }, start.to(self.prev_span())))
+    }
+
+    /// A labeled loop or block, after its label (`'outer:` or `outer@`).
+    fn labeled(&mut self, label: String, start: Span) -> PResult<Expr> {
+        self.bump();
+        self.bump();
+        let label = Some(label);
+        if self.is_kw("loop") {
+            self.bump();
+            let body = self.block()?;
+            return Ok(Expr::new(ExprKind::Loop { label, body }, start.to(self.prev_span())));
+        }
+        if self.is_kw("while") {
+            return self.while_expr(label, start);
+        }
+        if self.is_kw("for") {
+            return self.for_expr(label, start);
+        }
+        if self.is_punct("{") {
+            let block = self.block()?;
+            return Ok(Expr::new(ExprKind::LabeledBlock { label: label.unwrap(), block }, start.to(self.prev_span())));
+        }
+        self.expected("`loop`, `while`, `for` or `{` after label")
+    }
+
+    /// The label of `break 'outer` or Kotlin's `break@outer`.
+    fn jump_label(&mut self) -> Option<String> {
+        match self.tok().clone() {
+            Tok::Lifetime(l) => {
+                self.bump();
+                Some(l)
+            }
+            Tok::Punct("@") if matches!(self.tok_at(1), Tok::Ident(_)) => {
+                self.bump();
+                let Tok::Ident(l) = self.bump().tok else { unreachable!() };
+                Some(l)
+            }
+            _ => None,
+        }
     }
 
     fn for_expr(&mut self, label: Option<String>, start: Span) -> PResult<Expr> {
@@ -3622,6 +3775,38 @@ impl<'a> Parser<'a> {
         Ok(Pat::Or(alts))
     }
 
+    /// `(a: Int, b: String)` after `val`: the plain pattern and the tuple type it declares
+    /// (`_` for parts without a type). None, with nothing consumed, when no part has a type.
+    fn typed_tuple_pattern(&mut self) -> Option<(Pat, Type)> {
+        if !self.is_punct("(") {
+            return None;
+        }
+        let (save, nd) = (self.pos, self.diags.len());
+        let parse = |p: &mut Self| -> PResult<Option<(Pat, Type)>> {
+            p.bump();
+            let (mut pats, mut tys, mut any) = (Vec::new(), Vec::new(), false);
+            while !p.eat_punct(")") {
+                pats.push(p.pattern()?);
+                let typed = p.eat_punct(":");
+                any |= typed;
+                tys.push(if typed { p.ty()? } else { Type::Infer });
+                if !p.eat_punct(",") {
+                    p.expect_punct(")")?;
+                    break;
+                }
+            }
+            Ok((any && pats.len() > 1).then_some((Pat::Tuple(pats), Type::Tuple(tys))))
+        };
+        match parse(self) {
+            Ok(Some(r)) => Some(r),
+            _ => {
+                self.pos = save;
+                self.diags.truncate(nd);
+                None
+            }
+        }
+    }
+
     fn pattern_no_or(&mut self) -> PResult<Pat> {
         let p = self.pattern_primary()?;
         // range patterns
@@ -3794,7 +3979,7 @@ impl<'a> Parser<'a> {
                     }
                     return Ok(Pat::TupleStruct { path: segs, elems, span });
                 }
-                if self.is_punct("{") && (segs.len() > 1 || is_type_like(&segs[0])) {
+                if self.is_punct("{") && (segs.len() > 1 || self.type_like(&segs[0])) {
                     self.bump();
                     let mut fields = Vec::new();
                     let mut rest = false;
@@ -3830,7 +4015,7 @@ impl<'a> Parser<'a> {
                     }
                     return Ok(Pat::Struct { path: segs, fields, rest, span });
                 }
-                if segs.len() == 1 && !is_type_like(&segs[0]) && !is_const_like(&segs[0]) {
+                if segs.len() == 1 && !self.type_like(&segs[0]) && !is_const_like(&segs[0]) {
                     let name = segs.pop().unwrap();
                     let sub = if self.eat_punct("@") { Some(Box::new(self.pattern_no_or()?)) } else { None };
                     return Ok(Pat::Ident { name, by_ref: false, mutable: false, sub, span });

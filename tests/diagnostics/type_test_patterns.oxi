@@ -1,0 +1,21 @@
+// A capitalized name in a pattern that is no enum case, constant or class would bind anything.
+
+enum Shape { Circle(f64), Square(f64) }
+
+fun kind(x: i32): &str = when (x) {
+    is Int -> "int"
+    else -> "other"
+}
+// error: 6: `Int` is not an enum case, constant or class without fields; Oxie has no type tests
+
+fun name(s: &Shape): &str = when (s) {
+    Circle -> "circle"
+    Triangle -> "triangle"
+    else -> "other"
+}
+// error: 13: `Triangle` is not a case of `Shape`
+
+fun main() {
+    println(kind(1))
+    println(name(&Shape.Square(1.0)))
+}

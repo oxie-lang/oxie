@@ -1,0 +1,7 @@
+// rustc's notes name a lambda's type without the path of the generated Rust.
+fun twice(n: i32): i32 = n * 2
+
+fun main() {
+    println(twice({ x: i32 -> x }))
+    // error: 5: found closure `{lambda}`
+}

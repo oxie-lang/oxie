@@ -33,8 +33,10 @@ Contents: [Lexical structure](#lexical-structure) · [Declarations](#declaration
 
 * **Identifiers** are Rust identifiers. Rust keywords that Oxie does not reserve (`type`,
   `match`, `loop`, ...) can be field and method names; `r#name` works as in Rust.
-* **Numbers**: Rust literals (`1_000`, `0xff`, `1e-3`, `8.`, `5u8`, `2.0f32`) plus Kotlin's `10L` (`i64`).
-* **Characters**: `'a'`, `'\n'`, `'\u{1F600}'`, byte `b'a'`.
+* **Numbers**: Rust literals (`1_000`, `0xff`, `1e-3`, `8.`, `5u8`, `2.0f32`) plus Kotlin's `10L`
+  (`i64`) and `1.5f` (`f32`). Kotlin's type names work in paths: `Int.MAX`, `Long.MAX_VALUE`
+  (`i64::MAX`), `Double.POSITIVE_INFINITY`.
+* **Characters**: `'a'`, `'\n'`, `'\u{1F600}'`, byte `b'a'`. Kotlin's `\b` escape is accepted too.
 * **Strings**: see [Strings](#strings). Raw strings `r"..."`, `r#"..."#` and byte strings
   `b"..."` are Rust's.
 
@@ -46,10 +48,12 @@ Contents: [Lexical structure](#lexical-structure) · [Declarations](#declaration
 | `var x = 1` | `let mut x = 1;` |
 | `val x: T = v` | `let x: T = v;` |
 | `val (a, b) = pair` | `let (a, b) = pair;` |
+| `val (a: i32, b: String) = pair` | `let (a, b): (i32, String) = pair;` |
 | `var (a, b) = pair` | `let (mut a, mut b) = pair;` |
+| `val (x, y) = point` (a data class) | `let Point { x, y } = point;` (fields in constructor order) |
 | `let`/`let mut` (Rust style) | unchanged |
 | `val Some(x) = opt else { return }` | `let Some(x) = opt else { return };` |
-| top-level `const NAME = 1` / `val NAME = 1` | `const NAME: i32 = 1;` (type inferred from literals) |
+| top-level `const NAME = 1` / `val NAME = 1` | `const NAME: i32 = 1;` (type inferred from literals; the value must be computable while compiling, so no `vec[...]` or templates: use a function or `static NAME: LazyLock<T>`) |
 | `static NAME: T = v` / `static var NAME: T = v` | `static` / `static mut` |
 | `typealias Name = T` / `type Name = T` | `type Name = T;` |
 
@@ -70,7 +74,8 @@ fun short(x: i32) = x * 2
 * **Block value**: the last expression of a block is its value. In a function returning `()`
   the last expression is a statement.
 * **Default arguments** and **named arguments** (`f(x = 1)`) work for functions, methods and
-  constructors declared in Oxie; defaults are filled in at the call site. A function called
+  constructors declared in Oxie; defaults are filled in at the call site, and one may use the
+  parameters before it (`h: i32 = w`). A function called
   through its module (`util.total(v)`) is treated like a direct call: arguments are lent,
   defaults and names apply, and a `throws` function's error propagates.
 * **Generics and bounds** are Rust's: `<T: Display + Clone>`, `where T: Into<String>`,
@@ -86,18 +91,23 @@ fun short(x: i32) = x * 2
   | `a.cmp(b)`, `a.max(b)` | `Ord` |
   | `a + b`, `a * b`, ... with both `T` | `Add<Output = T> + Copy`, ... |
   | `a += b` | `AddAssign`, ... |
-  | `x.clone()` | `Clone` |
-  | a key of a `HashSet`/`HashMap` variable | `Eq + Hash` |
+  | `x.clone()`, `xs.clone()`, `this.copy(...)` | `Clone` |
+  | `"${xs:?}"` on a `Vec<T>` | `Debug` |
+  | `xs.contains(x)` / `xs.iter().max()`, `xs.sort()` on a `Vec<T>` | `PartialEq` / `Ord` |
+  | a key of a `HashSet`/`HashMap` variable or field | `Eq + Hash` |
 
-  Bounds already written (or implied, like `Ord` for `PartialOrd`) are not repeated.
+  Bounds already written (or implied, like `Ord` for `PartialOrd`) are not repeated. In a
+  generic class, the bounds of `toString`, operators and overrides go on their `impl` block.
   Interface methods keep the interface's signature.
 * **Automatic borrowing**: an argument for a `&T` or `&mut T` parameter of a function or method
   declared in Oxie is borrowed: `total(v)` → `total(&v)`, `add_one(v)` → `add_one(&mut v)`.
   For a `&str` or `&[T]` parameter any owned argument is lent (`greet(name.to_uppercase())`).
-* **Borrowed parameters**: a `String` or `Vec<T>` parameter of a top-level function that isn't
-  `pub` becomes `&str` or `&[T]` when the body only reads it (calls `len`, `contains`, `iter`,
-  `map`, ..., prints it, compares it, indexes it, or passes it on to another borrowed parameter),
-  so callers keep their value. A function that stores, returns or consumes the value keeps the
+* **Borrowed parameters**: a `String` or `Vec<T>` parameter of a function or method that isn't
+  `pub` (except interface methods, overrides and methods of shared classes) becomes `&str` or
+  `&[T]` when the body only reads it (calls `len`, `contains`, `iter`, `map`, ..., prints it,
+  compares it, joins it with `+`, indexes it, loops over it reading the elements, or passes it on
+  to another borrowed parameter), so callers keep their value. `Copy` elements of a lent `Vec`
+  stay values in a loop (`for &x in xs`). A function that stores, returns or consumes the value keeps the
   owned type, and so do functions that are `pub`, `async`, used as values (`xs.map(greet)`) or
   called through a path (`util.greet(x)`). A `Vec<T>` is lent only when dropping a `T` just
   frees memory (numbers, strings, std collections of them, and Oxie types made of those that
@@ -115,15 +125,17 @@ fun short(x: i32) = x * 2
   literals) are passed as they are. Passing a field to a `&mut` parameter makes the method
   `&mut self`.
 * **Arguments that change `this`**: in a method, a call on a field whose arguments call a
-  method of `this` that takes `&mut self` (`items.push(next_id())`) computes those calls first,
-  into locals named after the method, in the order they are written:
-  `let next_id = self.next_id(); self.items.push(next_id);`. Rust borrows the field for the call
-  before it runs the arguments, so it rejects the statement as written. This applies to any
+  method of `this` that takes `&mut self` (`items.push(next_id())`, or a map index assignment
+  `ids[key] = next_id()`) computes those calls first, into locals named after the method, in
+  the order they are written: `let next_id = self.next_id(); self.items.push(next_id);`. Rust
+  borrows the field for the call before it runs the arguments, so it rejects the statement as
+  written. This applies to any
   statement (also a `val`'s initializer, a `when` arm or a lambda's body) when the call borrows
   the field (a std collection, `String`, `Box`, a `shared class`, or an Oxie class whose method
   takes `&self` or `&mut self`) and the calls always run (not in a lambda, an `if`, after `&&`
   or `?.`). Nothing that could notice them running earlier may run before them, like another
-  call or a read of a field, so `items.insert(count(), next_id())` stays as written. A `Copy`
+  call (a conversion of a local's text or number, such as `name.to_string()`, is fine) or a read
+  of a field, so `items.insert(count(), next_id())` stays as written. A `Copy`
   field is copied before the arguments run, so `next.min(next_id())`, which Rust accepts, is
   left as written too.
 * **Methods that take only the fields they use**: a method that changes `this`, called inside a
@@ -152,7 +164,8 @@ fun short(x: i32) = x * 2
 * **Function-typed parameters**: `f: (i32) -> i32` becomes `impl FnMut(i32) -> i32` (or
   `impl Fn` when the function is called from inside a closure); as a field, a return value
   stored in a variable, or a generic argument it becomes `Box<dyn Fn(i32) -> i32>`, and
-  lambdas passed to it are boxed automatically.
+  lambdas passed to it are boxed automatically. A parameter the function stores in a field or
+  list is `impl Fn(i32) -> i32 + 'static`.
 * `fun main() throws` prints the error with its causes and exits with status 1.
 
 ### Context parameters
@@ -218,7 +231,7 @@ fun main() {
 | `Int`, `Long`, `Short`, `Byte`, `UInt`, `ULong`, `Double`, `Float`, `Boolean`, `Char`, `Unit` | `i32`, `i64`, `i16`, `i8`, `u32`, `u64`, `f64`, `f32`, `bool`, `char`, `()` |
 | `T?` | `Option<T>` (`&T?` is `Option<&T>`) |
 | `(A, B) -> R` | `impl FnMut(A, B) -> R`, `Box<dyn Fn(A, B) -> R>` or `dyn Fn(..)` depending on position |
-| `Shape` (an interface used as a type) | `impl Shape` (parameters, returns), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, and returns of different classes) |
+| `Shape` (an interface used as a type) | `impl Shape` (parameters, returns; `impl Shape + 'static` for a parameter the function stores), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, returns of different classes, and parameters and results of interface methods) |
 | `&T`, `&mut T`, `[T]`, `[T; N]`, `(A, B)`, `Vec<T>`, `dyn T`, `impl T`, `*const T` | same |
 | `std.io.Error` | `std::io::Error` (dots or `::` in paths) |
 
@@ -239,7 +252,10 @@ fun main() = println("${unit().area()} ${pick(true).area()} ${pick(false).area()
 
 An element of a `Vec<Shape>` (or `Vec<Box<Shape>>`), a loop variable over one and an
 interface-typed field are lent to an `&Shape` parameter as the value inside the box
-(`describe(shapes[0])` → `describe(&*shapes[0])`).
+(`describe(shapes[0])` → `describe(&*shapes[0])`). Oxie also implements each interface for
+`Box<T>` and `&T` that forward to the value (`impl<T: Shape + ?Sized> Shape for Box<T>`, when its
+methods allow it), so a boxed value reached any other way (`shapes.first()`, `map.get(k)`, `it`
+in a lambda) is accepted where a `Shape` or `&Shape` is expected.
 
 The standard traits used as types the same way are `Display`, `Debug`, `Error`, `Iterator`,
 `IntoIterator`, `Read`, `Write`, `BufRead`, `Future`, `Any`, `ToString` and every interface
@@ -261,6 +277,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
 ```
 
 * Generates `struct Name<T> { a, b, c, d }` and `impl` with `fn new(a, b, c) -> Self`.
+  A body property's default can use the constructor parameters and the properties before it
+  (`val code = name.to_uppercase()`).
 * **Construction**: `Name(a, b)` → `Name::new(a, b)`; named arguments and defaults work.
   Zero-argument calls of external types (`HashMap()`, `String()`) become `Type::new()`.
 * `val`/`var` before constructor parameters are accepted (Kotlin habit) but don't matter:
@@ -275,6 +293,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
     calls a `&mut self` method of an Oxie class through a field of that type (`c.add(1)` for
     `var c: Counter`, also generic classes like `Entity<Counter>`; not a `shared class`, whose
     handle `&self` reaches);
+  * `self` (`mut self` if it changes `this`) if it returns `this` as its class: a builder,
+    `fun url(u: &str): Request { url = u.to_string(); this }`;
   * static if it never uses `self` and returns `Self`/the class, or is named `new`, `default`,
     `from`, `from_str`, `try_from` or `from_iter`;
   * `&self` otherwise.
@@ -302,6 +322,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
   [Context parameters](#context-parameters).
 * `object Name { ... }` is a namespace (a Rust module) of constants and functions:
   `Name.function()`.
+* Constants in a class body, its `companion object` or an `impl` block are used without
+  `Self.` inside the class (`w * SIZE` → `w * Self::SIZE`).
 * Classes, enums and interfaces declared inside a class body are placed next to the class;
   refer to them as `Inner` or `Outer.Inner`.
 
@@ -367,7 +389,10 @@ enum Shape : Display {
 * `Shape.Circle(1.0)` or `Circle(1.0)` (when the name is unique, or declared in the same file)
   constructs; named-field variants accept positional or named arguments.
 * In patterns, `Circle(r)` matches named-field variants positionally (→ `Circle { radius: r }`),
-  and a bare `Circle` matches any `Circle`.
+  and a bare `Circle` matches any `Circle`. A bare case name is a case of the matched value's
+  enum when Oxie knows its type, even if another enum or a class has that name. A capitalized
+  name that matches nothing is an error: Oxie has no type tests (`is Int`), so match on an enum.
+* `enum class Color { ... }` (Kotlin) is accepted as `enum`.
 * Enums derive `Debug`, `Clone`, `PartialEq` (and `Copy`, `Eq`, `Hash` when possible).
 * `error enum` — see [Errors](#errors).
 
@@ -384,7 +409,8 @@ interface Named : Display {
 }
 ```
 
-* `interface` (or `trait`) → `trait`. Methods take `&self` unless declared otherwise (or their
+* `interface` (or `trait`) → `trait`; an interface without members may omit `{}`. Interfaces
+  have no properties: declare `fun name(): String` and implement it in each class. Methods take `&self` unless declared otherwise (or their
   default body or an implementation needs `&mut self`). Its supertypes may include a lifetime
   bound: `interface Ext : IntoElement + 'static`.
 * A class lists interfaces after `:` and implements methods with `override fun`; the
@@ -400,12 +426,13 @@ interface Named : Display {
 ```oxie
 fun String.shout(): String = self.to_uppercase()
 fun <T: Clone> Vec<T>.second(): T? = self.get(1).cloned()
-mut fun Vec<i32>.bump(by: i32) { for (x in self.iter_mut()) *x += by }
+fun Vec<i32>.bump(by: i32) { for (x in self.iter_mut()) *x += by }   // `&mut self`, inferred
 ```
 
 Each becomes a trait with one method plus its `impl` for the receiver type; every file of the
 crate imports these traits automatically. Inside, `this`/`self` is the receiver; for Oxie
-classes their fields can be used directly.
+classes their fields can be used directly. An extension of an interface (`fun Shape.describe()`)
+applies to every type that implements it: `impl<T: Shape + ?Sized> ShapeDescribe for T`.
 
 ### Operators
 
@@ -428,7 +455,8 @@ the right-hand side (`impl Mul<f64> for Vec2` for `operator fun times(k: f64)`).
 
 * Variable declarations (see [Declarations](#declarations)).
 * Expressions, including assignments `a = b`, `a += b` (all compound operators).
-* Local `fun`, `class`, `enum`, ... declarations.
+* Local `fun`, `class`, `data class`, `enum`, ... declarations (local classes get constructors,
+  receivers and derives like top-level ones).
 * `return`, `break ['label] [value]`, `continue ['label]`, `throw e`.
 * Attributes on a statement: `@cfg(debug_assertions) println("debug")`,
   `#[allow(unused_variables)] val x = 1`.
@@ -445,6 +473,7 @@ the right-hand side (`impl Mul<f64> for Vec2` for `operator fun times(k: f64)`).
 | `x is Pattern` / `x !is Pattern` | `matches!(x, Pattern)` / `!matches!(..)` |
 | `a to b` | `(a, b)` |
 | `a until b`, `a downTo b`, `r step n` | `a..b`, `(b..=a).rev()`, `r.step_by(n)` |
+| `x in a downTo b` | `b <= x && x <= a` |
 | `a..b`, `a..=b`, `a..<b` | `a..b`, `a..=b`, `a..b` |
 | `x as T` | `x as T` |
 | `x as T < y`, `x as T << n` | `(x as T) < y`, `(x as T) << n` |
@@ -484,8 +513,9 @@ the declared type of a variable, field, parameter or return value:
 * a string literal to `String` (`String::from("...")`), a `&str` value to a `String`
   parameter (`.into()`);
 * a value to `T?` (`Some(...)`, or `.into()` for variables), `null` to `None`;
-* a lambda to a function-typed field (`Box::new(...)`), a constructed value to an interface-typed
-  field or collection (`Box::new(...)`);
+* a lambda or function parameter to a function-typed field or list (`Box::new(...)`), a value of
+  an implementing class or enum (or an interface-typed parameter) to an interface-typed field or
+  collection, also when it is pushed or inserted (`Box::new(...)`);
 * a `vec[...]` to `Vec<T>` element by element.
 
 ## Strings
@@ -510,7 +540,10 @@ the declared type of a variable, field, parameter or return value:
   a template is spliced directly into the format string (no extra allocation).
 * A string literal passed to these with extra arguments is a Rust format string:
   `println("{} items", n)`.
-* `println(a, b)` prints both separated by a space; `println(x)` prints any `Display` value.
+* `println(a, b)` prints both separated by a space (also `println("total:", n)`, a literal without
+  `{}`); `println(x)` prints any `Display` value.
+* A `var` holding a text literal that is later appended to (`var acc = ""`, `acc += x`) starts
+  as a `String`.
 
 ## Null safety
 
@@ -523,8 +556,10 @@ the declared type of a variable, field, parameter or return value:
   (`val v: T? = ...`).
 * `a?.b`, `a?.m()`, `a?.b?.c` — **safe navigation** when `a` is optional: the result is
   `None` if `a` is. Chains flatten like Kotlin (`?.` on a `T?` property continues the chain;
-  `?.` after a non-optional property acts like `.`). Reading a field through a borrowed value
-  gives a reference (`Option<&T>`).
+  `?.` after a link that isn't optional, a property or a method like `trim()`, acts like `.`).
+  Reading a field through a borrowed value gives a reference (`Option<&T>`).
+* `a?.b = v` (also `+=`, ...) assigns only when `a` isn't null:
+  `if let Some(a) = a.as_mut() { a.b = v; }`.
 * When the left side is a `Result` (a call to a `throws` function, `.await`, `parse()`,
   `File::open(...)`, ...), `a?.b` is Rust's `?` followed by `.b`: the error is propagated.
   For a left side of unknown type, `?.` propagates errors inside functions that return
@@ -534,18 +569,25 @@ the declared type of a variable, field, parameter or return value:
   `return`, `throw`, `break`, `continue` or `panic(...)`. When `b` is a literal or a value that
   costs nothing to read (a constant, an enum variant, a variable, a field), `Option<&T> ?: b`
   yields `T` for a `Copy` `T` (`server?.encoding ?: Encoding.Utf16`), `Option<String> ?: "text"`
-  yields `String` and `Option<&String> ?: "text"` yields `&str`. So through a borrowed value (`u: &User`), `u.address?.city ?: "unknown"` is borrowed
-  text; where a `String` is needed, copy the field explicitly, as for any field read through a
+  yields `String` and `Option<&String> ?: "text"` yields `&str`. So through a borrowed value
+  (`u: &User`), `u.address?.city ?: "unknown"` is borrowed text; where a `String` is needed, copy the field explicitly, as for any field read through a
   reference: `u.address?.city.clone() ?: "unknown"`. The compiler error offers this fix.
-* `x!!` — unwrap.
+  When `b` is optional too, `a ?: b` is optional (`a.or(b)`, `a.or_else(|| f())` for a call),
+  so `a ?: b ?: 0` tries each in turn.
+* `x!!` — unwrap. On a variable or field followed by a method call (`name!!.len()`) it unwraps
+  a reference (`name.as_ref().unwrap()`), so `name` stays usable.
 * `if (val v = opt) { }` / `while (val v = opt)` — `if let Some(v)` / `while let Some(v)`;
-  with a pattern (`if (val Ok(v) = r)`) the pattern is used as written.
+  with a pattern (`if (val Ok(v) = r)`) the pattern is used as written, except a tuple, which
+  unwraps an optional pair (`if (val (k, v) = split(s))`).
 * A null check unwraps a local variable or parameter whose type Oxie knows to be `T?`, when the
-  branch doesn't assign it: in `if (x != null) { }` (also as a part of an `&&` chain) `x` is the
-  value, `if let Some(x) = &x` (a reference; a `Copy` value is copied, and `&mut x` is used when
-  the branch changes it). After `if (x == null) return` (or `throw`, `continue`, `break`), `x` is
-  the value for the rest of the block: `let Some(x) = x else { return };`. Fields are not
-  unwrapped (unwrap them with `if (val v = &a.field)`).
+  branch doesn't assign it: in `if (x != null) { }` (also as a part of an `&&` chain) and in the
+  `else` of `if (x == null)`, `x` is the value, `if let Some(x) = &x` (a reference; a `Copy`
+  value is copied, and `&mut x` is used when the branch changes it). After
+  `if (x == null) return` or `if (a == null || b == null) return` (or `throw`, `continue`,
+  `break`), they are the values for the rest of the block: `let Some(x) = x else { return };`.
+  In `x == null || cond` and `x != null && cond`, `x` is the value in `cond`
+  (`x.as_ref().map_or(true, |x| cond)`). A check whose branch doesn't use `x` stays a check
+  (`x.is_some()`). Fields are not unwrapped (unwrap them with `if (val v = &a.field)`).
 
 ```oxie
 fun initial(name: String?): char {
@@ -597,9 +639,9 @@ match x { Some(v) => v, None => 0 } // Rust match syntax works too
 for (item in items) { }             // also `for item in items { }`
 for ((i, x) in xs.iter().enumerate()) { }
 while (cond) { }
-do { } while (cond)
+do { } while (cond)                 // also `do x += 1 while (cond)`
 loop { }
-'outer: for (...) { break 'outer }
+'outer: for (...) { break 'outer } // or Kotlin's `outer@ for`, `break@outer`
 val v = 'found: { if (c) break 'found 1; 0 }   // labeled block with a value
 val n = const { SIZE * 2 }                      // evaluated at compile time
 ```
@@ -613,8 +655,10 @@ val n = const { SIZE * 2 }                      // evaluated at compile time
   `HashMap`, `HashSet`, `BTreeMap`, ...) that is used after the loop or by the next round of an
   enclosing loop: then the loop borrows it (`for x in &xs`), and `x` is a reference to the element
   (`Copy` elements are bound by value: `for &n in &nums`). A loop over a collection field of the
-  class always borrows it, except in methods taking `self`. When the body changes the element
-  (`x.qty += 1`, `x.tags.push(t)`), the loop borrows the collection mutably
+  class always borrows it, except in methods taking `self`, and so does a loop over a field of a
+  reference or of a local used afterwards (`for (m in team.members)`). When the body changes the
+  element (`x.qty += 1`, `x.tags.push(t)`, a method that takes `&mut self`, `*v` of a map entry,
+  or an inner loop that changes its elements), the loop borrows the collection mutably
   (`for x in &mut xs`), and a method that does this to a field changes `this`.
 
 ```oxie
@@ -640,7 +684,7 @@ x => x * 2
 move { ... }                    // capture by value
 { [counter, tx] -> ... }        // capture list: moves in clones of `counter` and `tx`
 { [n = items.len()] x -> ... }  // a computed capture, then parameters
-f(x) { trailing lambda }        // last argument outside the parentheses
+f(x) { trailing lambda }        // the last parameter, outside the parentheses
 ```
 
 * A brace lambda without `->` has no parameters, or `it` if it uses `it`. Closures with an
@@ -710,7 +754,7 @@ Each one is the iterator chain you would write by hand; the element is passed by
 | `xs.sum()`, `sum_of { }` | number | `iter().sum()`, `iter().map(..).sum()` |
 | `xs.max_of { }`, `min_of { }` | `S?` | `iter().map(..).max_by(..)` |
 | `xs.max_by_key { }`, `min_by_key { }` | `T?` (a reference) | works with `f64` keys too |
-| `xs.sorted()`, `sorted_descending()`, `sorted_by { }`, `sorted_by_descending { }` | `Vec<T>` | `to_vec()` + `sort` |
+| `xs.sorted()`, `sorted_descending()`, `sorted_by { }`, `sorted_by_descending { }` | `Vec<T>` | `to_vec()` + `sort` (also `f64`: NaN sorts last) |
 | `xs.reversed()`, `distinct()`, `distinct_by { }`, `chunked(n)` | `Vec<T>` / `Vec<Vec<T>>` | |
 | `xs.group_by { key }` | `HashMap<K, Vec<T>>` | |
 | `xs.associate_by { key }` | `HashMap<K, T>` | |

@@ -236,8 +236,8 @@ impl<E> ElvisOr<&'static str> for ::std::result::Result<String, E> {
     }
 }
 
-/// Reads a number, `bool` or `char` through any number of references (`&&i32` -> `i32`), so
-/// lambda parameters compare with literals: `filter { it > 2 }`.
+/// Reads a number, `bool` or `char` through any number of references (`&&i32` -> `i32`), and
+/// text as a `&str`, so lambda parameters compare with literals: `filter { it > 2 }`.
 pub trait Val {
     type Out;
     fn val(&self) -> Self::Out;
@@ -272,6 +272,23 @@ macro_rules! val_copy {
 }
 
 val_copy!(i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char);
+
+/// Text reads as a `&str`, so `filter { it == "bob" }` compares on a list of `&str` too.
+impl<'a> Val for &'a str {
+    type Out = &'a str;
+    #[inline(always)]
+    fn val(&self) -> &'a str {
+        self
+    }
+}
+
+impl<'a> Val for &'a String {
+    type Out = &'a str;
+    #[inline(always)]
+    fn val(&self) -> &'a str {
+        self.as_str()
+    }
+}
 
 #[inline(always)]
 pub fn val<V: Val>(v: V) -> V::Out {
@@ -311,10 +328,10 @@ pub trait ListOps<'a, T: 'a> {
     fn min_by_key<K: PartialOrd, F: FnMut(&'a T) -> K>(&'a self, f: F) -> Option<&'a T>;
     fn sorted(&self) -> Vec<T>
     where
-        T: Ord + Clone;
+        T: PartialOrd + Clone;
     fn sorted_descending(&self) -> Vec<T>
     where
-        T: Ord + Clone;
+        T: PartialOrd + Clone;
     fn sorted_by<K: PartialOrd, F: FnMut(&'a T) -> K>(&'a self, f: F) -> Vec<T>
     where
         T: Clone;
@@ -349,8 +366,13 @@ pub trait ListOps<'a, T: 'a> {
     fn is_not_empty(&self) -> bool;
 }
 
+/// Orders values that are only `PartialOrd` (`f64`) as Kotlin does: a value that isn't
+/// comparable even with itself (NaN) after all others. The same order as `Ord` for `Ord` types.
 fn by_partial<K: PartialOrd>(a: &K, b: &K) -> ::std::cmp::Ordering {
-    a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal)
+    match a.partial_cmp(b) {
+        Some(o) => o,
+        None => a.partial_cmp(a).is_none().cmp(&b.partial_cmp(b).is_none()),
+    }
 }
 
 impl<'a, T: 'a> ListOps<'a, T> for [T] {
@@ -450,19 +472,19 @@ impl<'a, T: 'a> ListOps<'a, T> for [T] {
     #[inline]
     fn sorted(&self) -> Vec<T>
     where
-        T: Ord + Clone,
+        T: PartialOrd + Clone,
     {
         let mut v = self.to_vec();
-        v.sort();
+        v.sort_by(by_partial);
         v
     }
     #[inline]
     fn sorted_descending(&self) -> Vec<T>
     where
-        T: Ord + Clone,
+        T: PartialOrd + Clone,
     {
         let mut v = self.to_vec();
-        v.sort_by(|a, b| b.cmp(a));
+        v.sort_by(|a, b| by_partial(b, a));
         v
     }
     #[inline]
@@ -628,10 +650,16 @@ impl<T> Context<T> for ::std::option::Option<T> {
 /// Prints an error and its causes to stderr (used by `fun main() throws`).
 pub fn report<E: Into<AnyError>>(err: E) {
     let err: AnyError = err.into();
-    eprintln!("error: {}", err);
+    let mut last = err.to_string();
+    eprintln!("error: {}", last);
     let mut source = err.source();
     while let Some(s) = source {
-        eprintln!("  caused by: {}", s);
+        // a wrapper that shows its cause's text adds nothing
+        let text = s.to_string();
+        if text != last {
+            eprintln!("  caused by: {}", text);
+        }
+        last = text;
         source = s.source();
     }
 }

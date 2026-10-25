@@ -1,0 +1,43 @@
+// Null checks unwrap in the else branch of `== null`, after `if (a == null || b == null) return`,
+// and in the right operand of `x == null || ..` and `x != null && ..`
+fun describe(x: String?): String {
+    if (x == null) {
+        return "none"
+    } else {
+        return "len ${x.len()}"
+    }
+}
+fun pair(a: String?, b: i32?): String {
+    if (a == null || b == null) return "missing"
+    "$a ${b + 1}"
+}
+fun long(x: String?): bool = x == null || x.len() > 3
+fun short(x: String?): bool = x != null && x.len() < 3
+fun main() {
+    println(describe(null))
+    println(describe("abc".to_string()))
+    println(pair("a".to_string(), Some(1)))
+    println(pair(null, Some(1)))
+    println(long(null))
+    println(long("ab".to_string()))
+    println(short("ab".to_string()))
+    var n: i32? = null
+    if (n == null) n = 5 else println(n + 1)
+    val v = if (n == null) 0 else n * 2
+    println("$v")
+    more()
+}
+fun size(x: String?): String = if (x == null) "none" else if (x.len() > 2) "long" else "short"
+fun more() {
+    var s: String? = null
+    if (s == null) s = "x".to_string() else println(s.len())
+    if (s == null) s = "y".to_string() else println(s.len())
+    println(size(null))
+    println(size(s.clone()))
+    println(size("abcd".to_string()))
+    val t: String? = "ok".to_string()
+    if (t == null || t.is_empty()) println("empty") else println("t is ${t:?}")
+    val ok = t != null && t.starts_with("o")
+    println(ok)
+    println("${s:?} ${t:?}")
+}

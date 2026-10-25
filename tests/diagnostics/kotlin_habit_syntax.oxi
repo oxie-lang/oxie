@@ -1,0 +1,19 @@
+// Kotlin syntax Oxie doesn't have, with what to write instead.
+var COUNT = 0
+// error: 2: a file can't declare a `var`
+
+fun main() {
+    var n = 0
+    n++
+    // error: 7: Oxie has no `++`
+    // error: 7: write `n += 1`
+    --n
+    // error: 10: write `n -= 1`
+    val xs = vec[1, 2]
+    xs.for_each {
+        if (it > 1) return@for_each
+        // error: 14: Oxie has no `return@for_each`
+        // error: 14: `return` in a lambda already returns from the lambda
+        println(it)
+    }
+}

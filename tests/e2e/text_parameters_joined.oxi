@@ -1,0 +1,18 @@
+// `String` parameters joined with `+` are only read (it formats them), so they are lent as
+// `&str`; so are ones passed as `&s` to a `&str` parameter.
+fun label(a: String, b: String): String = a + b
+fun greet(prefix: String, name: String): String = prefix + ", " + name + "!"
+fun suffix(x: String, s: String): String = x.to_uppercase() + s
+fun shout(s: &str): String = s.to_uppercase()
+fun loud(s: String): String = shout(&s)
+
+fun main() {
+    val n = "x".to_string()
+    println(label(n, n))
+    println(greet(n, n))
+    println(suffix(n, n))
+    println(loud(n))
+    val other = "y".to_string()
+    println(other + n)
+    println("$n $other")
+}

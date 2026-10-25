@@ -1,0 +1,33 @@
+// `a?.b = v` assigns only when `a` isn't null
+import std::collections::HashMap
+
+data class Inner(var n: i32)
+data class Outer(var inner: Inner?)
+data class Book(title: String, var available: bool, var loans: i32, var note: String?)
+
+class Library(var books: HashMap<String, Book>) {
+    fun give_back(isbn: &str) {
+        books.get_mut(isbn)?.available = true
+        books.get_mut(isbn)?.loans += 1
+    }
+}
+
+fun main() {
+    var lib = Library(HashMap())
+    lib.books.insert("1".to_string(), Book("Dune", false, 0, null))
+    lib.give_back("1")
+    lib.give_back("2")
+    var b: Book? = Book("Emma", true, 0, null)
+    b?.note = "signed".to_string()
+    b?.loans += 2
+    var none: Book? = null
+    none?.note = "lost".to_string()
+    println("${lib.books.get("1"):?}")
+    println("${b:?} ${none:?}")
+    var o: Outer? = Outer(Inner(1))
+    o?.inner?.n = 2
+    o?.inner?.n *= 5
+    var empty: Outer? = Outer(null)
+    empty?.inner?.n = 3
+    println("${o:?} ${empty:?}")
+}

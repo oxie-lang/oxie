@@ -1,0 +1,11 @@
+fun main() {
+    val s = "{a}"
+    val c = '{'
+    val x: i32? = null
+    println("n ${s.trim_matches('{')}")
+    println("q ${s.replace('"', "x")}")
+    println("${ if (c == '{') "a" else "b" }")
+    println("${ if (c == 'x') "yes{" else "no}" }")
+    println("e ${x?:0} ${'\''} ${"in ${s.len()} }"}")
+    println("w ${3.14159:.2} ${std::f64::consts::PI:.1}")
+}

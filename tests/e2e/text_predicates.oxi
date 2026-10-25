@@ -1,0 +1,22 @@
+// Predicates compare their parameter with a text literal whatever the list holds: `&str`s,
+// `String`s, or references to them.
+
+fun main() {
+    val words = vec["apple", "bob", "cherry", "bob"]
+    println(words.any { it == "bob" })
+    println(words.all { it != "kiwi" })
+    println(words.filter { it == "bob" }.len())
+    println(words.count { it == "bob" })
+    println("${words.find { it == "cherry" }:?}")
+    println("${words.iter().position { it == "cherry" }:?}")
+    println("${words.index_of_first { it == "bob" }:?}")
+    println(words.iter().filter { it < "c" }.count())
+    println(words.iter().any { "apple" == it })
+    val owned = vec["ada".to_string(), "grace".to_string()]
+    println(owned.any { it == "grace" })
+    println("${owned.filter { it != "ada" }:?}")
+    val n = 2
+    println(owned.count { it == "ada" || it == "x$n" })
+    val name: String? = "ada".to_string()
+    println(name.is_some_and { it == "ada" })
+}

@@ -59,15 +59,15 @@ it to the checkout it runs in.
 
 | Command | Description |
 |---|---|
-| `oxie new <name>` | New program: `Cargo.toml`, `build.rs`, `src/main.rs`, `src/main.oxi`, and an `AGENTS.md` for AI coding agents |
+| `oxie new <name>` | New program: `Cargo.toml`, `build.rs`, `src/main.rs`, `src/main.oxi`, and an `AGENTS.md` and a `CLAUDE.md` for AI coding agents |
 | `oxie new <name> --lib` | New library (`src/lib.oxi`) |
-| `oxie init [--lib]` | Make the current directory an Oxie project; in an existing Rust crate, add Oxie support (`build.rs` + build-dependency, and an `AGENTS.md` if there is none) |
+| `oxie init [--lib]` | Make the current directory an Oxie project; in an existing Rust crate, add Oxie support (`build.rs` + build-dependency, and an `AGENTS.md` and a `CLAUDE.md` where there are none) |
 | `oxie run [--release] [-- args]` | Build and run the project |
 | `oxie run file.oxi [-- args]` | Run a single file. Inside a project's `src/` this runs the project |
 | `oxie build [--release]` | Build |
 | `oxie check` | Type-check without producing binaries (fast) |
 | `oxie test [file.oxi] [name] [--release]` | Run `test` blocks of the project, or of a script; `name` may be the test's description (`oxie test "adds numbers"`) or part of it |
-| `oxie fmt [--check] [paths]` | Format `.oxi` files (the project's `src/` by default) |
+| `oxie fmt [--check] [paths]` | Format `.oxi` files (the project's `src/` by default; outside a project, name the files or directories) |
 | `oxie emit file.oxi [--annotate]` | Print the Rust generated for a file; `--annotate` puts a `// file.oxi:line` comment above each statement and says why at each choice Oxie made (see [What Oxie decided](#what-oxie-decided)) |
 | `oxie from-rust file.rs [-o out.oxi]` | Translate Rust to Oxie (`-` reads stdin); see [Translating Rust](#translating-rust) |
 | `oxie from-rust dir -o out_dir` | Translate the `.rs` files under `dir` as one crate, into `.oxi` files at the same places under `out_dir` |
@@ -384,6 +384,7 @@ src/main.rs         include!(concat!(env!("OUT_DIR"), "/oxie/main.rs"));
 src/main.oxi        crate root (src/lib.oxi for libraries)
 src/*.oxi           modules; directories are nested modules
 AGENTS.md           tells AI coding agents to read `oxie guide`
+CLAUDE.md           `@AGENTS.md`: Claude Code reads CLAUDE.md, and this one imports AGENTS.md
 ```
 
 `oxie_build::compile()` compiles `src/`; `oxie_build::compile_dir("other")` compiles another
@@ -400,24 +401,29 @@ AI coding agents (Claude Code, Codex, Cursor, ...) know little about Oxie, and w
 may be from an older version. Oxie gives them the rules of the version you use:
 
 * `oxie guide` prints a guide to writing Oxie: how to work with the compiler, the language at a
-  glance, how it differs from Kotlin and from Rust, and the mistakes to avoid. `oxie guide
+  glance, how it differs from Kotlin and from Rust, and the patterns to use. `oxie guide
   <topic>` prints a page of this documentation (`oxie guide topics` lists them). Both are built
   into the `oxie` binary, so they describe exactly the Oxie it compiles, and they warn when the
   project builds with another `oxie-build`.
 * `oxie new` and `oxie init` write an `AGENTS.md` that tells agents to run `oxie guide` before
-  they change Oxie code. It states no language rules, so it stays right when you update Oxie.
+  they change Oxie code, and a `CLAUDE.md` that imports it for Claude Code. They state no
+  language rules, so they stay right when you update Oxie.
 * The [Claude Code skill](../skills/oxie/SKILL.md) does the same for any work on Oxie code,
   also in projects without an `AGENTS.md`. Install it with
   `claude plugin install oxie --marketplace oxie-lang/oxie`, or copy `skills/oxie` to
   `~/.claude/skills/oxie`.
+
+[AI coding agents](ai-agents.md) covers setting up each agent, the commands agents use, what
+the compiler tells them, and how they stay current when Oxie changes.
 
 ## Formatter
 
 `oxie fmt` re-indents (4 spaces, one level per open bracket and for continuation lines such as
 `.method()` chains), normalizes spaces around commas, colons and operators like `=`, `==`,
 `->`, removes trailing whitespace and repeated blank lines. It never changes strings or
-comments and leaves files with syntax errors untouched. `oxie fmt --check` exits with status 1
-if a file would change (useful in CI).
+comments, keeps the spaces before a trailing `//` comment so aligned comments stay aligned, and
+reports files with syntax errors and leaves them untouched (exit status 1). `oxie fmt --check`
+exits with status 1 if a file would change (useful in CI).
 
 ## Language server
 

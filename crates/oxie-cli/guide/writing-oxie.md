@@ -142,7 +142,9 @@ fun main() {
   declare the variable `var`. Oxie works out which methods change their object.
 * **No inheritance.** There are no `open`, `abstract` or `sealed` classes and no `: Base()`.
   Share behavior with interfaces (they can have default methods) and composition; use an
-  `enum` with data where Kotlin would use a sealed class. Constructor parameters are fields
+  `enum` with data where Kotlin would use a sealed class (`enum class` is accepted as `enum`).
+  Interfaces have no properties: declare `fun name(): String` and implement it with
+  `override fun name() = name.clone()`. There are no type tests (`is Int`): match on an enum. Constructor parameters are fields
   (no `val`/`var` needed), there are no getters or setters, and `this.` is only needed when a
   parameter has the field's name. A method hides a function of the module with its name:
   call that function as `self::name(x)`.
@@ -154,9 +156,10 @@ fun main() {
   handle it: `when (val r = f()) { Ok(v) -> ...; Err(e) -> ... }`, `f() ?: default`,
   `if (val Err(e) = f())`, or `.unwrap()`.
 * **`null` is `Option`.** A `T?` must be unwrapped before use. A null check unwraps a local
-  variable or parameter: in `if (x != null) x.foo()` and `if (x != null && x.len() > 2)`, `x`
-  is the value (a reference to it), and after `if (x == null) return` it is the value. Fields
-  aren't unwrapped: write `if (val v = &a.field)`, `a.field?.foo()`, or `val v = a.field ?:
+  variable or parameter: in `if (x != null) x.foo()`, `if (x != null && x.len() > 2)` and the
+  `else` of `if (x == null)`, `x` is the value (a reference to it), and after
+  `if (x == null) return` (or `if (a == null || b == null) return`) it is the value. `x!!.len()`
+  reads through `x` without taking it, so `x` stays usable. Fields aren't unwrapped: write `if (val v = &a.field)`, `a.field?.foo()`, or `val v = a.field ?:
   return`. `if (val x = x)` takes the value out of `x`; to use `x` again afterwards, unwrap a
   reference: `if (val v = &x)`.
 * **Context parameters are found by name**, not by type: a call to `context(log: &mut Log) fun
@@ -170,6 +173,8 @@ fun main() {
   `{ c: char -> !c.is_alphanumeric() }`.
 * **Text.** `a + b` joins text into a new `String` without moving either side, and
   `s += t` appends; a `when` on a `String` matches its text arms (`"go" -> ...`).
+* **Destructuring.** `val (x, y) = point` takes a data class's fields in constructor order, and
+  `if (val (k, v) = pair_or_null)` unwraps an optional pair.
 * **Printing.** `"$x"` needs `Display`: numbers, text and types with `toString()`. Lists,
   maps, options and other values print with `"${x:?}"`. A whole `f64` prints without
   decimals (`43`); write `"${x:.1}"` for a fixed number of decimals.
@@ -274,8 +279,10 @@ fun main() {
 * `if (c) x else null` makes `x` optional. When `x` comes from a Rust function and is optional
   already, the compiler asks for the type: declare it, `val v: T? = if (c) x else null`.
 * `a ?: b` takes `a`: for an optional field you use again later, write `a.clone() ?: b`.
-* `?.` followed by a method that itself returns an optional gives a nested optional
-  (`T??`); use `.and_then { }` instead.
+* `?.` chains flatten as in Kotlin: `user?.address?.city`, `s?.trim()?.len()` and
+  `s?.chars().next()` give one optional. When Oxie can't tell that a method of a Rust type
+  returns an `Option`, the result is nested (`T??`): use `.and_then { }` there.
+* `a ?: b ?: c` tries each in turn, and `a?.b = v` assigns only when `a` isn't null.
 * The right side of `?:` can be `return`, `throw`, `continue` or `break`:
   `val v = map.get(key) ?: return`.
 
@@ -360,8 +367,8 @@ fun main() {
 ```
 
 * A function-typed parameter is an `impl FnMut`; a function-typed field or list element is a
-  boxed `Fn`, and lambdas written there are boxed for you. Other function values need
-  `Box.new(f)`.
+  boxed `Fn`, and lambdas and function parameters stored there (`handlers.push(f)`,
+  `on_click = f`) are boxed for you. Other function values need `Box.new(f)`.
 * A lambda returned from a function, stored in a field, or run on another thread must own what
   it captures: `move { ... }`, or a capture list `{ [handle] -> ... }` that clones a shared
   handle or channel sender into it.

@@ -1,0 +1,76 @@
+// Values put where an interface value is stored (a field, a list, an optional field) are boxed:
+// newly built values, values of classes and enums that implement the interface, and interface
+// parameters, which then must be `'static`.
+import std.collections.HashMap
+
+interface Plugin { fun run(x: i32): i32 }
+class Doubler : Plugin { override fun run(x: i32) = x * 2 }
+class Adder(n: i32) : Plugin { override fun run(x: i32) = x + n }
+shared class Bot : Plugin {
+    var calls: i32 = 0
+    override fun run(x: i32) = x + 100
+}
+
+interface Shape { fun area(): f64 }
+class Square(side: f64) : Shape { override fun area() = side * side }
+class Circle(r: f64) : Shape { override fun area() = 3.0 * r * r }
+
+class Holder(var other: Shape, var main_shape: Shape?) {
+    val plugins: Vec<Plugin> = vec[]
+    val by_name: HashMap<String, Plugin> = HashMap.new()
+    fun add_doubler() = plugins.push(Doubler())
+    fun add(p: Plugin) = plugins.push(p)
+    fun name(n: &str, p: Plugin) { by_name.insert(n.to_string(), p) }
+    fun replace(s: Shape) { other = s }
+}
+
+class Scene {
+    val shapes: Vec<Shape> = vec[]
+    fun add(s: Shape) = shapes.push(s)
+    fun total(): f64 = shapes.iter().map { it.area() }.sum()
+}
+
+interface Engine { fun power(): i32 }
+class Electric(kw: i32) : Engine { override fun power() = kw }
+class Diesel : Engine { override fun power() = 50 }
+
+interface Priced { fun price(): i32 }
+enum Size : Priced {
+    Small, Large;
+    override fun price() = when (this) { Size.Small -> 1, Size.Large -> 5 }
+}
+fun total(items: &[Priced]): i32 = items.iter().map { it.price() }.sum()
+
+fun main() {
+    var list: Vec<Plugin> = vec[]
+    list.push(Doubler())
+    list.push(Adder(3))
+    list.insert(0, Adder(1))
+    var h = Holder(Circle(1.0), null)
+    h.plugins.push(Doubler())
+    h.add_doubler()
+    h.add(Adder(7))
+    h.name("ten", Adder(10))
+    h.other = Square(3.0)
+    h.main_shape = Square(1.0)
+    println("${list.len()} ${list[0].run(1)} ${h.plugins.len()} ${h.plugins[2].run(1)} ${h.by_name["ten"].run(1)} ${h.other.area()}")
+    h.replace(Circle(2.0))
+    println("${h.other.area()} ${h.main_shape.is_some()}")
+
+    val c = list.len() > 1
+    val e: Engine = if (c) Electric(3) else Diesel()
+    println(e.power())
+
+    val p = Adder(5)
+    val b = Bot()
+    val more: Vec<Plugin> = vec[p, Doubler()]
+    val bots: Vec<Plugin> = vec[b.clone(), Doubler()]
+    println("${more[0].run(1)} ${bots[0].run(1)} ${bots[1].run(1)}")
+
+    println(total(&[Size.Small, Size.Large]))
+
+    var sc = Scene()
+    sc.add(Square(2.0))
+    sc.add(Circle(1.0))
+    println(sc.total())
+}

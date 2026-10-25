@@ -1,0 +1,20 @@
+// A throwing call's result used as a number, and `?` inside a lambda, are explained.
+
+fun value(x: i32): i32 throws {
+    if (x < 0) throw "negative"
+    x
+}
+
+fun next(x: i32): i32 throws = value(x) + 1
+// error: 8: this value can be an error (a `Result`), so it can't be used in arithmetic
+
+fun sum(xs: &[&str]): i32 throws {
+    var t = 0
+    xs.iter().for_each { val n: i32 = it.parse()?; t += n }
+    // error: 13: `?` inside a lambda passes the error out of the lambda
+    t
+}
+
+fun main() {
+    println("${next(1):?} ${sum(&["1"]):?}")
+}

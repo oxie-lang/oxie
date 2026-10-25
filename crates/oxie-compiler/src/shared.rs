@@ -132,7 +132,7 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             self.e.nl();
-            self.forwarder(m, f, recv, mvis, read, write);
+            self.forwarder(m, f, recv, recv, mvis, read, write);
         }
         // static methods live on the handle
         for m in statics {
@@ -154,17 +154,14 @@ impl<'a> Lowerer<'a> {
             self.e.indent();
             for m in members {
                 let ItemKind::Fun(f) = &m.kind else { continue };
-                let recv = trait_info
-                    .as_ref()
-                    .and_then(|ti| ti.methods.get(&f.name))
-                    .map(|mi| mi.recv)
-                    .unwrap_or_else(|| self.recv_of(&t.name, f));
+                let data_recv = self.recv_of(&t.name, f);
+                let recv = trait_info.as_ref().and_then(|ti| ti.methods.get(&f.name)).map(|mi| mi.recv).unwrap_or(data_recv);
                 if matches!(recv, Recv::Static | Recv::Value) {
                     continue;
                 }
                 self.e.nl();
-                self.pending_trait_ret = trait_info.as_ref().and_then(|ti| ti.methods.get(&f.name)).and_then(|mi| mi.ret.clone());
-                self.forwarder(m, f, recv, "", read, write);
+                self.pending_trait_ret = crate::lower::trait_ret(tr, trait_info.as_ref(), &f.name);
+                self.forwarder(m, f, recv, data_recv, "", read, write);
             }
             self.e.dedent();
             self.e.nl();
@@ -174,13 +171,15 @@ impl<'a> Lowerer<'a> {
     }
 
     /// `fn name(&self, a: A) -> R { self.0.write().name(a) }`
-    fn forwarder(&mut self, it: &Item, f: &FunDecl, recv: Recv, vis: &str, read: &str, write: &str) {
+    /// A method of the handle calling the data's: `recv` is the handle method's receiver,
+    /// `data_recv` the data method's (which decides whether it locks for writing).
+    fn forwarder(&mut self, it: &Item, f: &FunDecl, recv: Recv, data_recv: Recv, vis: &str, read: &str, write: &str) {
         let trait_ret = self.pending_trait_ret.take();
         let f = &auto_lifetimes(&self.with_inferred_ret(f, trait_ret), true, &|n| self.k.type_lifetimes_in(n, &self.module));
         let f = &match self.class.as_ref() {
             Some(c) if !f.mods.is_override => {
                 let fields: Vec<(String, Type)> = c.fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
-                crate::bounds::with_inferred_bounds(f, &c.generics, &fields)
+                crate::bounds::with_inferred_bounds(f, &c.generics, &fields, &[])
             }
             _ => f.clone(),
         };
@@ -199,7 +198,7 @@ impl<'a> Lowerer<'a> {
         if !f.mods.is_override && self.needs_this.contains(&f.name) {
             args.push("self".into());
         }
-        let access = if recv == Recv::RefMut { write } else { read };
+        let access = if data_recv == Recv::RefMut { write } else { read };
         self.e.w(&format!("#[allow(dead_code)]\n{}{}fn {}{}({})", vis, header, esc(&f.name), g, params));
         if let Some(r) = ret {
             self.e.w(&format!(" -> {}", r));
@@ -387,7 +386,7 @@ impl<'a> Lowerer<'a> {
                         let v = format!("__arg{}", i);
                         let text = self.capture(&a.value, P_LOWEST);
                         hoisted.push(format!("let {} = {};", v, text));
-                        new_args.push(Arg { name: a.name.clone(), value: Expr::new(ExprKind::Raw(v), a.value.span) });
+                        new_args.push(Arg { name: a.name.clone(), value: Expr::new(ExprKind::Raw(v), a.value.span), trailing: a.trailing });
                     }
                 }
                 let base = self.borrowed_field(obj, field, true);

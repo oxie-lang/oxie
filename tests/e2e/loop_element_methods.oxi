@@ -1,0 +1,49 @@
+// A loop whose body changes the elements through a method that takes `&mut self`, `&mut`, a
+// `*x` of a map entry or an inner loop goes over the collection mutably.
+import std::collections::HashMap
+
+class Counter(var n: i32 = 0) { fun bump() { n += 1 } }
+interface Shape { fun grow(); fun size(): i32 }
+class Sq(var side: i32) : Shape {
+    override fun grow() { side += 1 }
+    override fun size(): i32 = side
+}
+class Pool(var cs: Vec<Counter> = vec[], var shapes: Vec<Shape> = vec[]) {
+    fun tick() { for (c in cs) c.bump() }
+    fun grow_all() { for (s in shapes) s.grow() }
+}
+
+fun main() {
+    var cs = vec[Counter(), Counter(5)]
+    for (c in cs) c.bump()
+    println("${cs.len()} ${cs[0].n} ${cs[1].n}")
+    for (c in cs) std::mem::swap(&mut c.n, &mut 7)
+    println(cs[1].n)
+
+    var m: HashMap<String, i32> = HashMap()
+    m.insert("a".to_string(), 1)
+    for ((_, v) in m) *v += 10
+    println("${m.len()} ${m["a"]}")
+
+    var p = Pool(vec[Counter()], vec[Sq(1)])
+    p.tick()
+    p.grow_all()
+    println("${p.cs[0].n} ${p.shapes[0].size()}")
+
+    var shapes: Vec<Shape> = vec[Sq(2)]
+    for (s in shapes) s.grow()
+    println(shapes[0].size())
+
+    var grid = vec[vec[1, 2], vec[3]]
+    for (row in grid) { for (x in row) *x += 1 }
+    println("${grid:?}")
+    for (row in grid) {
+        for (x in row) *x *= 10
+        println(row.len())
+    }
+    println("${grid:?}")
+
+    // an element taken out of the list can be changed too
+    val taken = vec[Counter(1)]
+    for (c in taken) { c.bump(); println(c.n) }
+}

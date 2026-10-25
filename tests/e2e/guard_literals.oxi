@@ -1,0 +1,25 @@
+// A guard comparing an arm's binding with a literal reads its value, also behind a reference.
+
+enum Event {
+    Click(x: i32, y: i32)
+    Key(c: char)
+    Scroll(f64)
+}
+
+fun describe(e: &Event): String = when (e) {
+    Click(x, y) if x < 0 || y < 0 -> "offscreen"
+    Click(x, _) if x == 0 -> "left edge"
+    Click(x, y) -> "click $x,$y"
+    Key(c) if c == 'q' -> "quit"
+    Key(c) -> "key $c"
+    Scroll(d) if d > 0.0 -> "down"
+    Scroll(_) -> "up"
+}
+
+fun main() {
+    for (e in [Event.Click(-1, 2), Event.Click(0, 5), Event.Click(3, 4), Event.Key('q'), Event.Key('a'), Event.Scroll(1.5), Event.Scroll(-1.0)]) {
+        println(describe(&e))
+    }
+    val n = 7
+    println(when (n) { x if x > 5 -> "big"; else -> "small" })
+}

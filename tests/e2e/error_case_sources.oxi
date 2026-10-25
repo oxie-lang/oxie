@@ -1,0 +1,43 @@
+// `@from` converts from any type, but only an error is a case's source; a case without a
+// message shows its error's text, and the fields of other cases follow their name.
+
+error enum E {
+    @from Parse(String)
+    Unknown
+}
+
+error enum AppError {
+    @from BadNumber(std::num::ParseIntError)
+    Wrapped(std::num::ParseIntError) = "while reading: $0"
+    TooMany(count: usize, max: usize)
+    Pair(i32, String)
+}
+
+fun parse(s: &str): i32 throws AppError {
+    val n: i32 = s.parse()?
+    n
+}
+
+fun count(s: &str): Option<String> {
+    val e: E = s.to_string().into()
+    Some(e.to_string())
+}
+
+fun main() {
+    println(count("x").unwrap())
+    println(E.Unknown)
+    println(std::error::Error::source(&E.Parse("y".to_string())).is_none())
+    when (val r = parse("x")) {
+        Ok(_) -> {}
+        Err(e) -> {
+            println(e)
+            println(std::error::Error::source(&e).is_none())
+        }
+    }
+    val inner = "x".parse::<i32>().unwrap_err()
+    val w = AppError.Wrapped(inner)
+    println(w)
+    println(std::error::Error::source(&w).unwrap())
+    println(AppError.TooMany(count = 5, max = 3))
+    println(AppError.Pair(1, "two".to_string()))
+}

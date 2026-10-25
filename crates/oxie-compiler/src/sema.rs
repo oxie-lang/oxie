@@ -23,6 +23,9 @@ pub struct ParamInfo {
     pub context: Option<String>,
     /// Generic parameter names of the declaring function (lambda arguments can't be annotated with them).
     pub generics: Vec<String>,
+    /// An interface value passed in a box: a parameter of an interface method typed as an Oxie
+    /// interface is a `Box<dyn I>`, so the interface stays usable as `dyn`.
+    pub boxed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +38,8 @@ pub struct MethodInfo {
     pub explicit: bool,
     /// Why an inferred receiver is `&mut self` ("it assigns `hits`"), and the use that decided it.
     pub recv_why: Option<(String, Option<Span>)>,
+    /// An interface's method or an implementation of one.
+    pub iface: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +74,10 @@ pub struct ClassInfo {
     pub lifetimes: usize,
     /// The names in its `context(...)` clause.
     pub contexts: Vec<String>,
+    /// The last names of the interfaces it implements (after `:` or in `impl X for` blocks).
+    pub interfaces: Vec<String>,
+    /// Associated constants (in the body, a companion object or an `impl` block).
+    pub consts: Vec<String>,
 }
 
 impl ClassInfo {
@@ -82,7 +91,7 @@ impl ClassInfo {
         self.fields
             .iter()
             .filter(|f| f.in_ctor)
-            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new() })
+            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new(), boxed: false })
             .collect()
     }
 }
@@ -103,6 +112,10 @@ pub struct EnumInfo {
     /// Number of lifetime parameters (`enum Tok<'a>`).
     pub lifetimes: usize,
     pub has_type_params: bool,
+    /// The last names of the interfaces it implements (after `:` or in `impl X for` blocks).
+    pub interfaces: Vec<String>,
+    /// Associated constants, as in `ClassInfo`.
+    pub consts: Vec<String>,
 }
 
 impl EnumInfo {
@@ -117,6 +130,15 @@ pub struct TraitInfo {
     pub module: Vec<String>,
     pub methods: HashMap<String, MethodInfo>,
     pub assoc_types: Vec<String>,
+    /// The last names of its supertraits (`'static` for a lifetime bound).
+    pub supertraits: Vec<String>,
+    /// Its own methods can be forwarded to the value inside a `Box<T>` (`(**self).m(..)`): it
+    /// has no generics, associated items or generic methods, and every method takes `&self`
+    /// or `&mut self` and doesn't mention `Self`. `Some(true)` when they all take `&self`, so
+    /// they can be forwarded from a `&T` too.
+    pub forward: Option<bool>,
+    /// Names of its type parameters (`interface Repo<T>`).
+    pub generics: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +192,8 @@ pub struct Crate {
     pub derives: HashMap<String, Vec<String>>,
     /// Types declared inside a class body (hoisted to the module): outer name -> inner names.
     pub nested: HashMap<String, Vec<String>>,
+    /// Declared type names in all capitals (`class DB`, `enum HTTP`), which don't look like types.
+    pub caps_types: HashSet<String>,
 }
 
 /// What `Crate` keys by module when several modules declare a name.
@@ -453,6 +477,10 @@ impl Crate {
     pub fn is_trait(&self, name: &str) -> bool {
         self.traits.contains_key(name)
     }
+    /// Whether `name` names a type: it looks like one (`Point`) or the crate declares it (`DB`).
+    pub fn is_type_name(&self, name: &str) -> bool {
+        is_type_like(name) || self.caps_types.contains(name)
+    }
     pub fn is_user_type(&self, name: &str) -> bool {
         self.classes.contains_key(name) || self.enums.contains_key(name) || self.traits.contains_key(name) || self.same_named.contains(name)
     }
@@ -471,12 +499,48 @@ pub struct SourceUnit<'a> {
 }
 
 pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<String>, has_lib: bool) -> Crate {
+    // classes and enums declared in function bodies count as types of their module, unless their
+    // name is declared elsewhere too
+    let mut top = HashSet::new();
+    for u in units {
+        declared_names(&u.file.items, &mut top);
+    }
+    let mut local: Vec<(Vec<String>, Vec<Item>)> = units
+        .iter()
+        .map(|u| {
+            let mut out = Vec::new();
+            local_types(&u.file.items, &mut out);
+            (u.module.clone(), out)
+        })
+        .collect();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (_, items) in &local {
+        let mut names = HashSet::new();
+        declared_names(items, &mut names);
+        for n in names {
+            *seen.entry(n).or_default() += 1;
+        }
+    }
+    for (_, items) in &mut local {
+        let own = |n: &str| seen.get(n) == Some(&1) && !top.contains(n);
+        items.retain(|it| match &it.kind {
+            ItemKind::Type(t) => own(&t.name),
+            ItemKind::Impl(i) => i.self_ty.last_name().is_some_and(own),
+            _ => false,
+        });
+    }
+    let files: Vec<(Vec<String>, File)> = local.into_iter().filter(|(_, items)| !items.is_empty()).map(|(m, items)| (m, File { inner_docs: Vec::new(), inner_attrs: Vec::new(), items })).collect();
+    let all: Vec<SourceUnit> = units.iter().map(|u| SourceUnit { module: u.module.clone(), file: u.file }).chain(files.iter().map(|(m, f)| SourceUnit { module: m.clone(), file: f })).collect();
+    let units = &all[..];
     let mut k = Crate { crate_name: crate_name.to_string(), extern_crates, has_lib, ..Default::default() };
     for u in units {
         if let Some(first) = u.module.first() {
             k.modules.insert(first.clone());
         }
         k.module_paths.insert(u.module.clone());
+    }
+    for u in units {
+        collect_caps_types(&mut k, &u.file.items);
     }
     // pass 1: traits (needed for impl receivers)
     for u in units {
@@ -490,10 +554,83 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
     for u in units {
         collect_impls(&mut k, &u.module, &u.file.items);
     }
+    box_interface_params(&mut k);
     // pass 4: receiver inference (fixpoint over mutating methods)
     infer_receivers(&mut k, units);
     compute_derives(&mut k, units);
     k
+}
+
+fn collect_caps_types(k: &mut Crate, items: &[Item]) {
+    for it in items {
+        let name = match &it.kind {
+            ItemKind::Type(t) => {
+                collect_caps_types(k, &t.members);
+                &t.name
+            }
+            ItemKind::Trait(t) => &t.name,
+            ItemKind::TypeAlias { name, .. } => name,
+            ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => {
+                collect_caps_types(k, items);
+                continue;
+            }
+            _ => continue,
+        };
+        if !is_type_like(name) && name.starts_with(|c: char| c.is_uppercase()) {
+            k.caps_types.insert(name.clone());
+        }
+    }
+}
+
+/// The names of the types, interfaces and functions `items` declare, in modules too.
+fn declared_names(items: &[Item], out: &mut HashSet<String>) {
+    for it in items {
+        match &it.kind {
+            ItemKind::Type(t) => {
+                out.insert(t.name.clone());
+                declared_names(&t.members, out);
+            }
+            ItemKind::Trait(t) => {
+                out.insert(t.name.clone());
+            }
+            ItemKind::Mod { items, .. } => declared_names(items, out),
+            _ => {}
+        }
+    }
+}
+
+/// The classes, enums and `impl` blocks declared inside function bodies of `items`.
+fn local_types(items: &[Item], out: &mut Vec<Item>) {
+    fn block(b: &Block, out: &mut Vec<Item>) {
+        for s in &b.stmts {
+            if let Stmt::Item(i) = s {
+                if matches!(i.0.kind, ItemKind::Type(_) | ItemKind::Impl(_)) {
+                    out.push(i.0.clone());
+                }
+                local_types(std::slice::from_ref(&i.0), out);
+            }
+        }
+    }
+    for it in items {
+        match &it.kind {
+            ItemKind::Fun(FunDecl { body: Some(FunBody::Block(b)), .. }) => block(b, out),
+            ItemKind::Test(t) => block(&t.body, out),
+            ItemKind::Type(t) => local_types(&t.members, out),
+            ItemKind::Trait(t) => local_types(&t.members, out),
+            ItemKind::Impl(i) => local_types(&i.members, out),
+            ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => local_types(items, out),
+            _ => {}
+        }
+    }
+    crate::visit::walk_items(items, &mut |e| {
+        for it in crate::fields::local_items(e) {
+            if matches!(it.kind, ItemKind::Type(_) | ItemKind::Impl(_)) {
+                out.push(it.clone());
+            }
+            local_types(std::slice::from_ref(it), out);
+        }
+        true
+    });
 }
 
 /// Generics made only of lifetimes (or none), which don't stand in the way of derives.
@@ -504,6 +641,121 @@ fn only_lifetimes(g: &Generics) -> bool {
 /// A path segment without type arguments (`Token` or `Token<'a>`).
 fn no_type_args(seg: &PathSeg) -> bool {
     seg.generics.as_ref().is_none_or(|g| g.iter().all(|a| matches!(a, GenericArg::Lifetime(_))))
+}
+
+/// Methods that return `this` itself as their class (`fun url(u: &str): B { url = u; this }`, a
+/// builder) take `self` by value, or `mut self` when they change it: a reference can't be
+/// returned as the value. Not interface methods, whose receivers the interface decides, nor
+/// methods of shared classes, whose `this` is a handle. Runs after receiver inference (`k`)
+/// tells which methods change `this`; returns whether it changed any.
+pub fn by_value_receivers(files: &mut [(&[String], &mut File)], k: &Crate) -> bool {
+    fn go(items: &mut [Item], module: &[String], k: &Crate) -> bool {
+        let mut changed = false;
+        for it in items {
+            match &mut it.kind {
+                ItemKind::Type(t) if !t.shared => {
+                    let key = k.decl_key(module, &t.name);
+                    let iface = |n: &str| t.supertypes.iter().filter_map(|s| s.last_name()).any(|st| k.traits.get(st).is_some_and(|ti| ti.methods.contains_key(n)));
+                    // `this`, or what a method found here returns for it (`reset().times(2)`)
+                    fn this(e: &Expr, by_value: &[(String, bool)]) -> bool {
+                        let found = |n: &str| by_value.iter().any(|(m, _)| m == n);
+                        match &e.kind {
+                            ExprKind::SelfValue => true,
+                            ExprKind::Paren(x) => this(x, by_value),
+                            ExprKind::Call { callee, .. } => callee.ident().is_some_and(found),
+                            ExprKind::MethodCall { recv, name, safe: false, .. } => found(name) && this(recv, by_value),
+                            _ => false,
+                        }
+                    }
+                    // does the method change `this` (so it takes `mut self`), other than by passing it
+                    // on to a method that takes `self`?
+                    let class = k.classes.get(&key);
+                    let changes = |f: &FunDecl, by_value: &[(String, bool)]| {
+                        let Some((why, _)) = class.and_then(|c| c.methods.get(&f.name)).filter(|mi| mi.recv == Recv::RefMut).and_then(|mi| mi.recv_why.as_ref()) else { return false };
+                        if !by_value.iter().any(|(n, _)| why.starts_with(&format!("it calls `{}()`", n))) {
+                            return true;
+                        }
+                        let fields: HashSet<String> = class.map(|c| c.fields.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
+                        let mut recvs: HashMap<String, Recv> = class.map(|c| c.methods.iter().map(|(n, m)| (n.clone(), m.recv)).collect()).unwrap_or_default();
+                        recvs.extend(by_value.iter().map(|(n, _)| (n.clone(), Recv::Value)));
+                        analyze_fun(f, &fields, &recvs).mutates_self
+                    };
+                    let mut by_value: Vec<(String, bool)> = Vec::new();
+                    loop {
+                        let before = by_value.len();
+                        for m in &t.members {
+                            let ItemKind::Fun(f) = &m.kind else { continue };
+                            let own = f.ret.as_ref().and_then(|r| r.single_name()).is_some_and(|n| n == "Self" || n == t.name);
+                            if f.self_param.is_some() || f.mods.is_static || f.mods.is_override || !own || iface(&f.name) || by_value.iter().any(|(n, _)| *n == f.name) {
+                                continue;
+                            }
+                            let Some(body) = &f.body else { continue };
+                            if crate::visit::return_values(body).iter().any(|e| this(e, &by_value)) {
+                                by_value.push((f.name.clone(), f.mods.is_mut || changes(f, &by_value)));
+                            }
+                        }
+                        if by_value.len() == before {
+                            break;
+                        }
+                    }
+                    for m in &mut t.members {
+                        if let ItemKind::Fun(f) = &mut m.kind {
+                            if let Some((_, mutable)) = by_value.iter().find(|(n, _)| *n == f.name) {
+                                f.self_param = Some(SelfParam::Value { mutable: *mutable });
+                                f.mods.is_mut = false;
+                                changed = true;
+                            }
+                        }
+                    }
+                    changed |= go(&mut t.members, module, k);
+                }
+                ItemKind::Mod { name, items } => {
+                    let inner: Vec<String> = module.iter().cloned().chain([name.clone()]).collect();
+                    changed |= go(items, &inner, k);
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+    let mut changed = false;
+    for (module, f) in files.iter_mut() {
+        changed |= go(&mut f.items, module, k);
+    }
+    changed
+}
+
+/// Extension functions take `&mut self` when their body changes the receiver, like methods:
+/// assigns its fields, calls a method of it that does (`&mut self` methods of an Oxie class, a
+/// mutating std method like `push` on any other type), or takes `&mut` of a field. Runs after
+/// receiver inference (`k`), which tells what the class's methods take.
+pub fn ext_receivers(files: &mut [(&[String], &mut File)], k: &Crate) {
+    fn go(items: &mut [Item], module: &[String], k: &Crate) {
+        for it in items {
+            match &mut it.kind {
+                ItemKind::Fun(f) if f.receiver.is_some() && f.self_param.is_none() && !f.mods.is_mut && !f.mods.is_static => {
+                    let class = f.receiver.as_ref().and_then(|r| r.single_name()).and_then(|n| k.class_in(n, module)).filter(|c| !c.is_shared);
+                    let fields: HashSet<String> = class.map(|c| c.fields.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
+                    let methods: HashMap<String, Recv> = match class {
+                        Some(c) => c.methods.iter().map(|(n, m)| (n.clone(), m.recv)).collect(),
+                        // not the names that also read on common types (`str::replace`, `Iterator::take`)
+                        None => MUTATING_METHODS.iter().filter(|m| !matches!(**m, "replace" | "take" | "set" | "read" | "write" | "next" | "nth")).map(|m| (m.to_string(), Recv::RefMut)).collect(),
+                    };
+                    if analyze_fun(f, &fields, &methods).mutates_self {
+                        f.mods.is_mut = true;
+                    }
+                }
+                ItemKind::Mod { name, items } => {
+                    let inner: Vec<String> = module.iter().cloned().chain([name.clone()]).collect();
+                    go(items, &inner, k);
+                }
+                _ => {}
+            }
+        }
+    }
+    for (module, f) in files.iter_mut() {
+        go(&mut f.items, module, k);
+    }
 }
 
 /// Classes and enums whose fields hold references get a lifetime parameter: `class Parser(input: &str)`
@@ -731,16 +983,28 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
             ItemKind::Trait(t) => {
                 let mut methods = HashMap::new();
                 let mut assoc = Vec::new();
+                let generics = t.generics.params.iter().filter_map(|g| if let GenericParam::Type { name, .. } = g { Some(name.clone()) } else { None }).collect();
                 for m in &t.members {
                     match &m.kind {
                         ItemKind::Fun(f) => {
-                            methods.insert(f.name.clone(), method_info_explicit(f, None).unwrap_or_else(|| default_mi(f)));
+                            let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
+                            mi.iface = true;
+                            methods.insert(f.name.clone(), mi);
                         }
                         ItemKind::TypeAlias { name, .. } => assoc.push(name.clone()),
                         _ => {}
                     }
                 }
-                insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc });
+                let supertraits = t
+                    .supertraits
+                    .iter()
+                    .filter_map(|s| match s {
+                        Type::Lifetime(l) => Some(format!("'{}", l)),
+                        s => s.last_name().map(String::from),
+                    })
+                    .collect();
+                let forward = forwardable(t);
+                insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc, supertraits, forward, generics });
             }
             ItemKind::Mod { name, items } => {
                 let mut m = module.to_vec();
@@ -750,6 +1014,62 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
             _ => {}
         }
     }
+}
+
+/// See `TraitInfo::forward`.
+fn forwardable(t: &TraitDecl) -> Option<bool> {
+    if t.is_unsafe || !t.generics.params.is_empty() {
+        return None;
+    }
+    let mentions_self = |ty: &Type| crate::symbols::type_text(ty).split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == "Self");
+    let mut all_ref = true;
+    for m in &t.members {
+        let ItemKind::Fun(f) = &m.kind else { return None };
+        let simple = f.contexts.is_empty()
+            && !(f.mods.is_async || f.mods.is_unsafe || f.mods.is_const || f.mods.abi.is_some())
+            && f.generics.params.iter().all(|g| matches!(g, GenericParam::Lifetime { .. }))
+            && f.params.iter().all(|p| matches!(p.pat, Pat::Ident { sub: None, .. }) && !mentions_self(&p.ty) && !matches!(p.ty, Type::Fn { .. } | Type::Impl(_)))
+            && !f.ret.as_ref().is_some_and(mentions_self)
+            && f.receiver.is_none();
+        if !simple {
+            return None;
+        }
+        let mutable = match &f.self_param {
+            Some(SelfParam::Ref) => false,
+            Some(SelfParam::RefMut) => true,
+            None if f.mods.is_static || STATIC_METHOD_NAMES.contains(&f.name.as_str()) || f.mods.is_operator => return None,
+            None => f.mods.is_mut || f.body.is_some() && analyze_fun(f, &HashSet::new(), &HashMap::new()).mutates_self,
+            Some(_) => return None,
+        };
+        all_ref &= !mutable;
+    }
+    Some(all_ref)
+}
+
+/// Does the method implement a method of one of the interfaces `supertypes` names (`override`,
+/// or a method named like one of theirs)?
+fn implements_method(k: &Crate, f: &FunDecl, supertypes: &[Type]) -> bool {
+    f.mods.is_override || supertypes.iter().filter_map(|s| s.last_name()).any(|n| k.traits.get(n).is_some_and(|t| t.methods.contains_key(&f.name)))
+}
+
+/// Marks the parameters of interface methods typed as an Oxie interface `boxed`.
+fn box_interface_params(k: &mut Crate) {
+    let ifaces: HashSet<String> = k.traits.keys().filter(|n| !k.classes.contains_key(*n) && !k.enums.contains_key(*n)).cloned().collect();
+    let mark = |m: &mut MethodInfo| {
+        if m.iface {
+            for p in &mut m.params {
+                p.boxed = is_iface_type(&ifaces, &p.ty);
+            }
+        }
+    };
+    k.traits.values_mut().flat_map(|t| t.methods.values_mut()).for_each(mark);
+    k.classes.values_mut().flat_map(|c| c.methods.values_mut()).for_each(mark);
+    k.enums.values_mut().flat_map(|e| e.methods.values_mut()).for_each(mark);
+}
+
+/// A bare interface name among `ifaces` (`Shape`, not `Box<Shape>` or `&Shape`).
+pub(crate) fn is_iface_type(ifaces: &HashSet<String>, t: &Type) -> bool {
+    matches!(t, Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && ifaces.contains(&segs[0].name))
 }
 
 fn insert_unique<V>(map: &mut HashMap<String, V>, amb: &mut HashSet<String>, key: String, v: V) {
@@ -953,12 +1273,12 @@ pub fn params_info(f: &FunDecl) -> Vec<ParamInfo> {
         .collect();
     f.params
         .iter()
-        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone() })
+        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), boxed: false })
         .collect()
 }
 
 fn default_mi(f: &FunDecl) -> MethodInfo {
-    MethodInfo { recv: Recv::Ref, params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), explicit: false, recv_why: None }
+    MethodInfo { recv: Recv::Ref, params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), explicit: false, recv_why: None, iface: false }
 }
 
 /// Receiver determined purely from syntax, or None if it must be inferred.
@@ -978,7 +1298,7 @@ fn method_info_explicit(f: &FunDecl, trait_recv: Option<Recv>) -> Option<MethodI
         None if f.mods.is_operator => Some(Recv::Value),
         None => None,
     };
-    recv.map(|recv| MethodInfo { recv, params, throws, ret: f.ret.clone(), explicit: trait_recv.is_none() || f.self_param.is_some() || f.mods.is_static || f.mods.is_mut, recv_why: None })
+    recv.map(|recv| MethodInfo { recv, params, throws, ret: f.ret.clone(), explicit: trait_recv.is_none() || f.self_param.is_some() || f.mods.is_static || f.mods.is_mut, recv_why: None, iface: false })
 }
 
 fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
@@ -1047,11 +1367,9 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                             if f.name == "new" {
                                 user_new = true;
                             }
-                            if let Some(mi) = method_info_explicit(f, None) {
-                                methods.insert(f.name.clone(), mi);
-                            } else {
-                                methods.insert(f.name.clone(), default_mi(f));
-                            }
+                            let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
+                            mi.iface = implements_method(k, f, &t.supertypes);
+                            methods.insert(f.name.clone(), mi);
                         }
                     }
                     let info = ClassInfo {
@@ -1070,6 +1388,8 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         type_params: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Type { .. })).count(),
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
                         contexts: t.contexts.iter().filter_map(|p| p.name().map(String::from)).collect(),
+                        interfaces: t.supertypes.iter().filter_map(|s| s.last_name().map(String::from)).collect(),
+                        consts: member_consts(&t.members),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, true) {
                         k.classes.insert(key, info);
@@ -1091,7 +1411,8 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                     let mut methods = HashMap::new();
                     for m in &t.members {
                         if let ItemKind::Fun(f) = &m.kind {
-                            let mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
+                            let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
+                            mi.iface = implements_method(k, f, &t.supertypes);
                             methods.insert(f.name.clone(), mi);
                         }
                     }
@@ -1102,6 +1423,8 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         methods,
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
                         has_type_params: !only_lifetimes(&t.generics),
+                        interfaces: t.supertypes.iter().filter_map(|s| s.last_name().map(String::from)).collect(),
+                        consts: member_consts(&t.members),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, false) {
                         for (vn, _) in &info.variants {
@@ -1133,16 +1456,48 @@ fn impl_owner(k: &Crate, imp: &ImplDecl, module: &[String]) -> Option<String> {
     Some(k.type_key_at(&path, module).unwrap_or_else(|| name.to_string()))
 }
 
+/// The names of the constants among a type's members.
+fn member_consts(members: &[Item]) -> Vec<String> {
+    members.iter().filter_map(|m| if let ItemKind::Const(c) = &m.kind { Some(c.name.clone()) } else { None }).collect()
+}
+
 fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
     for it in items {
         match &it.kind {
             ItemKind::Impl(imp) => {
                 let Some(owner) = impl_owner(k, imp, module) else { continue };
                 let trait_info = imp.trait_.as_ref().and_then(|t| t.last_name()).and_then(|n| k.traits.get(n)).cloned();
+                // an implementation for every `T`, or for boxes or references, leaves no room for
+                // the forwarding ones Oxie would add
+                let blanket = match &imp.self_ty {
+                    Type::Ref { .. } => true,
+                    t => t.last_name().is_some_and(|n| n == "Box" || imp.generics.params.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if name == n))),
+                };
+                if let (true, Some(t)) = (blanket, imp.trait_.as_ref().and_then(|t| t.last_name())) {
+                    if let Some(ti) = k.traits.get_mut(t) {
+                        ti.forward = None;
+                    }
+                }
+                if let Some(t) = imp.trait_.as_ref().and_then(|t| t.last_name()) {
+                    if let Some(c) = k.classes.get_mut(&owner) {
+                        c.interfaces.push(t.to_string());
+                    } else if let Some(e) = k.enums.get_mut(&owner) {
+                        e.interfaces.push(t.to_string());
+                    }
+                }
+                if imp.trait_.is_none() {
+                    let consts = member_consts(&imp.members);
+                    if let Some(c) = k.classes.get_mut(&owner) {
+                        c.consts.extend(consts);
+                    } else if let Some(e) = k.enums.get_mut(&owner) {
+                        e.consts.extend(consts);
+                    }
+                }
                 for m in &imp.members {
                     if let ItemKind::Fun(f) = &m.kind {
                         let trecv = trait_info.as_ref().and_then(|t| t.methods.get(&f.name)).map(|m| m.recv);
-                        let mi = method_info_explicit(f, trecv).unwrap_or_else(|| default_mi(f));
+                        let mut mi = method_info_explicit(f, trecv).unwrap_or_else(|| default_mi(f));
+                        mi.iface = imp.trait_.is_some();
                         if let Some(c) = k.classes.get_mut(&owner) {
                             if f.name == "new" && imp.trait_.is_none() {
                                 c.user_new = true;
@@ -1340,6 +1695,29 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                     Some((f.name.clone(), callable_recvs(&key, &decided, &supers)))
                 })
                 .collect();
+            // the methods callable on the elements of fields that are collections of Oxie classes
+            // or interfaces (`for (c in counters) c.bump()`)
+            let elem_recvs: HashMap<String, HashMap<String, Recv>> = k
+                .classes
+                .get(&m.owner)
+                .into_iter()
+                .flat_map(|c| c.fields.iter().map(move |f| (c, f)))
+                .filter_map(|(c, f)| {
+                    let Type::Path { segs, .. } = &f.ty else { return None };
+                    let [seg] = segs.as_slice() else { return None };
+                    if !matches!(seg.name.as_str(), "Vec" | "VecDeque" | "LinkedList") {
+                        return None;
+                    }
+                    let Some([GenericArg::Type(Type::Path { segs, .. })]) = seg.generics.as_deref() else { return None };
+                    let path: Vec<String> = segs.iter().map(|s| s.name.clone()).collect();
+                    let key = match k.type_key_at(&path, &c.module).filter(|key| k.classes.get(key).is_some_and(|c| !c.is_shared)) {
+                        Some(key) => key,
+                        None if path.len() == 1 && k.traits.contains_key(&path[0]) => path[0].clone(),
+                        None => return None,
+                    };
+                    Some((f.name.clone(), callable_recvs(&key, &decided, &supers)))
+                })
+                .collect();
             let mut_params = if k.same_named_funs.is_empty() {
                 &mut_params
             } else {
@@ -1355,7 +1733,7 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                     here
                 })
             };
-            let facts = analyze_fun_with(m.fun, &fields, &recvs, mut_params, &field_recvs);
+            let facts = analyze_fun_with(m.fun, &fields, &recvs, mut_params, &field_recvs, &elem_recvs);
             let name = m.owner.rsplit("::").next().unwrap_or(&m.owner);
             let returns_self = m.fun.ret.as_ref().is_some_and(|t| t.single_name() == Some("Self") || t.single_name() == Some(name));
             // implementations of an interface method that is `&mut self` stay `&mut self`
@@ -1381,10 +1759,11 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                 changed = true;
             }
         }
-        // the first `&mut self` implementation (or default body) of an interface method spreads to the others
+        // the first `&mut self` implementation (or default body) of an interface method spreads to the
+        // others; not a shared class's, whose handle changes the data behind `&self`
         for m in &methods {
             if let Some(t) = &m.implements {
-                if decided[&(m.owner.clone(), m.fun.name.clone())] == Recv::RefMut {
+                if decided[&(m.owner.clone(), m.fun.name.clone())] == Recv::RefMut && !k.classes.get(&m.owner).is_some_and(|c| c.is_shared) {
                     trait_mut.entry((t.clone(), m.fun.name.clone())).or_insert_with(|| m.owner.clone());
                 }
             }
@@ -1438,14 +1817,22 @@ fn callable_recvs(owner: &str, decided: &HashMap<(String, String), Recv>, supers
 }
 
 pub fn analyze_fun(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap<String, Recv>) -> BodyFacts {
-    analyze_fun_with(f, fields, methods, &HashMap::new(), &HashMap::new())
+    analyze_fun_with(f, fields, methods, &HashMap::new(), &HashMap::new(), &HashMap::new())
 }
 
 /// Like `analyze_fun`, also knowing which parameters of callable functions are `&mut`
 /// (passing a field there borrows it mutably: `fill(items)` becomes `fill(&mut self.items)`)
-/// and the receivers of methods on fields of Oxie class types.
-pub fn analyze_fun_with(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap<String, Recv>, mut_params: &HashMap<String, Vec<usize>>, field_recvs: &HashMap<String, HashMap<String, Recv>>) -> BodyFacts {
-    let mut w = Walker { fields, methods, mut_params, field_recvs, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
+/// and the receivers of methods on fields of Oxie class types and on the elements of fields that
+/// hold them.
+pub fn analyze_fun_with(
+    f: &FunDecl,
+    fields: &HashSet<String>,
+    methods: &HashMap<String, Recv>,
+    mut_params: &HashMap<String, Vec<usize>>,
+    field_recvs: &HashMap<String, HashMap<String, Recv>>,
+    elem_recvs: &HashMap<String, HashMap<String, Recv>>,
+) -> BodyFacts {
+    let mut w = Walker { fields, methods, mut_params, field_recvs, elem_recvs, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
     for p in &f.params {
         w.bind(&p.pat);
     }
@@ -1459,7 +1846,7 @@ pub fn analyze_fun_with(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap
 
 pub fn analyze_block(b: &Block, fields: &HashSet<String>, methods: &HashMap<String, Recv>) -> BodyFacts {
     let none = HashMap::new();
-    let mut w = Walker { fields, methods, mut_params: &none, field_recvs: &HashMap::new(), scopes: vec![HashSet::new()], facts: BodyFacts::default() };
+    let mut w = Walker { fields, methods, mut_params: &none, field_recvs: &HashMap::new(), elem_recvs: &HashMap::new(), scopes: vec![HashSet::new()], facts: BodyFacts::default() };
     w.block(b);
     w.facts
 }
@@ -1471,6 +1858,8 @@ struct Walker<'a> {
     mut_params: &'a HashMap<String, Vec<usize>>,
     /// Field name -> the receivers of the methods of its Oxie class.
     field_recvs: &'a HashMap<String, HashMap<String, Recv>>,
+    /// Field name -> the receivers of the methods of the Oxie class or interface of its elements.
+    elem_recvs: &'a HashMap<String, HashMap<String, Recv>>,
     scopes: Vec<HashSet<String>>,
     facts: BodyFacts,
 }
@@ -1728,8 +2117,14 @@ impl<'a> Walker<'a> {
                 // `for (x in items) x.qty += 1` over a field borrows it mutably (see `lower_expr`)
                 let field = matches!(&iter.kind, Path { .. }) || matches!(&iter.kind, Field { recv, .. } if matches!(recv.kind, SelfValue));
                 if field && self.rooted_in_self(iter) {
+                    let elems = match &iter.kind {
+                        Field { name, .. } => Some(name.as_str()),
+                        _ => iter.ident(),
+                    }
+                    .and_then(|f| self.elem_recvs.get(f));
+                    let changes = |m: &str| elems.and_then(|r| r.get(m)) == Some(&Recv::RefMut);
                     if let Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } = pat {
-                        if crate::visit::writes_through(body, name) {
+                        if crate::visit::writes_through(body, name, &changes) {
                             let why = format!("it changes the elements of `{}`", self.self_field(iter));
                             self.mutates(iter.span, why);
                         }

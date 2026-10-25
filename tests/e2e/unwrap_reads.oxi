@@ -1,0 +1,31 @@
+// `x!!` on a variable or field followed by a method call borrows the value instead of moving it
+class User(name: String, email: String?) {
+    fun domain(): String = email!!.split('@').last().unwrap().to_string()
+}
+data class Tag(label: String?)
+data class Box2(tag: Tag?)
+fun main() {
+    println(User("a", "a@b").domain())
+    val o: String? = "abc".to_string()
+    println(o!!.len())
+    println(o!!.to_uppercase())
+    val e = o!!
+    println(e)
+    val t = vec[Tag("x".to_string())]
+    println(t.get(0)!!.label!!.len())
+    val u = User("u", "u@v")
+    println(u.email!!.len())
+    println(u.email!!.len())
+    println(u.name)
+    var v: Vec<i32>? = vec[1]
+    v!!.push(2)
+    println("${v:?}")
+    val n: i32? = -3
+    println(n!!.abs())
+    val b = Box2(Tag("deep".to_string()))
+    println(b.tag!!.label!!.to_uppercase())
+    println(b.tag!!.label!!.len())
+    val w: String? = "hi".to_string()
+    val bytes = w!!.into_bytes()
+    println("${bytes:?}")
+}

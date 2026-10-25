@@ -1,0 +1,16 @@
+// A `var` outside functions and classes would be a mutable global.
+
+class Grid(w: i32) {
+    companion object {
+        const SIZE: i32 = 4
+        var count: i32 = 0
+    }
+}
+// error: 6: a `var` outside a function or class would be a mutable global
+
+object Config {
+    var debug: bool = false
+}
+// error: 12: a `var` outside a function or class would be a mutable global
+
+fun main() = println(Grid.SIZE)

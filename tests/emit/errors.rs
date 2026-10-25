@@ -42,7 +42,7 @@ impl ::std::fmt::Display for StockError {
 impl ::std::error::Error for StockError {
     fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
         match self {
-            Self::Quantity(e) => Some(e),
+            Self::Quantity(e) => ::std::error::Error::source(e),
             #[allow(unreachable_patterns)]
             _ => None,
         }

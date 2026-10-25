@@ -271,11 +271,13 @@ fn markdown_files(dir: &Path) -> Vec<PathBuf> {
 
 /// The pages of docs/ that `oxie guide <topic>` prints are built into the binary from copies in
 /// `crates/oxie-cli/guide/docs` (a published crate can't include files outside its directory).
-/// They must equal docs/, and every page of docs/ is a topic except the ones for working on Oxie
-/// itself. `OXIE_BLESS=1` copies docs/ over them.
+/// They must equal docs/, and every page of docs/ is a topic except the ones an agent writing
+/// Oxie doesn't need (NOT_TOPICS). `OXIE_BLESS=1` copies docs/ over them.
 #[test]
 fn guide_topics_match_docs() {
-    const NOT_TOPICS: [&str; 1] = ["internals.md"];
+    // internals.md is for working on Oxie, ai-agents.md for setting an agent up: an agent
+    // reading `oxie guide` needs neither
+    const NOT_TOPICS: [&str; 2] = ["internals.md", "ai-agents.md"];
     let root = repo();
     let copies = root.join("crates/oxie-cli/guide/docs");
     let mut problems = Vec::new();
@@ -558,5 +560,43 @@ fn dependency_errors_are_shown() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && stderr.contains("mismatched types") && stderr.contains("badlib/src/lib.rs:1"), "{stderr}");
     assert!(!stderr.contains("never used"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `oxie new` and `oxie init` write notes for AI coding agents: an `AGENTS.md` that sends them to
+/// `oxie guide`, and a `CLAUDE.md` that imports it, since Claude Code reads `CLAUDE.md`. In an
+/// existing crate, files of those names that are already there are kept.
+#[test]
+fn new_projects_have_notes_for_agents() {
+    let tmp = std::env::temp_dir().join(format!("oxie-agents-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let read = |p: PathBuf| std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+
+    // a new program, a new library, and a project made in an empty directory
+    assert!(oxie().args(["new", "program"]).current_dir(&tmp).status().unwrap().success());
+    assert!(oxie().args(["new", "library", "--lib"]).current_dir(&tmp).status().unwrap().success());
+    std::fs::create_dir_all(tmp.join("empty")).unwrap();
+    assert!(oxie().arg("init").current_dir(tmp.join("empty")).status().unwrap().success());
+    for project in ["program", "library", "empty"] {
+        let dir = tmp.join(project);
+        assert!(read(dir.join("AGENTS.md")).contains("run `oxie guide`"), "{project}");
+        assert_eq!(read(dir.join("CLAUDE.md")), "@AGENTS.md\n", "{project}");
+    }
+
+    // an existing Rust crate gets both, but keeps a CLAUDE.md of its own
+    let rust = tmp.join("rust_crate");
+    std::fs::create_dir_all(rust.join("src")).unwrap();
+    std::fs::write(rust.join("Cargo.toml"), "[package]\nname = \"rust_crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    assert!(oxie().arg("init").current_dir(&rust).status().unwrap().success());
+    assert_eq!(read(rust.join("CLAUDE.md")), "@AGENTS.md\n");
+    let own = tmp.join("own_claude_md");
+    std::fs::create_dir_all(own.join("src")).unwrap();
+    std::fs::write(own.join("Cargo.toml"), "[package]\nname = \"own_claude_md\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(own.join("CLAUDE.md"), "Our own notes.\n").unwrap();
+    assert!(oxie().arg("init").current_dir(&own).status().unwrap().success());
+    assert_eq!(read(own.join("CLAUDE.md")), "Our own notes.\n");
+    assert!(own.join("AGENTS.md").exists());
+
     let _ = std::fs::remove_dir_all(&tmp);
 }

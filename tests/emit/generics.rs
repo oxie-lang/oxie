@@ -10,6 +10,18 @@ pub(crate) trait Shape {
     fn area(&self) -> f64;
 }
 
+impl<T: Shape + ?Sized> Shape for Box<T> {
+    fn area(&self) -> f64 {
+        (**self).area()
+    }
+}
+
+impl<T: Shape + ?Sized> Shape for &T {
+    fn area(&self) -> f64 {
+        (**self).area()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Square {
     pub(crate) side: f64,
