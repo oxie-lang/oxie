@@ -1,0 +1,22 @@
+// `sorted()` and `sorted_descending()` take elements that are only `PartialOrd`, like `f64`
+// (NaN goes after every number, as in Kotlin), and sort `Ord` elements as before.
+
+data class Run(val name: String, val time: f64)
+
+fun main() {
+    val xs = vec[3.5, -1.0, 2.25, 0.0]
+    println("${xs.sorted():?}")
+    println("${xs.sorted_descending():?}")
+    val odd = vec[2.0, f64::NAN, 1.0]
+    println("${odd.sorted():?}")
+    println("${odd.sorted_descending():?}")
+    println("${odd.sorted_by { it * 2.0 }:?}")
+    println("${odd.max_of { *it }:?}")
+    val runs = vec[Run("b", 9.5), Run("a", 8.25)]
+    println(runs.sorted_by { it.time }.map { it.name.clone() }.join(","))
+    println(runs.max_by_key { it.time }!!.name)
+    val words = vec["pear", "apple", "fig"]
+    println("${words.sorted():?} ${words.sorted_descending():?}")
+    val ns = vec[3, 1, 2]
+    println("${ns.sorted():?} ${ns.sorted_descending():?}")
+}

@@ -1,0 +1,30 @@
+// Reading `m[key]` lends an owned key or a number, as the map's `Index` takes a reference.
+
+import std::collections::HashMap
+import std::collections::BTreeMap
+
+fun main() {
+    var ages: HashMap<String, i32> = HashMap()
+    ages["ada"] = 36
+    val who = "ada".to_string()
+    println(ages[who])
+    println(ages["ada"])
+    println(ages[&who])
+    val names = vec["ada".to_string()]
+    for (n in names) println(ages[n])
+    println(names.len())
+    val h = mapOf(1 to "one", -2 to "minus two")
+    println(h[1])
+    println(h[-2])
+    val k = 1
+    println(h[k])
+    println(vec["aa", "b", "cc"].group_by { it.len() }[2].len())
+    println(vec["aa", "b"].associate_by { it.len() }[1])
+    var flags: BTreeMap<bool, char> = BTreeMap()
+    flags[true] = 'y'
+    println(flags[true])
+    val v = vec[10, 20, 30]
+    val i: i32 = 2
+    println(v[i])
+    println(v[0])
+}
