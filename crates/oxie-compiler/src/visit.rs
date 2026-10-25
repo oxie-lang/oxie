@@ -394,6 +394,44 @@ pub fn calls_ident(b: &FunBody, name: &str) -> bool {
     found
 }
 
+/// Does the function body store the parameter `name` somewhere it outlives the call: assign it
+/// (`listener = f`), put it into a collection (`shapes.push(s)`), box it (`Box.new(f)`) or pass
+/// it to a constructor (`Holder(s)`)?
+pub fn stores_ident(b: &FunBody, name: &str) -> bool {
+    let is_it = |e: &Expr| {
+        let mut e = e;
+        while let ExprKind::Paren(x) = &e.kind {
+            e = x;
+        }
+        e.ident() == Some(name)
+    };
+    let mut found = false;
+    let mut f = |e: &Expr| {
+        found |= match &e.kind {
+            ExprKind::Assign(None, _, v) => is_it(v),
+            ExprKind::MethodCall { recv, name: m, args, .. } => {
+                matches!(m.as_str(), "push" | "push_back" | "push_front" | "insert" | "add") && args.iter().any(|a| is_it(&a.value))
+                    || m == "new" && recv.ident() == Some("Box") && args.iter().any(|a| is_it(&a.value))
+            }
+            ExprKind::Call { callee, args } => {
+                let stores = match &callee.kind {
+                    ExprKind::Path { segs, .. } => segs.last().is_some_and(|n| crate::parser::is_type_like(n) || n == "Some") || segs.len() == 2 && segs[0] == "Box",
+                    _ => false,
+                };
+                stores && args.iter().any(|a| is_it(&a.value))
+            }
+            ExprKind::VecLit(items) | ExprKind::Array(items) => items.iter().any(is_it),
+            _ => false,
+        };
+        !found
+    };
+    match b {
+        FunBody::Block(b) => walk_block(b, &mut f),
+        FunBody::Expr(e) => walk_expr(e, &mut f),
+    }
+    found
+}
+
 /// The values a function body returns: the leaves of its tail expression (through `if`, `when`
 /// and blocks) and every `return x` outside lambdas.
 pub fn return_values(b: &FunBody) -> Vec<Expr> {

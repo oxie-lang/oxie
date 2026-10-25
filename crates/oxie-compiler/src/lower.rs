@@ -297,6 +297,9 @@ pub struct Lowerer<'a> {
     /// Names imported inside the blocks being lowered (`import nucleo_matcher::Config` in a
     /// function), with the paths they stand for.
     pub(crate) local_imports: Vec<(String, Vec<String>)>,
+    /// Parameters whose type is an interface or a function (`impl Shape`, `impl FnMut(..)`),
+    /// as (scope depth, name): a value Oxie boxes where a `Box<dyn ..>` is expected.
+    pub(crate) impl_params: Vec<(usize, String)>,
 }
 
 /// The `#[cfg(..)]` attributes among `attrs`, each followed by a space.
@@ -390,6 +393,7 @@ impl<'a> Lowerer<'a> {
             local_funs: Vec::new(),
             aliases: HashSet::new(),
             local_imports: Vec::new(),
+            impl_params: Vec::new(),
         }
     }
 
@@ -409,6 +413,8 @@ impl<'a> Lowerer<'a> {
     }
     pub(crate) fn pop_scope(&mut self) {
         self.scopes.pop();
+        let depth = self.scopes.len();
+        self.impl_params.retain(|(d, _)| *d < depth);
     }
     pub(crate) fn bind_name(&mut self, name: &str, ty: Option<Type>) {
         self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
@@ -1487,9 +1493,18 @@ impl<'a> Lowerer<'a> {
         if let Some(r) = recv {
             parts.push(r);
         }
+        // a function that implements an interface method keeps the interface's signature
+        let in_trait_impl = f.mods.is_override || self.class.as_ref().is_some_and(|c| c.trait_methods.as_ref().is_some_and(|t| t.contains(&f.name)));
         for p in &f.params {
             let fn_typed = matches!(p.ty, Type::Fn { .. });
             let mut pat = self.pat(&p.pat);
+            // stored in a field or collection, where it is boxed: `impl Shape + 'static`,
+            // `impl Fn(i32) + 'static` (a `Box<dyn Fn>` can't hold an `FnMut`)
+            if !in_trait_impl && self.is_impl_type(&p.ty) && p.name().is_some_and(|n| f.body.as_ref().is_some_and(|b| visit::stores_ident(b, n))) {
+                let ty = self.ty(&p.ty, TyPos::Ret);
+                parts.push(format!("{}: {} + 'static", pat, ty));
+                continue;
+            }
             let mut pos = TyPos::Param;
             if fn_typed {
                 let captured = p.name().is_some_and(|n| f.body.as_ref().is_some_and(|b| visit::ident_in_lambda(b, n)));
@@ -1527,7 +1542,26 @@ impl<'a> Lowerer<'a> {
     fn bind_params(&mut self, f: &FunDecl) {
         for p in &f.params {
             self.bind_pat(&p.pat, Some(p.ty.clone()));
+            if let (Some(n), true) = (p.name(), self.is_impl_type(&p.ty)) {
+                self.impl_params.push((self.scopes.len() - 1, n.to_string()));
+            }
         }
+    }
+
+    /// An interface or function type, which is `impl ..` as a parameter and `Box<dyn ..>` in
+    /// fields and collections.
+    pub(crate) fn is_impl_type(&self, t: &Type) -> bool {
+        match t {
+            Type::Fn { .. } => true,
+            Type::Path { segs, .. } => segs.len() == 1 && segs[0].generics.is_none() && segs[0].fn_sugar.is_none() && self.is_trait_name(&segs[0].name),
+            _ => false,
+        }
+    }
+
+    /// Is `name` a parameter of an interface or function type (see `impl_params`)?
+    pub(crate) fn is_impl_param(&self, name: &str) -> bool {
+        let Some(depth) = self.scopes.iter().rposition(|s| s.contains_key(name)) else { return false };
+        self.impl_params.iter().any(|(d, n)| *d == depth && n == name)
     }
 
     fn free_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {

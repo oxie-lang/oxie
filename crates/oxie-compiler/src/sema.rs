@@ -69,6 +69,8 @@ pub struct ClassInfo {
     pub lifetimes: usize,
     /// The names in its `context(...)` clause.
     pub contexts: Vec<String>,
+    /// The last names of the interfaces it implements (after `:` or in `impl X for` blocks).
+    pub interfaces: Vec<String>,
 }
 
 impl ClassInfo {
@@ -103,6 +105,8 @@ pub struct EnumInfo {
     /// Number of lifetime parameters (`enum Tok<'a>`).
     pub lifetimes: usize,
     pub has_type_params: bool,
+    /// The last names of the interfaces it implements (after `:` or in `impl X for` blocks).
+    pub interfaces: Vec<String>,
 }
 
 impl EnumInfo {
@@ -1070,6 +1074,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         type_params: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Type { .. })).count(),
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
                         contexts: t.contexts.iter().filter_map(|p| p.name().map(String::from)).collect(),
+                        interfaces: t.supertypes.iter().filter_map(|s| s.last_name().map(String::from)).collect(),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, true) {
                         k.classes.insert(key, info);
@@ -1102,6 +1107,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         methods,
                         lifetimes: t.generics.params.iter().filter(|g| matches!(g, GenericParam::Lifetime { .. })).count(),
                         has_type_params: !only_lifetimes(&t.generics),
+                        interfaces: t.supertypes.iter().filter_map(|s| s.last_name().map(String::from)).collect(),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, false) {
                         for (vn, _) in &info.variants {
@@ -1139,6 +1145,13 @@ fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
             ItemKind::Impl(imp) => {
                 let Some(owner) = impl_owner(k, imp, module) else { continue };
                 let trait_info = imp.trait_.as_ref().and_then(|t| t.last_name()).and_then(|n| k.traits.get(n)).cloned();
+                if let Some(t) = imp.trait_.as_ref().and_then(|t| t.last_name()) {
+                    if let Some(c) = k.classes.get_mut(&owner) {
+                        c.interfaces.push(t.to_string());
+                    } else if let Some(e) = k.enums.get_mut(&owner) {
+                        e.interfaces.push(t.to_string());
+                    }
+                }
                 for m in &imp.members {
                     if let ItemKind::Fun(f) = &m.kind {
                         let trecv = trait_info.as_ref().and_then(|t| t.methods.get(&f.name)).map(|m| m.recv);

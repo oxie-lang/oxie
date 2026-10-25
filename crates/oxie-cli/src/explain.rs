@@ -2098,6 +2098,11 @@ fn unused_variable(d: &mut MappedDiag, lines: &[&str], name: &str) {
 
 /// rustc suggestions that map exactly onto the source and read the same in Oxie.
 fn rustc_fixes(d: &mut MappedDiag, lines: &[&str]) {
+    // calling a field that holds a function: a method with a similar name is no fix for it
+    if d.label.as_deref() == Some("field, not a method") {
+        d.suggestions.retain(|s| !s.replacement.chars().all(|c| c.is_alphanumeric() || c == '_'));
+        d.notes.retain(|n| !(n.starts_with("help: there is a method") && n.contains("with a similar name")));
+    }
     let suggestions = d.suggestions.clone();
     for s in suggestions {
         let r = s.replacement.as_str();
@@ -2136,6 +2141,13 @@ fn rustc_fixes(d: &mut MappedDiag, lines: &[&str]) {
             }
             continue;
         }
+        if let Some(wrap) = wrap_lambda(&m.parts, lines) {
+            if let Some(edits) = wrap.filter(|e| !same_place(d, e)) {
+                d.notes.retain(|n| n.strip_prefix("help: ") != Some(m.message.as_str()));
+                d.fixes.push(Fix { title: oxie_terms(&m.message), edits });
+            }
+            continue;
+        }
         let edits: Option<Vec<Edit>> = m.parts.iter().map(|p| Some(Edit { file: None, line: p.line, col: p.col, end_line: p.end_line, end_col: p.end_col, text: oxie_code(&p.replacement)? })).collect();
         let Some(edits) = edits else { continue };
         if same_place(d, &edits) {
@@ -2162,6 +2174,48 @@ fn clone_call(parts: &[Suggestion], lines: &[&str]) -> Option<Vec<Edit>> {
         vec![edit(close.line, close.col, close.end_col, ".clone()")]
     } else {
         vec![edit(open.line, open.col, open.end_col, "("), edit(close.line, close.col, close.end_col, ").clone()")]
+    })
+}
+
+/// rustc's `Box::new(` and `)` around a closure, which is a lambda in braces in Oxie. The
+/// closure's end maps into the lambda's body, so the `)` goes after its `}`; a trailing lambda
+/// (`push { .. }`) becomes an argument in parentheses (`push(Box.new({ .. }))`). `Some(None)`
+/// when it is such a closure but has no fix that reads as Oxie (`f(1) { .. }`).
+fn wrap_lambda(parts: &[Suggestion], lines: &[&str]) -> Option<Option<Vec<Edit>>> {
+    let [open, close] = parts else { return None };
+    if !(open.replacement.ends_with('(') && close.replacement == ")" && open.line == close.line && open.col == open.end_col) {
+        return None;
+    }
+    let chars: Vec<char> = lines.get(open.line as usize)?.chars().collect();
+    if chars.get(open.col as usize) != Some(&'{') {
+        return None;
+    }
+    let mut depth = 0;
+    let mut end = None;
+    for (i, c) in chars.iter().enumerate().skip(open.col as usize) {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i as u32 + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end.filter(|e| (open.col..=*e).contains(&close.col)) else { return Some(None) };
+    let Some(code) = oxie_code(&open.replacement) else { return Some(None) };
+    let before: String = chars[..open.col as usize].iter().collect();
+    let trimmed = before.trim_end();
+    Some(match trimmed.chars().last() {
+        Some(c) if is_ident_char(c) => {
+            let name_end = trimmed.chars().count() as u32;
+            Some(vec![edit(open.line, name_end, open.col, &format!("({}", code)), edit(open.line, end, end, "))")])
+        }
+        Some(')') => None,
+        _ => Some(vec![edit(open.line, open.col, open.col, &code), edit(open.line, end, end, ")")]),
     })
 }
 
