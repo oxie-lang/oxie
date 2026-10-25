@@ -72,6 +72,11 @@
 * `sum_of { it }`, `max_of { it }` and `min_of { it }` work on the elements' values; `sum_of`
   failed to compile, since `it` is a reference.
 * rustc's advice to add `#[derive(Default)]` reads as Oxie: `class Stats(...) : Default`.
+* An `if` or `when` value whose branches mix text literals and templates is a `String`:
+  `val s = if (n == 0) "none" else "$n items"` compiles. Before, rustc rejected the branches'
+  different types unless the variable declared `String`.
+* A lambda passed where a future is expected (`tokio.spawn { ... }`) is explained, and the error
+  suggests an async block, instead of rustc's advice to call the closure.
 
 ## 0.2.0 - 2026-10-24
 
