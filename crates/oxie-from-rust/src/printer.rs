@@ -105,6 +105,9 @@ pub struct Cx {
     pub ctx_class: Option<String>,
     /// a closure's parameter keeps its name: its body is kept as Rust, which can't say `it`
     pub no_it: bool,
+    /// the fields of the type whose method this is: Oxie reads `name.x` as one of them, so a
+    /// module of the same name is written `name::x`
+    pub type_fields: HashSet<String>,
 }
 
 pub struct Printer<'a> {
@@ -1121,6 +1124,7 @@ impl<'a> Printer<'a> {
             }
         }
         class.methods = methods.clone();
+        cx.type_fields = class.fields.clone();
         cx.class = Some(class);
         cx.bound = bound_names(sig, block);
         let name = match decl {
@@ -1293,6 +1297,7 @@ impl<'a> Printer<'a> {
                     self.cx.impl_key = Some((tkey.clone(), trait_key.clone()));
                     self.cx.type_fns = self.type_fns(&facts::type_name(&imp.self_ty));
                     self.cx.ctx_class = Some(facts::type_name(&imp.self_ty)).filter(|n| self.krate.class(n).is_some());
+                    self.cx.type_fields = self.info.structs.get(&facts::type_name(&imp.self_ty)).map(|s| s.fields.iter().map(|(n, _)| n.clone()).collect()).unwrap_or_default();
                     s.push_str(&self.fun(&f.attrs, &f.vis, &f.sig, Some(&f.block), FunKind::Method { class: false, overrides: false }));
                     self.cx = saved;
                     method = true;

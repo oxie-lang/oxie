@@ -1170,7 +1170,7 @@ impl Printer<'_> {
             }
             let dot = first.chars().next().is_some_and(|c| c.is_uppercase())
                 || ["std", "core", "alloc"].contains(&first.as_str())
-                || (self.info.modules.contains(&first) && !self.cx.bound.contains(&first) && !self.implicit_field(&first));
+                || (self.info.modules.contains(&first) && !self.cx.bound.contains(&first) && !self.cx.type_fields.contains(&first));
             // `NSURL::fileURLWithPath`: Oxie reads an all-caps name before `.` as a constant
             let const_like = first.len() > 1 && first.chars().all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit());
             if dot && !const_like && !(first == "Self" && segs.len() > 2) {
