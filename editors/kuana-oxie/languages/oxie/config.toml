@@ -2,7 +2,7 @@ name = "Oxie"
 grammar = "oxie"
 path_suffixes = ["oxi"]
 line_comments = ["// ", "/// ", "//! "]
-block_comment = { start = "/*", end = "*/" }
+block_comment = { start = "/*", prefix = "", end = "*/", tab_size = 1 }
 tab_size = 4
 hard_tabs = false
 brackets = [

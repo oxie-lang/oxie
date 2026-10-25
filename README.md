@@ -298,6 +298,8 @@ Differences are within timing noise. See [docs/performance.md](docs/performance.
 
 * **Kuana**: the extension in [`editors/kuana-oxie`](editors/kuana-oxie) gives highlighting,
   outline, ▶ run/test buttons, snippets and the language server.
+* **Zed**: the extension in [`editors/zed-oxie`](editors/zed-oxie) (install it with **zed:
+  install dev extension**) gives the same, with `rust { }` blocks highlighted as Rust.
 * **VS Code**: install [Oxie](https://marketplace.visualstudio.com/items?itemName=oxie-lang.oxie)
   from the Marketplace (VSCodium, Cursor and other editors that use
   [Open VSX](https://open-vsx.org/extension/oxie-lang/oxie): search for Oxie). It gives
@@ -339,7 +341,7 @@ crates/oxie-compiler   lexer, parser, semantic analysis, lowering to Rust, forma
 crates/oxie-build      build.rs helper used by Oxie projects
 crates/oxie-cli        the `oxie` command and language server (guide/: what `oxie guide` prints)
 crates/oxie-from-rust  Rust → Oxie translator (`oxie from-rust`)
-editors/              tree-sitter grammar, Kuana and VS Code extensions
+editors/              tree-sitter grammar, Kuana, Zed and VS Code extensions
 skills/oxie/          Claude Code skill, which sends agents to `oxie guide`
 evals/                measures how well models write Oxie, with and without the skill
 examples/             example projects (also run by the test suite)

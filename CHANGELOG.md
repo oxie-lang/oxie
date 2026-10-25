@@ -10,6 +10,8 @@
   goes through a temporary.
 * The docs site labels each example's Rust tab "Generated Rust": it is what `oxie emit` prints,
   not a hand-written comparison.
+* A Zed extension (`editors/zed-oxie`): highlighting, outline, ▶ run and test buttons, tasks,
+  snippets and the language server, from the same grammar and queries as Kuana's.
 
 ## 0.3.0 - 2026-10-25
 

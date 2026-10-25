@@ -1,0 +1,37 @@
+[
+  {
+    "label": "oxie run",
+    "command": "oxie",
+    "args": ["run", "$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME",
+    "tags": ["oxie-main"]
+  },
+  {
+    "label": "oxie run --release",
+    "command": "oxie",
+    "args": ["run", "--release", "$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME",
+    "tags": ["oxie-main"]
+  },
+  {
+    "label": "oxie test: $ZED_CUSTOM_OXIE_TEST_NAME",
+    "command": "oxie",
+    "args": ["test", "$ZED_FILE", "$ZED_CUSTOM_OXIE_TEST_NAME", "--", "--format=pretty"],
+    "cwd": "$ZED_DIRNAME",
+    "tags": ["oxie-test"]
+  },
+  {
+    "label": "oxie test (all)",
+    "command": "oxie",
+    "args": ["test", "$ZED_FILE", "--", "--format=pretty"],
+    "cwd": "$ZED_DIRNAME",
+    "tags": ["oxie-test", "oxie-main"]
+  },
+  {
+    "label": "oxie emit (show generated Rust)",
+    "command": "oxie",
+    "args": ["emit", "$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME",
+    "tags": ["oxie-main"]
+  }
+]
