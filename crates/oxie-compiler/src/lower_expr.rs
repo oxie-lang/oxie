@@ -1220,6 +1220,16 @@ impl<'a> Lowerer<'a> {
             Try(_) if self.in_try_block() => P_PRIMARY,
             Try(_) | Unwrap(_) | Await(_) | Field { .. } | MethodCall { .. } | Call { .. } | Index(..) | In { .. } => P_POSTFIX,
             Paren(x) => self.prec_of(x),
+            // Rust text: an operator or a space in it may bind looser than what is around it
+            // (`(rust { &raw mut info }).cast()`)
+            Raw(s) => {
+                let t = s.trim();
+                if t.starts_with(['&', '*', '-', '!', '|']) || t.contains(char::is_whitespace) && !t.ends_with([')', ']', '}']) {
+                    P_LOWEST
+                } else {
+                    P_PRIMARY
+                }
+            }
             _ => P_PRIMARY,
         }
     }
@@ -1768,7 +1778,7 @@ impl<'a> Lowerer<'a> {
             }
             Paren(x) => self.expr(x, P_LOWEST),
             Raw(s) => {
-                let s = self.include_paths(s);
+                let s = self.include_paths(s.trim());
                 self.e.raw_lines(&s);
             }
             Error => self.e.w("()"),
