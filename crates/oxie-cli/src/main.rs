@@ -422,7 +422,7 @@ fn cmd_fmt(args: &[String]) -> R {
         }
     }
     if failed > 0 {
-        eprintln!("error: {} file(s) not formatted because of syntax errors", failed);
+        eprintln!("error: {} file(s) not formatted because of the errors above", failed);
     }
     if !check && changed == 0 && unchanged > 0 {
         println!("{} file(s) already formatted", unchanged);

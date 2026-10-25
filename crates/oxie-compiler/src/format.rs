@@ -401,6 +401,9 @@ fn same_tokens(a: &str, b: &str) -> bool {
                     })
                     .collect(),
             ),
+            // the formatter removes trailing whitespace, also after a doc comment
+            Tok::DocOuter(s) => Tok::DocOuter(s.trim_end().to_string()),
+            Tok::DocInner(s) => Tok::DocInner(s.trim_end().to_string()),
             other => other.clone(),
         }
     };
@@ -605,6 +608,12 @@ mod tests {
         assert_eq!(format_source(src), src);
         let tight = src.replace("T: ?Sized", "T:?Sized").replace("x @ 1", "x @  1").replace("rules! square", "rules!  square");
         assert_eq!(format_source(&tight), src);
+    }
+
+    #[test]
+    fn trailing_spaces_after_doc_comments() {
+        let src = "/// Doc.   \nfun f() {\nval x = 1\n}\n";
+        assert_eq!(format_source(src), "/// Doc.\nfun f() {\n    val x = 1\n}\n");
     }
 
     #[test]
