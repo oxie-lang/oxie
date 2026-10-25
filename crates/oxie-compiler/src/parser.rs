@@ -1928,9 +1928,21 @@ impl<'a> Parser<'a> {
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
+        // a doc comment on a local (`/// the step` before `val step = 2`) is only a comment: items
+        // keep theirs
+        let doc_start = self.pos;
+        if matches!(self.tok(), Tok::DocOuter(_)) {
+            while matches!(self.tok(), Tok::DocOuter(_) | Tok::Newline) {
+                self.bump();
+            }
+            let attrs = self.is_punct("@") || (self.is_punct("#") && self.is_punct_at(1, "["));
+            if !attrs && (self.is_item_start() || matches!(self.tok(), Tok::Ident(s) if matches!(s.as_str(), "pub" | "private" | "internal" | "public"))) {
+                self.pos = doc_start;
+            }
+        }
         // attributes on a statement (`@cfg(debug_assertions) println(...)`, `#[allow(...)] val x = ...`)
         if self.is_punct("@") || (self.is_punct("#") && self.is_punct_at(1, "[")) {
-            let save = self.pos;
+            let save = doc_start;
             let nd = self.diags.len();
             let (_, attrs) = self.docs_and_attrs()?;
             let declaration = self.is_item_start() || self.is_fun_start() || matches!(self.tok(), Tok::Ident(s) if matches!(s.as_str(), "pub" | "private" | "internal" | "public"));
@@ -3359,7 +3371,13 @@ impl<'a> Parser<'a> {
         let start = self.bump().span;
         let (cond, parens) = self.if_header()?;
         let then = self.branch_body(parens)?;
-        let else_ = if self.peek_past_newlines_kw("else") {
+        // `else ->` is the next arm of an enclosing `when`, not this `if`'s else
+        let mut n = 0;
+        while matches!(self.tok_at(n), Tok::Newline) {
+            n += 1;
+        }
+        let when_arm = self.is_punct_at(n + 1, "->");
+        let else_ = if !when_arm && self.peek_past_newlines_kw("else") {
             self.bump();
             if self.is_kw("if") {
                 Some(Box::new(self.if_expr()?))

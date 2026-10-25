@@ -1,0 +1,27 @@
+// An `if` without else in a `when` arm leaves the next `else ->` arm alone; doc comments on locals
+fun f(): i32 = 1
+
+fun main() {
+    for (i in 0..3) {
+        when (i) {
+            1 -> if (i > 0) println("one")
+            else -> println("other $i")
+        }
+    }
+    val v = when (2) {
+        2 -> if (true) "two" else "never"
+        else -> "other"
+    }
+    println(v)
+
+    /// the step
+    val step = 2
+    /// the result of `f`
+    val y = f()
+    /// counter
+    var x = 0
+    x += step
+    /// a local function keeps its docs
+    fun twice(n: i32): i32 = n * 2
+    println("$x $y ${twice(x)}")
+}
