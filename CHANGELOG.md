@@ -140,6 +140,29 @@
 * A non-exhaustive `when` says which cases it doesn't handle and suggests `else ->`; `xs.size`
   and `s.length` point at the field and offer `len()`; Kotlin's `joinToString` maps to
   `join_to_string`.
+* A loop that only reads a parameter's elements (`for (x in xs)`, `for (t in list.items)`)
+  borrows it, so callers keep their value; before, the loop kept the parameter owned and the
+  caller's value was moved. A loop over a field of a reference, or of a variable used after the
+  loop, borrows the field instead of failing to move it out.
+* A loop whose body changes its elements through a method that takes `&mut self`
+  (`for (c in counters) c.bump()`), `&mut x.f`, `*v` of a map entry or an inner loop goes over the
+  list mutably; before, it failed with "`c` is a `&` reference".
+* A method that returns `this` (a builder: `fun url(u: &str): B { url = u.to_string(); this }`)
+  takes `self`, or `mut self` when it changes it; before, it failed with "expected `B`, found
+  `&mut B`".
+* Variables built empty or with type arguments (`var a = vec[]`, `mutableListOf<i32>()`,
+  `HashMap<String, i32>()`, `Stack<i32>()`) have a known type: they are lent `&mut` to functions,
+  `m[k] = v` inserts, and calls of their methods fill in defaults, named arguments and contexts.
+* `String` parameters that a function only joins with `+` (`fun label(a: String, b: String) =
+  a + b`) or passes on as `&s` are lent as `&str`, as the docs say.
+* A lambda stored in a `val` that changes a captured variable through a method
+  (`{ s: &str -> log.push(s.to_string()) }`) can be called; before, it failed with E0596.
+* Methods borrow the `String`, `Vec` and class parameters they only read, like top-level
+  functions (`fun cheaper_than(o: Item)` no longer moves `o`). Extension functions that change
+  their receiver take `&mut self` (`fun Temp.warm(by: f64) { c += by }`) without `mut fun`.
+* Changing a parameter (`fun fill(c: Cart) { c.add("x") }`) offers `c: &mut Cart`. A function
+  that stores or returns its parameter no longer gets a fix that would borrow it (which didn't
+  compile); the error says where it keeps it.
 * A class's body properties can be computed from its constructor parameters and from earlier
   properties (`val code = name.to_uppercase()`, `var first = items[0]`). Before, a parameter
   read there was already moved into its field, and earlier properties weren't visible.

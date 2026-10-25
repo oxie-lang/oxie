@@ -102,10 +102,12 @@ fun short(x: i32) = x * 2
 * **Automatic borrowing**: an argument for a `&T` or `&mut T` parameter of a function or method
   declared in Oxie is borrowed: `total(v)` → `total(&v)`, `add_one(v)` → `add_one(&mut v)`.
   For a `&str` or `&[T]` parameter any owned argument is lent (`greet(name.to_uppercase())`).
-* **Borrowed parameters**: a `String` or `Vec<T>` parameter of a top-level function that isn't
-  `pub` becomes `&str` or `&[T]` when the body only reads it (calls `len`, `contains`, `iter`,
-  `map`, ..., prints it, compares it, indexes it, or passes it on to another borrowed parameter),
-  so callers keep their value. A function that stores, returns or consumes the value keeps the
+* **Borrowed parameters**: a `String` or `Vec<T>` parameter of a function or method that isn't
+  `pub` (except interface methods, overrides and methods of shared classes) becomes `&str` or
+  `&[T]` when the body only reads it (calls `len`, `contains`, `iter`, `map`, ..., prints it,
+  compares it, joins it with `+`, indexes it, loops over it reading the elements, or passes it on
+  to another borrowed parameter), so callers keep their value. `Copy` elements of a lent `Vec`
+  stay values in a loop (`for &x in xs`). A function that stores, returns or consumes the value keeps the
   owned type, and so do functions that are `pub`, `async`, used as values (`xs.map(greet)`) or
   called through a path (`util.greet(x)`). A `Vec<T>` is lent only when dropping a `T` just
   frees memory (numbers, strings, std collections of them, and Oxie types made of those that
@@ -291,6 +293,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
     calls a `&mut self` method of an Oxie class through a field of that type (`c.add(1)` for
     `var c: Counter`, also generic classes like `Entity<Counter>`; not a `shared class`, whose
     handle `&self` reaches);
+  * `self` (`mut self` if it changes `this`) if it returns `this` as its class: a builder,
+    `fun url(u: &str): Request { url = u.to_string(); this }`;
   * static if it never uses `self` and returns `Self`/the class, or is named `new`, `default`,
     `from`, `from_str`, `try_from` or `from_iter`;
   * `&self` otherwise.
@@ -422,7 +426,7 @@ interface Named : Display {
 ```oxie
 fun String.shout(): String = self.to_uppercase()
 fun <T: Clone> Vec<T>.second(): T? = self.get(1).cloned()
-mut fun Vec<i32>.bump(by: i32) { for (x in self.iter_mut()) *x += by }
+fun Vec<i32>.bump(by: i32) { for (x in self.iter_mut()) *x += by }   // `&mut self`, inferred
 ```
 
 Each becomes a trait with one method plus its `impl` for the receiver type; every file of the
@@ -651,8 +655,10 @@ val n = const { SIZE * 2 }                      // evaluated at compile time
   `HashMap`, `HashSet`, `BTreeMap`, ...) that is used after the loop or by the next round of an
   enclosing loop: then the loop borrows it (`for x in &xs`), and `x` is a reference to the element
   (`Copy` elements are bound by value: `for &n in &nums`). A loop over a collection field of the
-  class always borrows it, except in methods taking `self`. When the body changes the element
-  (`x.qty += 1`, `x.tags.push(t)`), the loop borrows the collection mutably
+  class always borrows it, except in methods taking `self`, and so does a loop over a field of a
+  reference or of a local used afterwards (`for (m in team.members)`). When the body changes the
+  element (`x.qty += 1`, `x.tags.push(t)`, a method that takes `&mut self`, `*v` of a map entry,
+  or an inner loop that changes its elements), the loop borrows the collection mutably
   (`for x in &mut xs`), and a method that does this to a field changes `this`.
 
 ```oxie
