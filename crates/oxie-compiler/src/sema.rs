@@ -121,6 +121,8 @@ pub struct TraitInfo {
     pub module: Vec<String>,
     pub methods: HashMap<String, MethodInfo>,
     pub assoc_types: Vec<String>,
+    /// Names of its type parameters (`interface Repo<T>`).
+    pub generics: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -765,6 +767,7 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
             ItemKind::Trait(t) => {
                 let mut methods = HashMap::new();
                 let mut assoc = Vec::new();
+                let generics = t.generics.params.iter().filter_map(|g| if let GenericParam::Type { name, .. } = g { Some(name.clone()) } else { None }).collect();
                 for m in &t.members {
                     match &m.kind {
                         ItemKind::Fun(f) => {
@@ -774,7 +777,7 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
                         _ => {}
                     }
                 }
-                insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc });
+                insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc, generics });
             }
             ItemKind::Mod { name, items } => {
                 let mut m = module.to_vec();

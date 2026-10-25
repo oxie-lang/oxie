@@ -334,6 +334,43 @@ pub enum Type {
 }
 
 impl Type {
+    /// This type with the type parameters in `map` replaced (`Vec<T>` with `T = String`).
+    pub fn substitute(&self, map: &[(String, Type)]) -> Type {
+        let sub = |t: &Type| t.substitute(map);
+        match self {
+            Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() => match map.iter().find(|(n, _)| *n == segs[0].name) {
+                Some((_, t)) => t.clone(),
+                None => self.clone(),
+            },
+            Type::Path { global, segs, span } => {
+                let segs = segs
+                    .iter()
+                    .map(|s| {
+                        let mut s = s.clone();
+                        if let Some(g) = &mut s.generics {
+                            for a in g.iter_mut() {
+                                match a {
+                                    GenericArg::Type(t) | GenericArg::Binding(_, t) => *t = sub(t),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        s
+                    })
+                    .collect();
+                Type::Path { global: *global, segs, span: *span }
+            }
+            Type::Ref { lifetime, mutable, inner } => Type::Ref { lifetime: lifetime.clone(), mutable: *mutable, inner: Box::new(sub(inner)) },
+            Type::Ptr { mutable, inner } => Type::Ptr { mutable: *mutable, inner: Box::new(sub(inner)) },
+            Type::Tuple(v) => Type::Tuple(v.iter().map(sub).collect()),
+            Type::Array(t, n) => Type::Array(Box::new(sub(t)), n.clone()),
+            Type::Slice(t) => Type::Slice(Box::new(sub(t))),
+            Type::Option(t) => Type::Option(Box::new(sub(t))),
+            Type::Fn { params, ret } => Type::Fn { params: params.iter().map(sub).collect(), ret: Box::new(sub(ret)) },
+            _ => self.clone(),
+        }
+    }
+
     pub fn simple(name: &str) -> Type {
         Type::Path { global: false, segs: vec![PathSeg::plain(name)], span: Span::default() }
     }

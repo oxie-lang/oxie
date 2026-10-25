@@ -276,6 +276,8 @@ pub struct Lowerer<'a> {
     /// The type of the value the pattern being lowered matches, when known: its bare variant
     /// names are that enum's first.
     pub(crate) pat_ty: Option<Type>,
+    /// Lowering a method of a trait impl (an operator's): its bounds go on the impl block.
+    pub(crate) trait_impl: bool,
     /// Methods of the shared class being lowered that use `this` as a value, or call one that
     /// does: their data methods take the handle as `__this` (see `shared.rs`).
     pub(crate) needs_this: HashSet<String>,
@@ -329,6 +331,19 @@ pub fn esc(name: &str) -> String {
 }
 
 /// `"NotFound"` -> `"not found"`
+/// The result type interface `tr` declares for method `name`, with the interface's type
+/// parameters replaced by `tr`'s arguments (`Vec<T>` of `Repo<String>` is `Vec<String>`).
+pub(crate) fn trait_ret(tr: &Type, info: Option<&sema::TraitInfo>, name: &str) -> Option<Type> {
+    let info = info?;
+    let ret = info.methods.get(name)?.ret.as_ref()?;
+    let args: Vec<Type> = match tr {
+        Type::Path { segs, .. } => segs.last().and_then(|s| s.generics.as_ref()).map(|g| g.iter().filter_map(|a| if let GenericArg::Type(t) = a { Some(t.clone()) } else { None }).collect()).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let map: Vec<(String, Type)> = info.generics.iter().cloned().zip(args).collect();
+    Some(ret.substitute(&map))
+}
+
 fn humanize(name: &str) -> String {
     let mut out = String::new();
     for (i, c) in name.chars().enumerate() {
@@ -386,6 +401,7 @@ impl<'a> Lowerer<'a> {
             reused_iters: HashMap::new(),
             narrowed_types: Vec::new(),
             pat_ty: None,
+            trait_impl: false,
             needs_this: HashSet::new(),
             this_recv: None,
             extra_param: None,
@@ -1651,7 +1667,7 @@ impl<'a> Lowerer<'a> {
     fn free_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {
         let lifetimes: Vec<String> = f.generics.params.iter().filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(name.clone()) } else { None }).collect();
         let f = &auto_lifetimes(&self.with_inferred_ret(f, None), false, &|n| self.k.type_lifetimes_in(n, &self.module));
-        let f = &crate::bounds::with_inferred_bounds(f, &[], &[]);
+        let f = &crate::bounds::with_inferred_bounds(f, &[], &[], &[]);
         let is_main = f.name == "main" && ctx == ItemCtx::Top && self.is_root && self.module.is_empty();
         let wrap_main = is_main && !matches!(f.throws, Throws::No);
         self.docs(&it.docs);
@@ -1763,7 +1779,7 @@ impl<'a> Lowerer<'a> {
     fn ext_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {
         let by_ref = !matches!(f.self_param, Some(SelfParam::Value { .. }) | Some(SelfParam::Typed(_)));
         let f = &auto_lifetimes(&self.with_inferred_ret(f, None), by_ref, &|n| self.k.type_lifetimes_in(n, &self.module));
-        let f = &crate::bounds::with_inferred_bounds(f, &[], &[]);
+        let f = &crate::bounds::with_inferred_bounds(f, &[], &[], &[]);
         let recv_ty = f.receiver.as_ref().unwrap();
         let tname = sema::ext_trait_name(&self.module, &f.name);
         let recv = match &f.self_param {
@@ -1834,9 +1850,9 @@ impl<'a> Lowerer<'a> {
         };
         let f = &auto_lifetimes(&self.with_inferred_ret(f, trait_ret), by_ref, &|n| self.k.type_lifetimes_in(n, &self.module));
         let f = &match self.class.as_ref() {
-            Some(c) if !f.mods.is_override && c.trait_methods.as_ref().is_some_and(|t| !t.contains(&f.name)) => {
+            Some(c) if !f.mods.is_override && !self.trait_impl && c.trait_methods.as_ref().is_some_and(|t| !t.contains(&f.name)) => {
                 let fields: Vec<(String, Type)> = c.fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
-                crate::bounds::with_inferred_bounds(f, &c.generics, &fields)
+                crate::bounds::with_inferred_bounds(f, &c.generics, &fields, &self.case_types(&c.name))
             }
             _ => f.clone(),
         };
@@ -2353,7 +2369,61 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// The cases of enum `name` with the types of their fields (for bound inference).
+    pub(crate) fn case_types(&self, name: &str) -> Vec<(String, Vec<Type>)> {
+        let Some(en) = self.enum_info(name) else { return Vec::new() };
+        en.variants
+            .iter()
+            .map(|(n, shape)| {
+                let ts = match shape {
+                    VariantShape::Unit => Vec::new(),
+                    VariantShape::Tuple(ts) => ts.clone(),
+                    VariantShape::Named(fs) => fs.iter().map(|(_, t)| t.clone()).collect(),
+                };
+                (n.clone(), ts)
+            })
+            .collect()
+    }
+
+    /// The `where` clause of an impl of a trait for a generic class: `wc` with the bounds the
+    /// bodies of `fns` need for the class's type parameters. A trait's methods keep its
+    /// signature, so these go on the impl (`impl<T> Display for P<T> where T: Display`).
+    fn impl_where(&self, wc: &str, fns: &[&FunDecl]) -> String {
+        let Some(c) = self.class.as_ref() else { return wc.to_string() };
+        if !c.generics.iter().any(|g| matches!(g, GenericParam::Type { .. })) {
+            return wc.to_string();
+        }
+        let fields: Vec<(String, Type)> = c.fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
+        let cases = self.case_types(&c.name);
+        let own: HashSet<&str> = c.generics.iter().filter_map(|g| if let GenericParam::Type { name, .. } = g { Some(name.as_str()) } else { None }).collect();
+        let mut preds: Vec<String> = Vec::new();
+        for f in fns {
+            // only the class's parameters: the method's own stay as the trait declares them
+            let mut bare = (*f).clone();
+            bare.generics = Generics::default();
+            let out = crate::bounds::with_inferred_bounds(&bare, &c.generics, &fields, &cases);
+            for w in &out.generics.where_clause {
+                if let WherePred::Type { ty, bounds } = w {
+                    if !ty.single_name().is_some_and(|n| own.contains(n)) {
+                        continue;
+                    }
+                    let text = format!("{}: {}", self.ty(ty, TyPos::Plain), self.bounds(bounds));
+                    if !preds.contains(&text) && !wc.contains(&text) {
+                        preds.push(text);
+                    }
+                }
+            }
+        }
+        match (preds.is_empty(), wc.is_empty()) {
+            (true, _) => wc.to_string(),
+            (false, true) => format!(" where {}", preds.join(", ")),
+            (false, false) => format!("{}, {}", wc, preds.join(", ")),
+        }
+    }
+
     fn trait_impl_block(&mut self, tr: &Type, members: &[&Item], g: &str, self_ty: &str, wc: &str) {
+        let fns: Vec<&FunDecl> = members.iter().filter_map(|m| if let ItemKind::Fun(f) = &m.kind { Some(f) } else { None }).collect();
+        let wc = &self.impl_where(wc, &fns);
         self.e.nl();
         if tr.last_name() == Some("__Display") {
             if let Some(m) = members.first() {
@@ -2378,7 +2448,7 @@ impl<'a> Lowerer<'a> {
                         .filter(|_| f.self_param.is_none() && !f.mods.is_mut && !f.mods.is_static)
                         .map(|m| m.recv)
                         .unwrap_or_else(|| self.recv_of(&owner, f));
-                    self.pending_trait_ret = trait_info.as_ref().and_then(|t| t.methods.get(&f.name)).and_then(|m| m.ret.clone());
+                    self.pending_trait_ret = trait_ret(tr, trait_info.as_ref(), &f.name);
                     self.method(m, f, recv, false, None);
                 }
                 _ => self.assoc_item(m, false),
@@ -2470,6 +2540,7 @@ impl<'a> Lowerer<'a> {
             (Some(r), false) if r != "Self" && r != self_ty => format!("::std::ops::{}<{}>", tr, r),
             _ => format!("::std::ops::{}", tr),
         };
+        let wc = self.impl_where(wc, &[f]);
         self.e.nl();
         self.e.w(&format!("impl{} {} for {}{} {{", g, trait_text, self_ty, wc));
         self.e.indent();
@@ -2487,7 +2558,9 @@ impl<'a> Lowerer<'a> {
         let recv = if is_assign { Recv::RefMut } else { Recv::Value };
         let mut it2 = m.clone();
         it2.attrs.push(Attr::Oxie { name: "inline".into(), args: None, span: Span::default() });
+        let saved = std::mem::replace(&mut self.trait_impl, true);
         self.method(&it2, &f2, recv, false, Some(method));
+        self.trait_impl = saved;
         self.e.dedent();
         self.e.w("}");
         self.e.nl();
@@ -2554,6 +2627,8 @@ impl<'a> Lowerer<'a> {
         let wc = self.where_clause(&t.generics);
         let self_ty = format!("{}{}", t.name, gn);
         let (derived, impl_traits, members_by_trait, inherent) = self.split_members(t);
+        // operators get their own impls
+        let inherent: Vec<&Item> = inherent.into_iter().filter(|m| !matches!(&m.kind, ItemKind::Fun(f) if f.mods.is_operator)).collect();
         let mut derives: Vec<String> = self.auto_derives(&t.name);
         for d in derived {
             if !derives.contains(&d) {
@@ -2913,7 +2988,7 @@ impl<'a> Lowerer<'a> {
                         .filter(|_| f.self_param.is_none() && !f.mods.is_mut && !f.mods.is_static)
                         .map(|m| m.recv)
                         .unwrap_or_else(|| self.recv_of(&owner, f));
-                    self.pending_trait_ret = tinfo.as_ref().and_then(|t| t.methods.get(&f.name)).and_then(|m| m.ret.clone());
+                    self.pending_trait_ret = imp.trait_.as_ref().and_then(|tr| trait_ret(tr, tinfo.as_ref(), &f.name));
                     self.method(m, f, recv, imp.trait_.is_none(), None);
                 }
                 _ => self.assoc_item(m, imp.trait_.is_none()),

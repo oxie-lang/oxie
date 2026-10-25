@@ -163,7 +163,7 @@ impl<'a> Lowerer<'a> {
                     continue;
                 }
                 self.e.nl();
-                self.pending_trait_ret = trait_info.as_ref().and_then(|ti| ti.methods.get(&f.name)).and_then(|mi| mi.ret.clone());
+                self.pending_trait_ret = crate::lower::trait_ret(tr, trait_info.as_ref(), &f.name);
                 self.forwarder(m, f, recv, "", read, write);
             }
             self.e.dedent();
@@ -180,7 +180,7 @@ impl<'a> Lowerer<'a> {
         let f = &match self.class.as_ref() {
             Some(c) if !f.mods.is_override => {
                 let fields: Vec<(String, Type)> = c.fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
-                crate::bounds::with_inferred_bounds(f, &c.generics, &fields)
+                crate::bounds::with_inferred_bounds(f, &c.generics, &fields, &[])
             }
             _ => f.clone(),
         };
