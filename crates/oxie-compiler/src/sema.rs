@@ -421,15 +421,19 @@ impl Crate {
         }
         let owners = self.variant_owner.get(variant)?;
         // a name the module imports from elsewhere (`import super::Redo`, a unit struct) is that one
-        if let Some(path) = module.and_then(|m| self.imports.get(&(m.to_vec(), variant.to_string()))) {
-            let owner = path.len().checked_sub(2).map(|i| &path[i]);
-            if !owners.iter().any(|(_, n)| Some(n) == owner) {
-                return None;
-            }
+        let imported_other = |at: &[String]| {
+            self.imports.get(&(at.to_vec(), variant.to_string())).is_some_and(|path| {
+                let owner = path.len().checked_sub(2).map(|i| &path[i]);
+                !owners.iter().any(|(_, n)| Some(n) == owner)
+            })
+        };
+        if module.is_some_and(imported_other) {
+            return None;
         }
         // and so is a type the module has from Rust code, its own or through `import editor.*`
+        // (as are the names the glob's module imports, for `mod tests { import super::* }`)
         if let Some(m) = module {
-            let has = |at: &[String]| self.rust_types.contains(&(at.to_vec(), variant.to_string()));
+            let has = |at: &[String]| self.rust_types.contains(&(at.to_vec(), variant.to_string())) || at != m && imported_other(at);
             if has(m) || self.globs.get(m).into_iter().flatten().filter_map(|g| self.module_path(g, m, true)).any(|g| has(&g)) {
                 return None;
             }
