@@ -1,0 +1,37 @@
+// A lambda stored by assigning it to a field, or by a method that keeps it, owns what it uses;
+// a result that is an iterator or lambda over a borrowed parameter or `this` may keep using it.
+
+class Button {
+    var on_click: () -> String = { "nothing" }
+    var handlers: [() -> Unit] = []
+    fun on_press(f: () -> Unit) = handlers.push(f)
+    fun press() {
+        for (h in handlers) h()
+    }
+}
+
+class Bag(items: [i32]) {
+    fun doubled(): impl Iterator<Item = i32> = items.iter().map { it * 2 }
+    fun above(n: i32): (i32) -> bool = { it > n && items.contains(&it) }
+}
+
+fun lens(xs: &[String]): impl Iterator<Item = usize> = xs.iter().map { it.len() }
+
+fun prefixer(p: &str): (&str) -> String = { "$p$it" }
+
+fun main() {
+    var b = Button()
+    val name = String.from("ann")
+    b.on_click = { "clicked by $name" }
+    println((b.on_click)())
+    val tag = String.from("ok")
+    b.on_press { println("pressed $tag") }
+    b.press()
+
+    val words: [String] = ["a", "bcd"]
+    println(lens(&words).sum::<usize>())
+    val bag = Bag([1, 2, 5])
+    println(bag.doubled().collect::<Vec<i32>>())
+    println("${(bag.above(1))(2)} ${(bag.above(1))(3)}")
+    println(prefixer(">> ")("hi"))
+}

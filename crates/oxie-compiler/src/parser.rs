@@ -35,6 +35,8 @@ pub struct Parser<'a> {
     pub diags: Vec<Diag>,
     /// Rust-style condition context: `{` ends the expression.
     no_struct: bool,
+    /// Parsing a range's end, which a `step` doesn't belong to (`1..=10 step 3`).
+    no_step: bool,
     /// The type after `as`: a `<` after its path starts generic arguments only if they parse,
     /// otherwise it compares (`n as usize < m`).
     cast_ty: bool,
@@ -73,7 +75,7 @@ fn caps_type_names(toks: &[Token]) -> std::collections::HashSet<String> {
 pub fn parse_file(src: &str) -> (File, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
     let caps_types = caps_type_names(&toks);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types };
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, no_step: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types };
     let file = p.file();
     // one error per place: recovering at the end of the file may report the same one again
     for d in p.diags.drain(..) {
@@ -121,7 +123,7 @@ fn unclosed_brace(src: &str, toks: &[lexer::Token]) -> Option<u32> {
 pub fn parse_expr_str(src: &str) -> (Expr, Vec<Diag>) {
     let (toks, mut diags) = lexer::lex(src);
     let caps_types = caps_type_names(&toks);
-    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types };
+    let mut p = Parser { src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, no_step: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types };
     let e = p.expr().unwrap_or(Expr::new(ExprKind::Error, Span::default()));
     diags.append(&mut p.diags);
     (e, diags)
@@ -2426,19 +2428,41 @@ impl<'a> Parser<'a> {
             let start = self.span();
             let inclusive = self.is_punct("..=");
             self.bump();
-            let end = if self.can_start_expr() && !(self.no_struct && self.is_punct("{")) { Some(Box::new(self.or_expr()?)) } else { None };
+            let end = if self.can_start_expr() && !(self.no_struct && self.is_punct("{")) { Some(Box::new(self.range_end()?)) } else { None };
             let sp = start.to(self.prev_span());
-            return Ok(Expr::new(ExprKind::Range { start: None, end, inclusive }, sp));
+            return self.range_step(Expr::new(ExprKind::Range { start: None, end, inclusive }, sp));
         }
         let lhs = self.or_expr()?;
         if self.is_punct("..") || self.is_punct("..=") || self.is_punct("..<") {
             let inclusive = self.is_punct("..=");
             self.bump();
-            let end = if self.can_start_expr() && !(self.no_struct && self.is_punct("{")) { Some(Box::new(self.or_expr()?)) } else { None };
+            let end = if self.can_start_expr() && !(self.no_struct && self.is_punct("{")) { Some(Box::new(self.range_end()?)) } else { None };
             let sp = lhs.span.to(self.prev_span());
-            return Ok(Expr::new(ExprKind::Range { start: Some(Box::new(lhs)), end, inclusive }, sp));
+            return self.range_step(Expr::new(ExprKind::Range { start: Some(Box::new(lhs)), end, inclusive }, sp));
         }
         Ok(lhs)
+    }
+
+    /// A range's end, without a `step` after it, which is the whole range's (`range_step`).
+    fn range_end(&mut self) -> PResult<Expr> {
+        let saved = std::mem::replace(&mut self.no_step, true);
+        let end = self.or_expr();
+        self.no_step = saved;
+        end
+    }
+
+    /// `range step n`: the step of the whole range, as in Kotlin (`1..=10 step 3` steps through
+    /// `1..=10`, not `10`).
+    fn range_step(&mut self, mut e: Expr) -> PResult<Expr> {
+        while matches!(self.tok(), Tok::Ident(w) if w == "step") && self.can_start_expr_at(1) {
+            self.bump();
+            let rhs = self.bitor_expr()?;
+            let sp = e.span.to(rhs.span);
+            let recv = Expr::new(ExprKind::Paren(Box::new(e)), sp);
+            let n = Expr::new(ExprKind::Cast(Box::new(rhs), Type::simple("usize")), sp);
+            e = Expr::new(ExprKind::MethodCall { recv: Box::new(recv), name: "step_by".into(), generics: None, args: vec![Arg { name: None, value: n, trailing: false }], safe: false }, sp);
+        }
+        Ok(e)
     }
 
     fn or_expr(&mut self) -> PResult<Expr> {
@@ -2520,9 +2544,12 @@ impl<'a> Parser<'a> {
         if self.is_punct("..") || self.is_punct("..=") || self.is_punct("..<") {
             let inclusive = self.is_punct("..=");
             self.bump();
-            let end = self.elvis_expr()?;
+            let saved = std::mem::replace(&mut self.no_step, true);
+            let end = self.elvis_expr();
+            self.no_step = saved;
+            let end = end?;
             let sp = lhs.span.to(end.span);
-            return Ok(Expr::new(ExprKind::Range { start: Some(Box::new(lhs)), end: Some(Box::new(end)), inclusive }, sp));
+            return self.range_step(Expr::new(ExprKind::Range { start: Some(Box::new(lhs)), end: Some(Box::new(end)), inclusive }, sp));
         }
         Ok(lhs)
     }
@@ -2543,7 +2570,7 @@ impl<'a> Parser<'a> {
         let mut lhs = self.bitor_expr()?;
         loop {
             let word = match self.tok() {
-                Tok::Ident(w) if matches!(w.as_str(), "to" | "until" | "downTo" | "step") && self.can_start_expr_at(1) => w.clone(),
+                Tok::Ident(w) if matches!(w.as_str(), "to" | "until" | "downTo" | "step") && !(w == "step" && self.no_step) && self.can_start_expr_at(1) => w.clone(),
                 _ => break,
             };
             self.bump();
@@ -3307,7 +3334,7 @@ impl<'a> Parser<'a> {
                 StrPart::Interp { src: s, offset, spec } => {
                     let (toks, mut diags) = lexer::lex_at(&s, offset);
                     self.diags.append(&mut diags);
-                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types: self.caps_types.clone() };
+                    let mut sub = Parser { src: self.src, inner_attrs: Vec::new(), toks, pos: 0, diags: Vec::new(), no_struct: false, no_step: false, cast_ty: false, positional: false, fn_ret: true, slice: false, trait_path: false, caps_types: self.caps_types.clone() };
                     let e = sub.expr();
                     if e.is_ok() && !matches!(sub.tok(), Tok::Newline | Tok::Eof) {
                         let sp = sub.span();

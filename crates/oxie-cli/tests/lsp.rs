@@ -336,6 +336,31 @@ fun main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// References and highlights work in text with characters of several bytes (`'€'`).
+#[test]
+fn references_in_text_with_wide_characters() {
+    const SRC: &str = "fun main() {\n    val euro = '€'\n    println(\"€ $euro\")\n    println(euro)\n}\n";
+    let dir = std::env::temp_dir().join(format!("oxie-lsp-wide-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file: PathBuf = dir.join("wide.oxi");
+    std::fs::write(&file, SRC).unwrap();
+    let uri = file_uri(&oxie_compiler::compile::canonicalize(&file).unwrap());
+
+    let mut c = Client::start();
+    let _ = c.request("initialize", json!({"rootUri": file_uri(&dir), "capabilities": {}}));
+    c.notify("initialized", json!({}));
+    c.notify("textDocument/didOpen", json!({"textDocument": {"uri": uri, "languageId": "oxie", "version": 1, "text": SRC}}));
+    let _ = c.wait_diagnostics(&uri);
+    let refs = c.request("textDocument/references", json!({"textDocument": {"uri": uri}, "position": pos(SRC, "euro =", 1), "context": {"includeDeclaration": true}}));
+    assert_eq!(refs.as_array().map(|a| a.len()), Some(3), "{refs}");
+    let marks = c.request("textDocument/documentHighlight", json!({"textDocument": {"uri": uri}, "position": pos(SRC, "euro)", 1)}));
+    assert_eq!(marks.as_array().map(|a| a.len()), Some(3), "{marks}");
+
+    let _ = c.request("shutdown", Value::Null);
+    c.notify("exit", Value::Null);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file opened through a symlinked directory (on macOS, any file under /tmp) keeps the editor's
 /// URI in diagnostics and locations.
 #[cfg(unix)]

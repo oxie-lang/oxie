@@ -114,7 +114,9 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diag>) {
 
 /// Lexes `src` as if it started at byte `base` of the file (used for interpolations).
 pub fn lex_at(src: &str, base: usize) -> (Vec<Token>, Vec<Diag>) {
-    let mut lx = Lexer { src, pos: 0, base, tokens: Vec::new(), diags: Vec::new(), brackets: Vec::new(), pending_newline: false };
+    // a UTF-8 byte order mark that some editors write first is no text (rustc skips it too)
+    let pos = if base == 0 && src.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let mut lx = Lexer { src, pos, base, tokens: Vec::new(), diags: Vec::new(), brackets: Vec::new(), pending_newline: false };
     lx.run();
     (lx.tokens, lx.diags)
 }
@@ -797,6 +799,14 @@ mod tests {
 
     fn kinds(src: &str) -> Vec<Tok> {
         lex(src).0.into_iter().map(|t| t.tok).collect()
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_skipped() {
+        let (toks, diags) = lex("\u{feff}val x = 1");
+        assert!(diags.is_empty());
+        assert_eq!(toks[0].tok, Tok::Ident("val".into()));
+        assert_eq!(toks[0].span.start, 3);
     }
 
     #[test]

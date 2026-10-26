@@ -395,6 +395,9 @@ fun main() {
   (`thread.spawn { }`, `tokio.spawn(async { })`) owns what it captures: Oxie makes it `move`.
   Elsewhere write `move { ... }` yourself, or a capture list `{ [handle] -> ... }` that clones
   a shared handle or channel sender into it, so the original stays usable.
+* Such a lambda keeps the values it had when it was made, so changing a captured `var`
+  afterwards is an error: take the value on purpose with a capture list (`{ [factor] x -> ... }`),
+  or share it in an `Rc<Cell<..>>` that both use.
 
 **Values every function passes on** (GPUI's `window` and `cx`, a logger, a configuration).
 

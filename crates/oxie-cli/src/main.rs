@@ -235,6 +235,8 @@ fn check_package_name(name: &str) -> Result<(), String> {
         "it is a Rust keyword".to_string()
     } else if LIBRARIES.contains(&name) {
         "it is the name of a Rust library".to_string()
+    } else if matches!(name, "build" | "deps" | "examples" | "incremental") {
+        "cargo keeps a directory of that name next to the program".to_string()
     } else {
         return Ok(());
     };
@@ -275,8 +277,23 @@ fn cmd_init(args: &[String]) -> R {
             let m = project::add_build_dependency(&manifest, &project::oxie_build_dep());
             std::fs::write(dir.join("Cargo.toml"), m).map_err(|e| e.to_string())?;
         }
-        if !dir.join("build.rs").exists() {
-            std::fs::write(dir.join("build.rs"), project::BUILD_RS).map_err(|e| e.to_string())?;
+        let build_rs = dir.join("build.rs");
+        let mut add_compile = false;
+        if !build_rs.exists() {
+            std::fs::write(&build_rs, project::BUILD_RS).map_err(|e| e.to_string())?;
+        } else {
+            // the crate's own build script also compiles the .oxi files
+            let text = std::fs::read_to_string(&build_rs).map_err(|e| e.to_string())?;
+            if !text.contains("oxie_build::compile") {
+                match text.find("fn main() {") {
+                    Some(i) => {
+                        let at = i + "fn main() {".len();
+                        let text = format!("{}\n    oxie_build::compile();{}", &text[..at], &text[at..]);
+                        std::fs::write(&build_rs, text).map_err(|e| e.to_string())?;
+                    }
+                    None => add_compile = true,
+                }
+            }
         }
         // notes for AI coding agents; a crate's own CLAUDE.md or AGENTS.md is kept
         for (name, text) in [("AGENTS.md", project::AGENTS_MD), ("CLAUDE.md", project::CLAUDE_MD)] {
@@ -285,6 +302,9 @@ fn cmd_init(args: &[String]) -> R {
             }
         }
         println!("Added Oxie to the existing crate. Write modules as src/<name>.oxi and add this to src/main.rs or src/lib.rs:\n\n    include!(concat!(env!(\"OUT_DIR\"), \"/oxie/mod.rs\"));\n");
+        if add_compile {
+            println!("Also call `oxie_build::compile();` in the `main` of build.rs, which compiles the .oxi files.\n");
+        }
         return Ok(ExitCode::SUCCESS);
     }
     check_package_name(&pkg).map_err(|e| format!("{} (the package is named after the directory)", e))?;

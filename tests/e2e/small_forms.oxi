@@ -1,0 +1,26 @@
+// `step` applies to the whole range, a `rust { }` block with statements is a value, an enum
+// case named `None` is the enum's in a `when` on an optional, and an extension of a number
+// takes it by value.
+
+enum Level { None, Low, High }
+
+fun describe(l: Level?): String = when (l) {
+    Level.None -> "level none"
+    Level.Low -> "low"
+    Level.High -> "high"
+    null -> "missing"
+}
+
+fun i32.is_positive(): bool = this > 0
+
+fun main() {
+    for (x in 1..=10 step 3) print("$x ")
+    println()
+    val v = rust {
+        let x: i32 = 41;
+        x + 1
+    }
+    println(v)
+    println("${describe(Level.None)} ${describe(Level.Low)} ${describe(Level.High)} ${describe(null)}")
+    println("${5.is_positive()} ${(-5).is_positive()}")
+}

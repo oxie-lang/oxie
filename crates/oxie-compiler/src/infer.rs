@@ -250,6 +250,11 @@ impl<'a> Lowerer<'a> {
                 Type::Ref { inner, .. } => Some(*inner),
                 t => Some(t),
             },
+            // `xs.collect::<Vec<i32>>()`, `s.parse::<f64>()`: the type it is asked for
+            MethodCall { name, generics: Some(g), .. } if name == "collect" || name == "parse" && through_try => match g.as_slice() {
+                [GenericArg::Type(t)] if !has_infer(t) => Some(t.clone()),
+                _ => None,
+            },
             MethodCall { recv, name, .. } => {
                 if matches!(recv.kind, SelfValue) {
                     if let Some(m) = self.class.as_ref().and_then(|c| c.methods.get(name)) {

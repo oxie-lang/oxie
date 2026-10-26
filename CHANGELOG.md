@@ -9,10 +9,45 @@ them (58,700 lines). Oxie gained the Rust forms that needed, and fixes for what 
 code turned up. Translated whole, the Kuana editor (137 files) builds and passes 436 of its 437
 tests, as before, now without any Rust left in it.
 
+A round of bug hunting with several hundred new programs found code that compiled to Rust doing
+something else than the Oxie said, and much valid Oxie that generated Rust that doesn't build.
+Those are fixed below; the silent ones first.
+
 ### Changes
+
+* A default argument means what it means where it is declared: a field or method in it is the
+  receiver's, and a constant or function of the callee's module is that one. Before, a call from
+  another class or module read its own variable of that name.
+* Named arguments run in the order they are written (`place(y = next(), x = next())` computes
+  `y` first), as in Kotlin; they ran in the order of the parameters.
+* A `when` arm naming a class or companion constant, or a variable, compares the subject with
+  it, as in Kotlin; it was a new name that matched every value. An arm that uses the name binds
+  it, as in Rust (`n if n > 9 -> n`).
+* `x in lo()..hi()` computes both bounds, in the order written; `hi()` was skipped when the first
+  comparison failed, and `downTo` computed its bounds in reverse.
+* `copy` of a class whose properties are computed from the others, or that has `init` blocks,
+  builds the copy with the constructor, so `Rect(2, 3).copy(w = 10).area` is `30`, not `6`.
+* A loop whose body changes the elements changes them in the collection also over a `[..]`
+  literal and with a `var` loop variable, and over a shared object's list field, which the loop
+  locks while it runs. Before, these changed copies.
+* A lambda Oxie makes `move` (stored, returned, sent to a thread) that uses a variable the code
+  changes after it is an error: it kept the old value, where Kotlin's lambda sees the change. A
+  capture list takes the value on purpose. A body property's lambda that uses a constructor
+  parameter the object keeps too is an error with the same fix (it failed to build).
+* An empty sum of floats is `0` (Rust's is `-0.0`, printed `-0`), `max_by_key` keeps the first of
+  equal maxima, as Kotlin's `maxBy` and `min_by_key` do, and `${price:.2}` on `null` prints `null`
+  (it printed `nu`).
 
 * Rust's slice can be named where `[T]` is a list: `slice<T>` (`Mutex<slice<u8>>`,
   `struct Bytes(slice<u8>)`).
+* Crates whose `src/lib.rs` or `src/main.rs` says `#![no_std]` (or `#![cfg_attr(.., no_std)]`)
+  build: the generated code uses `core` and `alloc`, and so does Oxie's support module.
+* A `mod name` line declares the module of `name.oxi` where it stands, with its attributes
+  (`@cfg(unix) mod unix`, `@macro_use mod macros`), so the module sees the macros declared
+  before it, as in Rust; `oxie from-rust` keeps such lines.
+* A call of a throwing interface method, of a method of a type parameter bound by an interface,
+  of a default method or of a throwing extension function passes its error on, also as a single
+  statement and after `?.`.
 * Attributes go before parameters, arguments, elements, lambdas and the fields of struct
   literals and enum cases: `fun open(path: &str, @cfg(unix) mode: u32)`, `vec[1, @cfg(test) 2]`,
   `fold(0, @inline(always) { acc, x -> acc + x })`, `Fd { @cfg(unix) raw: 3 }`. A call made in the
@@ -37,6 +72,42 @@ tests, as before, now without any Rust left in it.
 
 ### Fixes
 
+* Only the last of several `init` blocks ran.
+* `?.` after a function or method declared in Oxie with a name std uses for `Result` methods
+  (`text`, `open`, `create`, ...) worked like Rust's `?` and returned early from the caller, and
+  `s?.rfind('z')` and other std methods that give an `Option` made an optional of an optional, so
+  `!= null` was always true.
+* Receivers: a method that changes what its fields reach (`inner.counter.add(1)`,
+  `list[0].add(1)`, `pair.0`, `maybe!!`, `maybe?.add(1)`, a property made by a constructor, map
+  entries in a loop) takes `&mut self`, and one that only changes a `Cell`, `RefCell`, `Mutex`
+  or atomic field stays `&self`, so such objects can be shared through `Rc` or `Arc`.
+* `c?.inc()`, `xs?.push(x)` and `stack?.pop()` borrow the value mutably when the call changes it.
+* Values from `?.` chains, from `if` and `when` with a `null` branch, from generic functions,
+  methods of generic classes, interface methods, `x!!` and `collect::<T>()` print as lists and
+  optionals.
+* Shared objects: `if (val n = head)` copies an optional handle, a block's value can read a
+  field of an object declared in the block, `s.log.push("x")` converts the value, calls that
+  change a field (`entry(..).or_insert(..)`, `iter_mut()`) borrow the object mutably, and a data
+  class that holds a handle derives `Debug` (the handle prints as `Node(..)`).
+* A lambda passed to a method or constructor of a generic class named a `T` that isn't defined
+  there.
+* `when` on a field reached through a reference or a list element moved out of it.
+* `break` and `continue` inside `try` in a loop, and a `try` that ends in `return` or `throw`,
+  generated Rust that doesn't build.
+* The `else` of `if (a != null && b != null)` saw `a` unwrapped, and `else if (x == null) return`
+  moved `x` away from the code after it.
+* Calls of extension functions and of interface methods on interface values get defaults, named
+  arguments and conversions, and interface calls lend references; so do methods called on a list
+  operation's element or after `?.`.
+* Generic recursive types (`enum List<T> { Nil, Cons(T, List<T>) }`) are boxed, methods are
+  called through the boxes, `when (this)` binds the fields of a case in an enum method, and an
+  optional recursive field reads as an optional.
+* A function returns a lambda unboxed, as `impl FnMut` when it changes its captures, with
+  `+ '_` when it (or a returned iterator) uses a borrowed parameter or `this`, and boxes a
+  function a returned lambda returns. A lambda assigned to a function-typed field or passed to a
+  method that stores it is `move`, and an extension function can take a lambda.
+* A field read after a call in a `?.` chain (`parent?.borrow().value`) is read by value; it
+  referred to a temporary.
 * A string literal that spans lines inside a macro call, a `rust { }` block or an `r"..."` string
   kept the generated code's indentation on its later lines, which changed the string.
 * Attributes on a function's parameters, and on the named fields of an enum case, were dropped.

@@ -76,7 +76,12 @@ fun short(x: i32) = x * 2
   the last expression is a statement.
 * **Default arguments** and **named arguments** (`f(x = 1)`) work for functions, methods and
   constructors declared in Oxie; defaults are filled in at the call site, and one may use the
-  parameters before it (`h: i32 = w`). A function called
+  parameters before it (`h: i32 = w`). A default means what it means where it is declared:
+  a field or method in it is the receiver's (`fun scale(k: i32 = factor)` reads `s.factor` in
+  `s.scale()`), and a constant or function of the callee's module is that one, also when the
+  caller has its own of that name (a `private` one is then visible in the crate). Arguments run
+  in the order they are written, as in Kotlin, also when the parameters come in another order:
+  `place(y = next(), x = next())` computes `y` first. A function called
   through its module (`util.total(v)`) is treated like a direct call: arguments are lent,
   defaults and names apply, and a `throws` function's error propagates.
 * **Generics and bounds** are Rust's: `<T: Display + Clone>`, `where T: Into<String>`,
@@ -281,7 +286,7 @@ declared in Oxie.
 ```oxie
 class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
     var d: D = default            // body property (needs a default)
-    init { ... }                  // runs in the constructor after fields are set
+    init { ... }                  // runs in the constructor after fields are set (several run in order)
 
     fun read(): A = a             // &self
     fun write(x: B) { b = x }     // &mut self (inferred)
@@ -310,7 +315,11 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
     `insert`, `clear`, `entry`, ...), takes `&mut` of a field, calls a `&mut self` method, or
     calls a `&mut self` method of an Oxie class through a field of that type (`c.add(1)` for
     `var c: Counter`, also generic classes like `Entity<Counter>`; not a `shared class`, whose
-    handle `&self` reaches);
+    handle `&self` reaches) or through what a field reaches (`inner.counter.add(1)`,
+    `list[0].add(1)`, `pair.0.add(1)`, `maybe!!.add(1)`, `maybe?.add(1)`), or changes the entries
+    of a map field it loops over (`for ((k, v) in scores) *v += 1`). Calls on a `Cell`,
+    `RefCell`, `Mutex`, `RwLock` or atomic field (`hits.set(..)`, `log.borrow_mut().push(..)`)
+    change it through `&self`, so they leave the method `&self`;
   * `self` (`mut self` if it changes `this`) if it returns `this` as its class: a builder,
     `fun url(u: &str): Request { url = u.to_string(); this }`;
   * static if it never uses `self` and returns `Self`/the class, or is named `new`, `default`,
@@ -322,7 +331,10 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
 * A method called through its type takes the receiver as its first argument, as in Rust:
   `Counter.get(c)`, `Counter.add(&mut c, 2)`.
 * **`data class`** additionally derives `Debug`, `Clone`, `PartialEq`, and `Copy`, `Eq`,
-  `Hash` when every field type supports them, and supports `x.copy(field = value)`.
+  `Hash` when every field type supports them, and supports `x.copy(field = value)`: a clone with
+  the fields replaced, or, when body properties are computed from the others or there are `init`
+  blocks, the object built again with the constructor (as Kotlin's `copy` does), so
+  `Rect(2, 3).copy(w = 10).area` is computed for the new `w`.
 * **Supertypes** after `:` are traits to implement. Derivable traits (`Debug`, `Clone`,
   `Copy`, `PartialEq`, `Eq`, `Hash`, `Default`, `PartialOrd`, `Ord`) without methods in the
   body become derives. `override fun toString() = "..."` implements `Display`. A class with
@@ -361,9 +373,11 @@ shared class Name(var a: A) : Interface { ... }   // Rc<RefCell<..>> handle
   for the call (`self.0.write().deposit(n)`), a getter `a()` and setter `set_a(v)` per
   field that code uses (in a library, also those of public fields), and implements the class's Oxie interfaces and `toString` (`Display`) by forwarding.
 * Static methods and `companion object` functions are on the handle.
-* `Clone` copies the handle; `==` and `Hash` use identity (`Rc::ptr_eq`).
+* `Clone` copies the handle; `==` and `Hash` use identity (`Rc::ptr_eq`). Without `: Debug`, the
+  handle's `Debug` prints `Name(..)` (so a data class holding one can derive `Debug`, and objects
+  that refer to each other don't print forever).
 * Using a shared variable or field by value copies the handle (`val b = a` → `a.clone()`), so
-  the original stays usable.
+  the original stays usable; so does unwrapping an optional one (`if (val n = head)`).
 * From outside the class: `a.f` reads through the getter (a copy of the field), `a.f = v` uses
   the setter, `a.f += v`, `a.f[i] = v` and mutating calls like `a.f.push(x)` borrow the object
   mutably for that statement (arguments are evaluated first), and other chains (`a.f.len()`,
@@ -466,7 +480,8 @@ fun Vec<i32>.bump(by: i32) { for (x in self.iter_mut()) *x += by }   // `&mut se
 
 Each becomes a trait with one method plus its `impl` for the receiver type; every file of the
 crate imports these traits automatically. Inside, `this`/`self` is the receiver; for Oxie
-classes their fields can be used directly. An extension of an interface (`fun Shape.describe()`)
+classes their fields can be used directly. Calls fill in defaults, take named arguments and
+convert text as for functions; their parameters are not lent. An extension of an interface (`fun Shape.describe()`)
 applies to every type that implements it: `impl<T: Shape + ?Sized> ShapeDescribe for T`.
 
 ### Operators
@@ -504,11 +519,11 @@ the right-hand side (`impl Mul<f64> for Vec2` for `operator fun times(k: f64)`).
 | `x in coll` / `x !in coll` | `coll.contains(&x)` / `!coll.contains(&x)` |
 | `key in map` | `map.contains_key(key)` (`HashMap`, `BTreeMap`) |
 | `c in text` (a `char`) | `text.contains(c)` |
-| `x in a..b` | `a <= x && x < b` |
+| `x in a..b` | `a <= x && x < b` (bounds that call something are computed first, both, in the order written) |
 | `x is Pattern` / `x !is Pattern` | `matches!(x, Pattern)` / `!matches!(..)` |
 | `a to b` | `(a, b)` |
 | `a until b`, `a downTo b`, `r step n` | `a..b`, `(b..=a).rev()`, `r.step_by(n)` |
-| `x in a downTo b` | `b <= x && x <= a` |
+| `x in a downTo b` | `b <= x && x <= a` (computed as for `..`, `a` first) |
 | `a..b`, `a..=b`, `a..<b` | `a..b`, `a..=b`, `a..b` |
 | `x as T` | `x as T` |
 | `x as T < y`, `x as T << n` | `(x as T) < y`, `(x as T) << n` |
@@ -521,7 +536,7 @@ the right-hand side (`impl Mul<f64> for Vec2` for `operator fun times(k: f64)`).
 | `f<T>(x)`, `mutableListOf<i32>()` | `f::<T>(x)`, `Vec::<i32>::new()` |
 | `Point { x: 1, y: 2 }` | struct literal (with `..base`) |
 | `x.let { it + 1 }` | `{ let it = x; it + 1 }` |
-| `p.copy(x = 1)` | clone with `x` replaced |
+| `p.copy(x = 1)` | clone with `x` replaced (built with the constructor when properties are computed) |
 | `if (c) a else b`, `when`, `try`, blocks | expressions with values |
 
 **Strings and `+`**: when an operand of a `+` chain is a string literal or template, the chain
@@ -723,18 +738,29 @@ val n = const { SIZE * 2 }                      // evaluated at compile time
 
 * A statement `when` on literals doesn't need `else` (Oxie adds `_ => {}`); a `when` used as a
   value must be exhaustive, as in Rust.
+* An arm that names a constant (also one of the class or its companion object) or a variable
+  compares the subject with it, as in Kotlin: `when (x) { LIMIT -> ...; target -> ... }`. An
+  arm that uses the name in its guard or body binds it instead, as Rust's `n if n > 9 -> n`
+  does.
+* `when` on a field reached through a reference or a list element (`j.state` in
+  `for (j in jobs)`, `jobs[0].state`) matches it by reference, so an arm doesn't move its value
+  out.
 * A `when` on a `String` (or `&String`) with text arms matches it as `&str`:
   `when (cmd) { "go" -> ... }` is `match &*cmd` (`match cmd.as_str()` for a `&String`).
 * `if`/`for`/`while` bodies can be a single statement without braces.
 * `for (x in xs)` consumes `xs`, as in Rust, unless `xs` is a local collection (`Vec`, `VecDeque`,
-  `HashMap`, `HashSet`, `BTreeMap`, ...) that is used after the loop or by the next round of an
-  enclosing loop: then the loop borrows it (`for x in &xs`), and `x` is a reference to the element
-  (`Copy` elements are bound by value: `for &n in &nums`). A loop over a collection field of the
+  `HashMap`, `HashSet`, `BTreeMap`, an array, ...) that is used after the loop or by the next
+  round of an enclosing loop: then the loop borrows it (`for x in &xs`), and `x` is a reference to
+  the element (`Copy` elements are bound by value: `for &n in &nums`). A loop over a collection field of the
   class always borrows it, except in methods taking `self`, and so does a loop over a field of a
   reference or of a local used afterwards (`for (m in team.members)`). When the body changes the
   element (`x.qty += 1`, `x.tags.push(t)`, a method that takes `&mut self`, `*v` of a map entry,
   or an inner loop that changes its elements), the loop borrows the collection mutably
-  (`for x in &mut xs`), and a method that does this to a field changes `this`.
+  (`for x in &mut xs`), and a method that does this to a field changes `this`. So does
+  `for (var x in xs)` when the body changes `x`. Over a list field of a shared object, such a loop
+  locks the object while it runs (`for x in &mut inv.0.write().items`); a body that uses the
+  object too is an error that shows how to copy the list out and store it back.
+* `break` and `continue` work inside `try` blocks in loops.
 
 ```oxie
 data class Item(name: String, var qty: i32)
@@ -763,9 +789,17 @@ f(x) { trailing lambda }        // the last parameter, outside the parentheses
 ```
 
 * A lambda that outlives the scope that made it is `move` without writing it: one a function
-  returns (`fun adder(n: i32): (i32) -> i32 = { it + n }`), one stored in a function-typed field,
+  returns (`fun adder(n: i32): (i32) -> i32 = { it + n }`), one stored in a function-typed field
+  (also by assigning it, `b.on_click = { .. }`), one passed for a parameter its function stores,
   and one passed to `thread.spawn`, `tokio.spawn` (an `async { }` block too) or another
-  `spawn` of `thread`, `task` or `rayon`.
+  `spawn` of `thread`, `task` or `rayon`. Such a lambda has its own copy of the variables it
+  uses, so one that the code changes after the lambda is made is an error (the lambda would
+  keep the old value, where Kotlin's sees the change): take the value on purpose with a capture
+  list, or share it in a `Cell`. A body property's lambda can't use a constructor parameter the
+  object keeps too, unless a capture list gives it a copy.
+* A function returns a lambda as it is (`impl Fn(..)`), as `impl FnMut(..)` when the lambda
+  changes what it captures, and with `+ '_` when it reads a borrowed parameter or `this`; a
+  lambda that a returned lambda returns is boxed (`impl Fn(i32) -> Box<dyn Fn(i32) -> i32>`).
 * A brace lambda without `->` has no parameters, or `it` if it uses `it`. Closures with an
   explicit empty list (`|| it + 1`, `() => it`) take no parameter and use an outer `it`. When a
   standard method always passes a value (`map`, `filter`, `map_err`, `unwrap_or_else` on
@@ -848,9 +882,9 @@ Each one is the iterator chain you would write by hand; the element is passed by
 | `xs.find { }`, `find_last { }` | `T?` (a reference) | `iter().find(..)` |
 | `xs.index_of_first { }` | `usize?` | `iter().position(..)` |
 | `xs.any { }`, `all { }`, `none { }`, `count { }` | `bool` / `usize` | `iter().any(..)`, ... |
-| `xs.sum()`, `sum_of { }` | number | `iter().sum()`, `iter().map(..).sum()` |
+| `xs.sum()`, `sum_of { }` | number (`0` for none, also of floats) | `iter().sum()`, `iter().map(..).sum()` |
 | `xs.max_of { }`, `min_of { }` | `S?` | `iter().map(..).max_by(..)` |
-| `xs.max_by_key { }`, `min_by_key { }` | `T?` (a reference) | works with `f64` keys too |
+| `xs.max_by_key { }`, `min_by_key { }` | `T?` (a reference) | the first of equal keys, as Kotlin's `maxBy`; works with `f64` keys too |
 | `xs.sorted()`, `sorted_descending()`, `sorted_by { }`, `sorted_by_descending { }` | `[T]` | `to_vec()` + `sort` (also `f64`: NaN sorts last) |
 | `xs.reversed()`, `distinct()`, `distinct_by { }`, `chunked(n)` | `[T]` / `[[T]]` | |
 | `xs.group_by { key }` | `[K: [T]]` | |
@@ -871,8 +905,11 @@ methods are always available: `xs.iter().filter { .. }.map { .. }.collect()`.
 * `import a::b::C`, `import a.b.C`, `import a::b::{C, D as E}`, `import a::b::*`,
   `import { C, D } from a::b` (TypeScript), `use ...` (Rust). Paths that start with one of
   your modules are resolved from the crate root, so `import util::helper` works in every file.
-* `mod name { ... }` declares an inline module; `mod name` (without a body) declares a
-  hand-written Rust module file next to the source.
+* `mod name { ... }` declares an inline module; `mod name` (without a body) declares the module
+  of `name.oxi`, or a hand-written Rust module file next to the source, where the line stands
+  and with its attributes (`@cfg(unix) mod unix`, `@macro_use mod macros`). Modules without such
+  a line are declared after the file's code. As in Rust, a module sees the macros declared before
+  its `mod` line.
 * Paths may use `.` instead of `::` when the left side is a type, module or crate name:
   `std.mem.swap(a, b)`, `Duration.from_secs(1)`, `Color.Red`, `math.double(2)` (inline
   module), `shapes.Circle(2.0)` (a class through its module), `Stack::<i32>.new()`.
@@ -930,7 +967,8 @@ fun main() {
 * in the crate root (`main.oxi`/`lib.oxi`), lint attributes (`allow`, `warn`, `deny`, `forbid`,
   `expect`) apply to the whole crate. Other crate attributes (`#![recursion_limit = "..."]`,
   `#![no_std]`, ...) work in single-file scripts; in a project, put them in `src/main.rs` /
-  `src/lib.rs`.
+  `src/lib.rs`. With `#![no_std]` there (also under `#![cfg_attr(.., no_std)]`), the generated
+  code uses `core` and `alloc`, and Oxie's support code leaves out what needs `std`.
 
 ## Tests
 

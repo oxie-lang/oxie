@@ -1022,7 +1022,8 @@ fn occurrences(text: &str, word: &str) -> Vec<(usize, usize)> {
             i += 1;
             continue;
         }
-        if text[i..].starts_with(word) {
+        // compared as bytes: `i` may be inside a character (`'€'`); a match starts at a whole one
+        if bytes[i..].starts_with(word.as_bytes()) && text.is_char_boundary(i) {
             let before_ok = i == 0 || !is_ident_char(text[..i].chars().next_back().unwrap());
             let after_ok = !text[i + word.len()..].starts_with(|ch: char| is_ident_char(ch));
             if before_ok && after_ok {

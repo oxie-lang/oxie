@@ -449,6 +449,23 @@ pub fn esc(name: &str) -> String {
     }
 }
 
+/// An `impl Trait` result (an iterator, a lambda) with `+ '_` when the function borrows one
+/// value (`&self`, or its only reference parameter), which Rust 2021 doesn't let the result keep
+/// using without saying so (`fun lens(xs: &[String]): impl Iterator<Item = usize>`).
+fn captures_borrow(ret: String, f: &FunDecl, self_ref: bool) -> String {
+    let returns_impl = matches!(f.ret, Some(Type::Impl(_)) | Some(Type::Fn { .. })) && matches!(f.throws, Throws::No);
+    // a result that says what it captures (a lifetime, `use<..>`) keeps it
+    if !returns_impl || !ret.starts_with("impl ") || ret.contains('\'') || ret.contains("use<") {
+        return ret;
+    }
+    let ref_params = f.params.iter().filter(|p| matches!(p.ty, Type::Ref { lifetime: None, .. })).count();
+    if self_ref || ref_params == 1 {
+        format!("{} + '_", ret)
+    } else {
+        ret
+    }
+}
+
 /// Does a lambda the function returns (as its value or with `return`) change a variable it
 /// captures?
 fn returns_changing_lambda(f: &FunDecl) -> bool {
@@ -2190,7 +2207,7 @@ impl<'a> Lowerer<'a> {
         let g = self.generics_decl(&f.generics);
         self.push_scope();
         let params = self.params_parts(f, None);
-        let ret = self.ret_type(f, TyPos::Ret);
+        let ret = self.ret_type(f, TyPos::Ret).map(|r| captures_borrow(r, f, false));
         let wc = self.where_clause(&f.generics);
         self.w_named(&format!("{}{}fn ", vis, header), f.name_span, &name, &g);
         self.write_params(f, &params, None);
@@ -2305,6 +2322,8 @@ impl<'a> Lowerer<'a> {
             Some(SelfParam::Typed(t)) => format!("self: {}", self.ty(t, TyPos::Plain)),
             Some(SelfParam::TypedMut(t)) => format!("mut self: {}", self.ty(t, TyPos::Plain)),
             _ if f.mods.is_mut => "&mut self".into(),
+            // a number, `bool` or `char` is passed by value, so `this > 0` compares values
+            _ if recv_ty.single_name().is_some_and(|n| PRIMITIVES.contains(&n) && n != "str") => "self".into(),
             _ => "&self".into(),
         };
         let g = self.generics_decl(&f.generics);
@@ -2312,8 +2331,9 @@ impl<'a> Lowerer<'a> {
         let wc = self.where_clause(&f.generics);
         let header = self.fn_header(f);
         self.push_scope();
+        let self_ref = recv.starts_with('&');
         let params = self.params_text(f, Some(recv));
-        let ret = self.ret_type(f, TyPos::Ret);
+        let ret = self.ret_type(f, TyPos::Ret).map(|r| captures_borrow(r, f, self_ref));
         let sig = format!(
             "{}fn {}({}){}",
             header,
@@ -2417,8 +2437,9 @@ impl<'a> Lowerer<'a> {
         let iface_sig = self.in_trait_items || f.mods.is_override || self.class.as_ref().is_some_and(|c| c.trait_methods.as_ref().is_some_and(|t| t.contains(&f.name)));
         let saved_sig = std::mem::replace(&mut self.iface_sig, iface_sig);
         self.push_scope();
+        let self_ref = recv_text.as_deref().is_some_and(|r| r.starts_with('&'));
         let params = self.params_parts(f, recv_text);
-        let ret = self.ret_type(f, TyPos::Ret);
+        let ret = self.ret_type(f, TyPos::Ret).map(|r| if iface_sig { r } else { captures_borrow(r, f, self_ref) });
         let wc = self.where_clause(&f.generics);
         let name = rename.map(|s| s.to_string()).unwrap_or_else(|| esc(&f.name));
         // a shared class's method that passes `this` on gets the handle
@@ -2874,6 +2895,25 @@ impl<'a> Lowerer<'a> {
             self.bind_name(&f.name, Some(f.ty.clone()));
         }
         let saved = self.class.take();
+        // a lambda a body property keeps (`var on_click = { "clicked $label" }`) owns what it
+        // uses, so it can't use a parameter the object keeps too, unless it takes a copy
+        let copy_types: HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
+        for (f, _) in fields.iter().filter(|(f, _)| !f.in_ctor) {
+            let Some(d @ Expr { kind: ExprKind::Lambda { is_move: false, params, .. }, .. }) = &f.default else { continue };
+            let mut own = Vec::new();
+            for p in params {
+                p.pat.bindings(&mut own);
+            }
+            let mut ids = Vec::new();
+            visit::idents_in(d, &mut ids);
+            let kept = fields.iter().find(|(p, ty)| p.in_ctor && ids.contains(&p.name) && !own.contains(&p.name) && !sema::is_copy_simple(ty, &copy_types));
+            if let Some((p, _)) = kept {
+                self.diags.push(
+                    Diag::error(d.span, format!("the lambda of `{}` uses `{}`, which the object keeps too, and a stored lambda owns what it uses", f.name, p.name))
+                        .with_help(format!("give the lambda its own copy with a capture list: `{{ [{}] -> ... }}`", p.name)),
+                );
+            }
+        }
         let mut as_locals = HashSet::new();
         if computed_first {
             for (f, ty) in fields.iter().filter(|(f, _)| !f.in_ctor && f.attrs.is_empty()) {

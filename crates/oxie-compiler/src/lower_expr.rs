@@ -1221,7 +1221,8 @@ impl<'a> Lowerer<'a> {
             // `rust { a(); }` and `rust { fn helper() {} }` are complete statements: another `;`
             // would be an empty statement, which rustc warns about
             ExprKind::Raw(s) => {
-                self.expr(e, P_LOWEST);
+                let text = self.include_paths(s.trim());
+                self.e.raw_lines(&text);
                 raw_ends_statement(s)
             }
             ExprKind::Assign(None, target, value) if self.map_entry_types(target).is_some() => {
@@ -2486,8 +2487,10 @@ impl<'a> Lowerer<'a> {
                     Some(o) => self.e.w(&format!(" {}= ", o.as_str())),
                     None => self.e.w(" = "),
                 }
+                // a value stored in a field (a lambda there outlives this code: `move`)
+                let pos = if matches!(target.kind, Field { .. }) { TyPos::Field } else { TyPos::Local };
                 match (op, target_ty) {
-                    (None, Some(t)) => self.coerce(value, &t, TyPos::Local),
+                    (None, Some(t)) => self.coerce(value, &t, pos),
                     // String += "...$x": append a borrowed str
                     (Some(BinOp::Add), _)
                         if matches!(value.kind, Template(_)) || (matches!(value.kind, Binary(BinOp::Add, ..)) && self.is_string_concat(value)) || (self.is_owned_string(value) && self.is_owned_string(target)) =>
@@ -2988,7 +2991,14 @@ impl<'a> Lowerer<'a> {
             }
             Raw(s) => {
                 let s = self.include_paths(s.trim());
-                self.e.raw_lines(&s);
+                // statements before the value (`rust { let x = 41; x + 1 }`) need a block
+                if has_top_level_semicolon(&s) {
+                    self.e.w("{ ");
+                    self.e.raw_lines(&s);
+                    self.e.w(" }");
+                } else {
+                    self.e.raw_lines(&s);
+                }
             }
             Error => self.e.w("()"),
         }
@@ -4525,12 +4535,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             VariantShape::Tuple(types) => {
-                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false }).collect();
+                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false, stored: false }).collect();
                 self.e.w(path);
                 self.arg_list(args, Some(&params), TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
-                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false }).collect();
+                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false, stored: false }).collect();
                 let (slots, written) = self.fill_args(args, &params, None, span);
                 self.e.w(&format!("{} {{ ", path));
                 // in the order the call writes them, which is the order they run in
@@ -4675,6 +4685,10 @@ impl<'a> Lowerer<'a> {
 
     /// One argument for the parameter `p`: lent or converted as the parameter needs.
     fn emit_arg(&mut self, p: &ParamInfo, a: &Expr, pos: TyPos) {
+        // a lambda the callee stores outlives this call
+        if p.stored && matches!(a.kind, ExprKind::Lambda { .. }) {
+            self.next_lambda_moves = true;
+        }
         // a lambda can't be annotated with the callee's type parameters: Rust infers those
         // (`|it: _|`), and a stored one is still boxed
         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
@@ -4886,7 +4900,7 @@ impl<'a> Lowerer<'a> {
             if self.this_recv.is_none() {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
-            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false });
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false, stored: false });
             args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span), trailing: false });
         }
         (args, params)
@@ -5357,7 +5371,8 @@ impl<'a> Lowerer<'a> {
         let value = match p {
             Pat::Or(ps) => return Pat::Or(ps.iter().map(|p| self.some_pat(p, inner)).collect()),
             Pat::Lit(_) | Pat::Range { .. } | Pat::Struct { .. } | Pat::Tuple(_) | Pat::Slice(_) => true,
-            Pat::Path(path, _) => path.last().is_some_and(|n| n != "None"),
+            // `None` is the optional's own, `Level.None` a case of the value's enum
+            Pat::Path(path, _) => path.last().is_some_and(|n| n != "None") || path.len() > 1 && path[path.len() - 2] != "Option",
             Pat::TupleStruct { path, .. } => path.last().is_some_and(|n| n != "Some" && n != "None"),
             Pat::Ident { name, sub: None, .. } => variant(name),
             _ => false,
@@ -5861,8 +5876,10 @@ impl<'a> Lowerer<'a> {
             // a shared object's field is read through its getter (a copy) at the end
             let getter = matches!(&seg.last().unwrap().kind, ExprKind::Field { recv, name, .. } if self.optional_shared_field(recv, name).is_some());
             let ends_in_field = matches!(seg.last().unwrap().kind, ExprKind::Field { .. } | ExprKind::Index(..)) && !getter;
-            // a field read through a reference is borrowed (`&v.name`), like Kotlin's reference semantics
-            let amp = borrowed && !flatten && ends_in_field;
+            // a field read through a reference is borrowed (`&v.name`), like Kotlin's reference
+            // semantics; not one of a call's result (`v.borrow().value`), which is gone after it
+            let through_call = seg[..seg.len() - 1].iter().any(|l| matches!(l.kind, ExprKind::MethodCall { .. }));
+            let amp = borrowed && !flatten && ends_in_field && !through_call;
             self.e.w(&format!(".{}(|{}| {}{}", method, v, if amp { "&" } else { "" }, v));
             self.push_scope();
             self.bind_name(&v, value.filter(|t| *t != Type::Infer));
@@ -7463,6 +7480,30 @@ fn strip_paren(e: &Expr) -> &Expr {
 }
 
 /// The range an `in` checks: `10 downTo 0` is `(0..=10).rev()`, which holds the same numbers.
+/// Does Rust text have a `;` outside brackets and strings (statements, not just a value)?
+fn has_top_level_semicolon(s: &str) -> bool {
+    let (mut depth, mut in_str, mut escaped) = (0i32, false, false);
+    for c in s.chars() {
+        if in_str {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ';' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// `a downTo b`, which is `(b..=a).rev()`: written from its end.
 fn is_down(e: &Expr) -> bool {
     matches!(&strip_paren(e).kind, ExprKind::MethodCall { name, args, safe: false, .. } if name == "rev" && args.is_empty())
@@ -7607,7 +7648,7 @@ fn through_type(m: &crate::sema::MethodInfo, args: &[Arg]) -> Vec<ParamInfo> {
     let mut params = m.params.clone();
     // contexts may be passed too (`MarkdownPreview.path(self, cx)`)
     if m.recv != Recv::Static && (positional == params.iter().filter(|p| p.context.is_none()).count() + 1 || positional == params.len() + 1) {
-        params.insert(0, ParamInfo { name: Some("self".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false });
+        params.insert(0, ParamInfo { name: Some("self".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false, stored: false });
     }
     params
 }

@@ -30,6 +30,9 @@ pub struct ParamInfo {
     pub lent: bool,
     /// Exists only in some builds (`@cfg(feature = "x") p: T`): a call may leave it out.
     pub cfg: bool,
+    /// A function the callee stores (in a field or a collection): a lambda passed for it must
+    /// own what it uses (`move`).
+    pub stored: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -99,7 +102,7 @@ impl ClassInfo {
         self.fields
             .iter()
             .filter(|f| f.in_ctor)
-            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: self.type_names.clone(), boxed: false, lent: false, cfg: false })
+            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: self.type_names.clone(), boxed: false, lent: false, cfg: false, stored: false })
             .collect()
     }
 }
@@ -1368,7 +1371,7 @@ pub fn params_info(f: &FunDecl) -> Vec<ParamInfo> {
         .collect();
     f.params
         .iter()
-        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), boxed: false, lent: p.lent, cfg: p.attrs.iter().any(|a| a.starts_with("cfg(")) })
+        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), boxed: false, lent: p.lent, cfg: p.attrs.iter().any(|a| a.starts_with("cfg(")), stored: p.name().is_some_and(|n| matches!(p.ty, Type::Fn { .. }) && f.body.as_ref().is_some_and(|b| crate::visit::stores_ident(b, n))) })
         .collect()
 }
 
