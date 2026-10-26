@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased
+
+`oxie from-rust` now translates all the Rust it was tested on into Oxie: in 82 crates with
+789,000 lines (serde, syn, clap, futures, rand, regex-syntax, the Kuana editor, Oxie's own
+compiler, ...) it keeps no item or expression in a `rust { }` block, where 0.4.1 kept 1,510 of
+them (58,700 lines). Oxie gained the Rust forms that needed, and fixes for what translating that
+code turned up.
+
+### Changes
+
+* Rust's slice can be named where `[T]` is a list: `slice<T>` (`Mutex<slice<u8>>`,
+  `struct Bytes(slice<u8>)`).
+* Attributes go before parameters, arguments, elements, lambdas and the fields of struct
+  literals and enum cases: `fun open(path: &str, @cfg(unix) mode: u32)`, `vec[1, @cfg(test) 2]`,
+  `fold(0, @inline(always) { acc, x -> acc + x })`, `Fd { @cfg(unix) raw: 3 }`. A call made in the
+  builds without a `@cfg` parameter leaves its argument out, and a method declared once per
+  configuration (`@cfg(windows) fun new(c, console)` beside `@cfg(not(windows)) fun new(c)`) takes
+  either call. The statements a block ends with may carry `@cfg` attributes: the one the build
+  keeps is the block's value (`@cfg(unix) run { .. }` then `@cfg(not(unix)) run { .. }`).
+* Function pointer types take Oxie's types and may name their parameters:
+  `fn(&Field, i32?) -> bool`, `unsafe extern "C" fn(i32) -> i32`, `for<'a> fn(&'a str) -> &'a str`.
+* A method can be called through its type with the receiver first (`Counter.get(c)`), and a
+  function named like a class (`fun SplitSink(lock): SplitSink`) is what `SplitSink(..)` calls.
+* A class that implements an interface's `new` (`impl Make for Pair { fun new(n: i32): Pair }`)
+  gets no generated constructor, which hid it.
+* More of Rust is accepted as written: `mut self: Box<Self>`, `&raw const x` and `&raw mut x`,
+  `extern crate`, `unsafe extern "C" { }` blocks and `extern` blocks, `static var` and
+  `macro_rules!` inside functions, macros among a class's or interface's members, type and pattern
+  macros (`Token![,]`), `for<'a>` bounds in `where` clauses and supertypes, `Vec<<T as Tr>::A>`
+  and `f::<<T as Tr>::A>()`, `pub ()` fields, `self::NAME`, `ref s @ ..` and `1..=LIMIT` patterns,
+  struct literals of lowercase types (`libc::timeval { tv_sec: 1 }`), `AssertUnwindSafe { .. }` and
+  other trailing lambdas after a capitalized name, `#![..]` before a file's `//!` docs, and
+  fill characters in format specs (`"${n: >5}"`, `"${n:*^7}"`).
+
+### Fixes
+
+* A string literal that spans lines inside a macro call, a `rust { }` block or an `r"..."` string
+  kept the generated code's indentation on its later lines, which changed the string.
+* Attributes on a function's parameters, and on the named fields of an enum case, were dropped.
+* `return !done` in a function body was read as the start of a macro definition.
+* A name a block imports (`import super::escape` inside a test named `escape`) now hides the
+  module's function of that name, and `ser.SerializeMap` after `import serde::ser` is serde's,
+  not a class of the crate with that name. A type or function imported into a module from
+  elsewhere in the crate is the one a call there means, also when another module declares the
+  same name.
+* `Name { 1 }` is a lambda, not a struct literal; a type parameter's default (`T = i32`) no longer
+  goes into the class's `impl`; `name! { .. }` macros print with a space, and an item-declaring
+  one (`thread_local!`) without a `;`.
+* `oxie from-rust`: calls of macros whose name a method or function takes (`write!` in a type
+  with a `write` method) keep their `!`; a module function called from a method of the same
+  name is called as `self::name(..)`; a closure that captures a variable named `it` stays
+  `|| ..`; a `#![..]` inside a `match` becomes an attribute of the statement; inner docs of an
+  inline module become its doc comment; `matches!(..)` before a method call gets parentheses;
+  types with an interface's `new` stay structs; one TODO line per reason above methods kept as
+  Rust; it no longer crashes on items `prettyplease` can't print (`safe fn` in an `unsafe extern`
+  block).
+
 ## 0.4.1 - 2026-10-26
 
 Fixes for the tools around the compiler; the language is unchanged. Projects on `oxie-build`

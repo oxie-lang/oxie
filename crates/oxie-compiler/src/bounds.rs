@@ -96,13 +96,13 @@ pub fn with_inferred_bounds(f: &FunDecl, outer: &[GenericParam], fields: &[(Stri
             .filter(|(n, _)| *n == t)
             .flat_map(|(_, b)| b.iter().filter_map(|b| b.last_name().map(|s| s.to_string())))
             .chain(f.generics.where_clause.iter().filter_map(|w| match w {
-                WherePred::Type { ty, bounds } if ty.single_name() == Some(t.as_str()) => Some(bounds.iter().filter_map(|b| b.last_name().map(|s| s.to_string())).collect::<Vec<_>>()),
+                WherePred::Type { ty, bounds, hrtb: None } if ty.single_name() == Some(t.as_str()) => Some(bounds.iter().filter_map(|b| b.last_name().map(|s| s.to_string())).collect::<Vec<_>>()),
                 _ => None,
             }).flatten())
             .collect();
         let new: Vec<Type> = bounds.into_iter().filter(|(name, _)| !implied(name, &declared)).map(|(_, ty)| ty).collect();
         if !new.is_empty() {
-            out.generics.where_clause.push(WherePred::Type { ty: Type::simple(&t), bounds: new });
+            out.generics.where_clause.push(WherePred::Type { ty: Type::simple(&t), bounds: new, hrtb: None });
         }
     }
     out
@@ -476,7 +476,7 @@ mod tests {
             .where_clause
             .iter()
             .map(|w| match w {
-                WherePred::Type { ty, bounds } => format!("{}: {}", ty.single_name().unwrap(), bounds.iter().map(|b| b.last_name().unwrap().to_string()).collect::<Vec<_>>().join(" + ")),
+                WherePred::Type { ty, bounds, .. } => format!("{}: {}", ty.single_name().unwrap(), bounds.iter().map(|b| b.last_name().unwrap().to_string()).collect::<Vec<_>>().join(" + ")),
                 _ => String::new(),
             })
             .collect::<Vec<_>>()

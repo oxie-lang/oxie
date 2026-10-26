@@ -28,6 +28,8 @@ pub struct ParamInfo {
     pub boxed: bool,
     /// Lent by Oxie (`Param::lent`): every argument that isn't a reference is lent.
     pub lent: bool,
+    /// Exists only in some builds (`@cfg(feature = "x") p: T`): a call may leave it out.
+    pub cfg: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -93,7 +95,7 @@ impl ClassInfo {
         self.fields
             .iter()
             .filter(|f| f.in_ctor)
-            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new(), boxed: false, lent: false })
+            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false })
             .collect()
     }
 }
@@ -177,6 +179,8 @@ pub struct Crate {
     pub globs: HashMap<Vec<String>, Vec<Vec<String>>>,
     /// Top-level module names (children of the crate root).
     pub modules: HashSet<String>,
+    /// The names of the modules declared in a file (`mod b { .. }`), at any depth.
+    pub inline_modules: HashSet<String>,
     /// The path of every module that has an .oxi file.
     pub module_paths: HashSet<Vec<String>>,
     /// External crate names from Cargo.toml.
@@ -196,6 +200,9 @@ pub struct Crate {
     pub nested: HashMap<String, Vec<String>>,
     /// Declared type names in all capitals (`class DB`, `enum HTTP`), which don't look like types.
     pub caps_types: HashSet<String>,
+    /// Statics and constants whose names look like types (`static N`, also declared in a
+    /// `thread_local!` or `lazy_static!` call): `N.with { }` reads the value, not a type's member.
+    pub value_names: HashSet<String>,
 }
 
 /// What `Crate` keys by module when several modules declare a name.
@@ -278,7 +285,8 @@ impl Crate {
         if self.leaves_crate(path, module) || path.len() == 1 && self.imported_from_outside(name, module) {
             return None;
         }
-        if !self.same_named.contains(name) {
+        // `crate.ser.ValueSerializer` isn't the `ValueSerializer` of another module
+        if !self.same_named.contains(name) && (path.len() == 1 || self.type_key_at(path, module).is_some()) {
             return self.class(name);
         }
         self.classes.get(&self.type_key_at(path, module)?)
@@ -288,7 +296,7 @@ impl Crate {
         if self.leaves_crate(path, module) || path.len() == 1 && self.imported_from_outside(name, module) {
             return None;
         }
-        if !self.same_named.contains(name) {
+        if !self.same_named.contains(name) && (path.len() == 1 || self.type_key_at(path, module).is_some()) {
             return self.enum_(name);
         }
         self.enums.get(&self.type_key_at(path, module)?)
@@ -297,13 +305,31 @@ impl Crate {
     /// names none of this crate's types, whatever their names.
     pub fn leaves_crate(&self, path: &[String], module: &[String]) -> bool {
         let Some(first) = path.first().filter(|_| path.len() > 1) else { return false };
+        // `ser.SerializeMap` after `import serde::ser`
+        if let Some(p) = self.imports.get(&(module.to_vec(), first.clone())) {
+            let inside = p.first().is_some_and(|f| matches!(f.as_str(), "crate" | "self" | "super") || *f == self.crate_name || self.modules.contains(f));
+            return !inside;
+        }
         let other_crate = matches!(first.as_str(), "std" | "core" | "alloc") || self.extern_crates.contains(first);
-        other_crate && !self.modules.contains(first) && !self.imports.contains_key(&(module.to_vec(), first.clone()))
+        other_crate && !self.modules.contains(first)
     }
     /// Whether `module` imports `name` from another crate (`import alacritty_terminal::Selection`),
     /// so that the name means that one, not a type or function of this crate.
     fn imported_from_outside(&self, name: &str, module: &[String]) -> bool {
-        self.imports.get(&(module.to_vec(), name.to_string())).is_some_and(|p| self.leaves_crate(p, module))
+        self.imports.get(&(module.to_vec(), name.to_string())).is_some_and(|p| {
+            // `import proc_macro2.Group`: a path that starts at none of this crate's modules,
+            // types or imports starts at another crate
+            let first = p.first().map(String::as_str).unwrap_or_default();
+            let other = p.len() > 1
+                && !matches!(first, "crate" | "self" | "super" | "Self")
+                && first != self.crate_name
+                && !self.modules.contains(first)
+                && !self.inline_modules.contains(first)
+                && !self.module_paths.contains(&[module, &[first.to_string()]].concat())
+                && !self.is_user_type(first)
+                && !self.imports.contains_key(&(module.to_vec(), first.to_string()));
+            other || self.leaves_crate(p, module)
+        })
     }
     /// The key of the class or enum `name` declared in `module`.
     pub fn decl_key(&self, module: &[String], name: &str) -> String {
@@ -370,6 +396,10 @@ impl Crate {
             Space::Funs => &self.same_named_funs,
         };
         if !same.contains(name) {
+            // `import crate::rngs::thread::rng` names that function, not another `rng` of the crate
+            if let Some(path) = self.imports.get(&(module.to_vec(), name.to_string())).filter(|p| p.len() > 1) {
+                return self.key_at(space, path, module);
+            }
             return Some(name.to_string());
         }
         let key = scoped_key(module, name);
@@ -385,6 +415,10 @@ impl Crate {
         })
     }
     fn key_at(&self, space: Space, path: &[String], module: &[String]) -> Option<String> {
+        self.key_at_depth(space, path, module, 0)
+    }
+    /// `key_at`, following at most a few re-exports (`pub use`), which may go in circles.
+    fn key_at_depth(&self, space: Space, path: &[String], module: &[String], depth: usize) -> Option<String> {
         let (name, qual) = path.split_last()?;
         if qual.is_empty() {
             return self.key_in(space, name, module);
@@ -395,7 +429,20 @@ impl Crate {
             Space::Funs => &self.same_named_funs,
         };
         let key = if same.contains(name) { scoped_key(&target, name) } else { name.clone() };
-        (*self.module_of(space, &key)? == target).then_some(key)
+        if self.module_of(space, &key).is_some_and(|m| *m == target) {
+            return Some(key);
+        }
+        // `crate.ser.ValueSerializer` after `pub use value::ValueSerializer` (or `value::*`) in `ser`
+        if target.as_slice() == module || depth > 4 {
+            return None;
+        }
+        if let Some(via) = self.imports.get(&(target.clone(), name.clone())).filter(|p| p.len() > 1) {
+            return self.key_at_depth(space, via, &target, depth + 1);
+        }
+        self.globs.get(&target).into_iter().flatten().filter(|g| !g.is_empty()).find_map(|glob| {
+            let path: Vec<String> = glob.iter().cloned().chain([name.clone()]).collect();
+            self.key_at_depth(space, &path, &target, depth + 1)
+        })
     }
     /// The module a path written in `module` leads to, as the generated Rust resolves it: from
     /// `crate`, `self` or `super`, from the crate root for a top-level module (`join_path` adds
@@ -576,12 +623,42 @@ fn collect_caps_types(k: &mut Crate, items: &[Item]) {
                 collect_caps_types(k, items);
                 continue;
             }
+            ItemKind::Const(c) | ItemKind::Static(c) => {
+                if is_type_like(&c.name) {
+                    k.value_names.insert(c.name.clone());
+                }
+                continue;
+            }
+            ItemKind::Macro(text) => {
+                k.value_names.extend(macro_statics(text).into_iter().filter(|n| is_type_like(n)));
+                continue;
+            }
             _ => continue,
         };
         if !is_type_like(name) && name.starts_with(|c: char| c.is_uppercase()) {
             k.caps_types.insert(name.clone());
         }
     }
+}
+
+/// The statics an item macro declares: `thread_local! { static N: Cell<i32> = .. }`,
+/// `lazy_static! { static ref CONFIG: Config = .. }`.
+pub fn macro_statics(text: &str) -> Vec<String> {
+    let head = text.trim_start().split('!').next().unwrap_or("").trim();
+    if !matches!(head.rsplit("::").next(), Some("thread_local" | "lazy_static")) {
+        return Vec::new();
+    }
+    let words: Vec<&str> = text.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect();
+    let mut out = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        if *w == "static" {
+            let name = if words.get(i + 1) == Some(&"ref") { words.get(i + 2) } else { words.get(i + 1) };
+            if let Some(n) = name {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// The names of the types, interfaces and functions `items` declare, in modules too.
@@ -991,7 +1068,7 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
                         ItemKind::Fun(f) => {
                             let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
                             mi.iface = true;
-                            methods.insert(f.name.clone(), mi);
+                            add_method(&mut methods, &f.name, mi);
                         }
                         ItemKind::TypeAlias { name, .. } => assoc.push(name.clone()),
                         _ => {}
@@ -1275,8 +1352,25 @@ pub fn params_info(f: &FunDecl) -> Vec<ParamInfo> {
         .collect();
     f.params
         .iter()
-        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), boxed: false, lent: p.lent })
+        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), boxed: false, lent: p.lent, cfg: p.attrs.iter().any(|a| a.starts_with("cfg(")) })
         .collect()
+}
+
+/// Adds a method; one declared again (`@cfg(windows) fun new(c, console)` beside
+/// `@cfg(not(windows)) fun new(c)`) keeps the first, taking the parameters only some versions
+/// have as ones a call may leave out.
+fn add_method(methods: &mut HashMap<String, MethodInfo>, name: &str, mi: MethodInfo) {
+    let Some(old) = methods.get_mut(name) else {
+        methods.insert(name.to_string(), mi);
+        return;
+    };
+    let common = old.params.len().min(mi.params.len());
+    if mi.params.len() > common {
+        old.params.extend(mi.params[common..].iter().cloned());
+    }
+    for p in &mut old.params[common..] {
+        p.cfg = true;
+    }
 }
 
 fn default_mi(f: &FunDecl) -> MethodInfo {
@@ -1292,7 +1386,7 @@ fn method_info_explicit(f: &FunDecl, trait_recv: Option<Recv>) -> Option<MethodI
         Some(SelfParam::RefMut) => Some(Recv::RefMut),
         Some(SelfParam::Typed(Type::Ref { mutable: true, .. })) => Some(Recv::RefMut),
         Some(SelfParam::Typed(Type::Ref { mutable: false, .. })) => Some(Recv::Ref),
-        Some(SelfParam::Value { .. }) | Some(SelfParam::Typed(_)) => Some(Recv::Value),
+        Some(SelfParam::Value { .. }) | Some(SelfParam::Typed(_)) | Some(SelfParam::TypedMut(_)) => Some(Recv::Value),
         None if f.mods.is_static => Some(Recv::Static),
         None if f.mods.is_mut => Some(Recv::RefMut),
         None if trait_recv.is_some() => trait_recv,
@@ -1371,7 +1465,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                             }
                             let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
                             mi.iface = implements_method(k, f, &t.supertypes);
-                            methods.insert(f.name.clone(), mi);
+                            add_method(&mut methods, &f.name, mi);
                         }
                     }
                     let info = ClassInfo {
@@ -1415,7 +1509,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         if let ItemKind::Fun(f) = &m.kind {
                             let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
                             mi.iface = implements_method(k, f, &t.supertypes);
-                            methods.insert(f.name.clone(), mi);
+                            add_method(&mut methods, &f.name, mi);
                         }
                     }
                     let info = EnumInfo {
@@ -1438,6 +1532,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
             },
             ItemKind::Import(decl) => collect_import(k, module, &[], &decl.tree),
             ItemKind::Mod { name, items } => {
+                k.inline_modules.insert(name.clone());
                 let mut m = module.to_vec();
                 m.push(name.clone());
                 collect_items(k, &m, items);
@@ -1501,12 +1596,14 @@ fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
                         let mut mi = method_info_explicit(f, trecv).unwrap_or_else(|| default_mi(f));
                         mi.iface = imp.trait_.is_some();
                         if let Some(c) = k.classes.get_mut(&owner) {
-                            if f.name == "new" && imp.trait_.is_none() {
+                            // an interface's `new` (`impl Watcher for FsEventWatcher { fun new(..) }`)
+                            // too: a generated constructor would hide it
+                            if f.name == "new" && (imp.trait_.is_none() || mi.recv == Recv::Static) {
                                 c.user_new = true;
                             }
-                            c.methods.entry(f.name.clone()).or_insert(mi);
+                            add_method(&mut c.methods, &f.name, mi);
                         } else if let Some(e) = k.enums.get_mut(&owner) {
-                            e.methods.entry(f.name.clone()).or_insert(mi);
+                            add_method(&mut e.methods, &f.name, mi);
                         }
                     }
                 }

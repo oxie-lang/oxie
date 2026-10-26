@@ -1,0 +1,17 @@
+// Function pointer types take Oxie types (`i32?`, `[T]`) and may name their parameters.
+class Field(name: String)
+
+fun keep(f: &Field, v: &i32?): bool = v.is_some() && f.name.len() > 0
+
+fun apply(filter: fn(&Field, &i32?) -> bool, f: &Field): bool = filter(f, Some(&1))
+
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+
+fun main() {
+    val count: fn(words: &[i32]) -> usize = { w -> w.len() }
+    val c: unsafe extern "C" fn(i32) -> i32 = abs
+    val same: for<'a> fn(&'a str) -> &'a str = { s -> s }
+    println("${apply(keep, &Field("x"))} ${count(&[1, 2])} ${unsafe { c(-4) }} ${same("y")}")
+}

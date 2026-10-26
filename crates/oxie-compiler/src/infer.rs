@@ -131,12 +131,13 @@ impl<'a> Lowerer<'a> {
             Unary(UnOp::Neg, x) | Unary(UnOp::Not, x) => self.infer_type(x),
             Unary(UnOp::Ref, x) => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(self.infer_type(x).unwrap_or(Type::Infer)) }),
             Unary(UnOp::RefMut, x) => Some(Type::Ref { lifetime: None, mutable: true, inner: Box::new(self.infer_type(x).unwrap_or(Type::Infer)) }),
+            Unary(op @ (UnOp::RawConst | UnOp::RawMut), x) => Some(Type::Ptr { mutable: *op == UnOp::RawMut, inner: Box::new(self.infer_type(x).unwrap_or(Type::Infer)) }),
             Unary(UnOp::Deref, x) => match self.infer_type(x)? {
                 Type::Ref { inner, .. } => Some(*inner),
                 _ => None,
             },
             Cast(_, t) => Some(t.clone()),
-            Paren(x) => self.infer_type(x),
+            Paren(x) | Attributed { expr: x, .. } => self.infer_type(x),
             // `a ?: return`: `a`'s value
             Elvis(l, r) if r.diverges() => match self.infer_type(l)? {
                 Type::Option(t) => Some(*t).filter(|t| *t != Type::Infer),

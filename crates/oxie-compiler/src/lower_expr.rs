@@ -440,6 +440,20 @@ impl<'a> Lowerer<'a> {
             },
             None => None,
         };
+        // `@cfg(a) run { x }` then `@cfg(b) run { y }` at the end: the configuration keeps one, which
+        // is the block's value, so each is lowered as the value. Before the last, Rust takes only
+        // blocks (`{ }`, `if`, `match`) without a `;`, so a `@cfg(a) return x` stays a statement
+        let attributed_value = |s: &Stmt, block: bool| matches!(s, Stmt::Attributed { stmt, .. } if matches!(&**stmt, Stmt::Expr { semi: false, expr } if !block || ((expr.is_block_like() || self.run_body(expr).is_some()) && !matches!(expr.kind, ExprKind::Return(_)))));
+        let tail_from = match tail {
+            Some(_) if stmts.last().is_some_and(|s| attributed_value(s, false)) => {
+                let mut i = stmts.len() - 1;
+                while i > 0 && attributed_value(&stmts[i - 1], true) {
+                    i -= 1;
+                }
+                i
+            }
+            _ => stmts.len(),
+        };
         // a function declared in the block can be called anywhere in it, and so can what it imports
         let outer_funs = self.local_funs.len();
         let outer_imports = self.local_imports.len();
@@ -458,6 +472,24 @@ impl<'a> Lowerer<'a> {
                 if let Stmt::Expr { expr, .. } = s {
                     self.e.mark(expr.span);
                     self.tail_moving_args(expr, tail.unwrap());
+                }
+            } else if let (true, Stmt::Attributed { attrs, stmt }) = (i >= tail_from, s) {
+                for a in attrs {
+                    self.e.w(&format!("#[{}]", a));
+                    self.e.nl();
+                }
+                if let Stmt::Expr { expr, .. } = &**stmt {
+                    self.e.mark(expr.span);
+                    // Rust takes an attribute before a block's value only when that is a block
+                    // (`#[cfg(unix)] { a + b }`), or a literal or a name
+                    let braces = !expr.is_block_like() && self.run_body(expr).is_none() && !matches!(expr.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Str(_) | ExprKind::Path { .. } | ExprKind::Return(_));
+                    if braces {
+                        self.e.w("{ ");
+                    }
+                    self.tail_moving_args(expr, tail.unwrap());
+                    if braces {
+                        self.e.w(" }");
+                    }
                 }
             } else if let Some(s) = appended_text_var(s, &stmts[i + 1..]).or_else(|| unchanged_parts(s, &stmts[i + 1..])) {
                 self.stmt(&s);
@@ -497,6 +529,12 @@ impl<'a> Lowerer<'a> {
                 self.let_stmt(pat, ty.as_ref(), init.as_ref(), else_.as_ref());
             }
             Stmt::Expr { expr, semi } => {
+                // `thread_local! { static N: .. }` in a function: `N` is a value in the rest of it
+                if let ExprKind::Macro { path, text } = &expr.kind {
+                    for n in crate::sema::macro_statics(&format!("{}!{}", path, text)) {
+                        self.bind_name(&n, None);
+                    }
+                }
                 if let Some((e, bound)) = self.move_args_changing_this(expr, &[]) {
                     self.stmt(&Stmt::Expr { expr: e, semi: *semi });
                     self.unbind_moved(bound);
@@ -515,6 +553,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Stmt::Item(b) => {
+                // the statics a local `thread_local!` declares are values in the rest of the block
+                if let ItemKind::Macro(text) = &b.0.kind {
+                    for n in crate::sema::macro_statics(text) {
+                        self.bind_name(&n, None);
+                    }
+                }
                 self.item(&b.0, ItemCtx::Local);
             }
             Stmt::Attributed { attrs, stmt } => {
@@ -533,6 +577,10 @@ impl<'a> Lowerer<'a> {
         let fields = self.data_class_destructuring(pat, ty.cloned().or_else(|| init.and_then(|e| self.infer_type(e))));
         let pat = fields.as_ref().unwrap_or(pat);
         let mut p = self.pat(pat);
+        // `let (Ok(i) | Err(i)) = r`: Rust takes an or-pattern in a `let` only in parentheses
+        if matches!(pat, Pat::Or(_)) {
+            p = format!("({})", p);
+        }
         // closures that assign to captured variables or change them are FnMut and must be
         // `let mut` to be called
         if let (Some(Expr { kind: ExprKind::Lambda { body, params, .. }, .. }), Pat::Ident { mutable: false, .. }) = (init, pat) {
@@ -1090,6 +1138,11 @@ impl<'a> Lowerer<'a> {
                 false
             }
             ExprKind::Paren(x) => self.stmt_expr_here(x),
+            // `thread_local! { static N: .. }` declares items: no `;` after it
+            ExprKind::Macro { path, text } if text.starts_with('{') && !crate::sema::macro_statics(&format!("{}!{}", path, text)).is_empty() => {
+                self.expr(e, P_LOWEST);
+                true
+            }
             // `rust { a(); }` and `rust { fn helper() {} }` are complete statements: another `;`
             // would be an empty statement, which rustc warns about
             ExprKind::Raw(s) => {
@@ -1184,6 +1237,15 @@ impl<'a> Lowerer<'a> {
             ExprKind::If { cond, then, else_ } if else_.is_some() => self.if_expr(cond, then, else_.as_deref(), Some(t)),
             ExprKind::When { subject, binding, arms, rust_match } => self.when_with_binding(subject.as_deref(), binding.as_ref(), arms, *rust_match, Some(t), e.span),
             ExprKind::Block(b) => self.block_value(b, t),
+            // `run { .. }` is a block: its last expression is the value
+            _ if self.run_body(e).is_some() => match &self.run_body(e).unwrap().kind {
+                ExprKind::Block(b) => self.block_value(b, t),
+                _ => {
+                    self.e.w("{ ");
+                    self.tail(self.run_body(e).unwrap(), t);
+                    self.e.w(" }");
+                }
+            },
             ExprKind::LabeledBlock { label, block } if t.wrap.is_none() => {
                 self.e.w(&format!("'{}: ", label));
                 self.block_value(block, t);
@@ -1372,7 +1434,7 @@ impl<'a> Lowerer<'a> {
             },
             Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "String" && segs[0].generics.is_none() => match &e.kind {
                 ExprKind::Str(parts) => self.e.w(&format!("String::from(\"{}\")", crate::lower::lit_parts(parts))),
-                ExprKind::RawStr(s) => self.e.w(&format!("String::from({})", s)),
+                ExprKind::RawStr(s) => self.e.literal(&format!("String::from({})", s)),
                 // a `&str` where a `String` is expected is converted (identity when it already is one)
                 ExprKind::MethodCall { name, .. }
                     if pos != TyPos::Local
@@ -2113,7 +2175,8 @@ impl<'a> Lowerer<'a> {
             _ => {}
         }
         match &e.kind {
-            Int(s) | Float(s) | Char(s) | RawStr(s) => self.e.w(s),
+            Int(s) | Float(s) | Char(s) => self.e.w(s),
+            RawStr(s) => self.e.literal(s),
             Bool(b) => self.e.w(if *b { "true" } else { "false" }),
             Str(parts) => self.e.w(&format!("\"{}\"", crate::lower::lit_parts(parts))),
             Template(parts) => {
@@ -2137,7 +2200,28 @@ impl<'a> Lowerer<'a> {
                 self.e.w(&s);
             }
             QualifiedPath(t) => {
-                let s = self.ty(t, TyPos::Plain);
+                let s = match t {
+                    // in an expression, type arguments after the path take a turbofish:
+                    // `<T as Trait>::encode::<E>(..)`
+                    Type::Qualified { ty, trait_, rest } => {
+                        let mut s = format!("<{}", self.ty(ty, TyPos::Plain));
+                        if let Some(tr) = trait_ {
+                            s.push_str(" as ");
+                            s.push_str(&self.ty(tr, TyPos::Plain));
+                        }
+                        s.push('>');
+                        for seg in rest {
+                            s.push_str("::");
+                            s.push_str(&esc(&seg.name));
+                            if let Some(g) = &seg.generics {
+                                s.push_str("::");
+                                s.push_str(&self.generic_args_text(g));
+                            }
+                        }
+                        s
+                    }
+                    t => self.ty(t, TyPos::Plain),
+                };
                 self.e.w(&s);
             }
             // in a shared class's method that passes `this` on, `this` as a value is the handle
@@ -2153,6 +2237,8 @@ impl<'a> Lowerer<'a> {
                     UnOp::Deref => "*",
                     UnOp::Ref => "&",
                     UnOp::RefMut => "&mut ",
+                    UnOp::RawConst => "&raw const ",
+                    UnOp::RawMut => "&raw mut ",
                 };
                 self.e.w(s);
                 self.expr(x, P_UNARY);
@@ -2648,9 +2734,11 @@ impl<'a> Lowerer<'a> {
                     self.expr(x, P_RANGE + 1);
                 }
             }
-            StructLit { path, generics, fields, base } => self.struct_lit(path, generics.as_ref(), fields, base.as_deref()),
+            StructLit { path, generics, fields, base, field_attrs } => self.struct_lit(path, generics.as_ref(), fields, base.as_deref(), field_attrs),
             Macro { path, text } => {
-                let text = self.include_paths(&format!("{}!{}", path, text));
+                // `name! { .. }` with a space, as rustfmt writes it
+                let space = if text.starts_with('{') { " " } else { "" };
+                let text = self.include_paths(&format!("{}!{}{}", path, space, text));
                 self.e.raw_lines(&text);
             }
             TryCatch { body, catch } => {
@@ -2658,6 +2746,20 @@ impl<'a> Lowerer<'a> {
                 self.try_catch(body, catch.as_deref(), Some(&t));
             }
             Paren(x) => self.expr(x, P_LOWEST),
+            // Rust takes attributes before an argument or element, not before an operator's operand
+            Attributed { attrs, expr } => {
+                for a in attrs {
+                    self.e.w(&format!("#[{}] ", a));
+                }
+                let bare = self.prec_of(expr) >= P_UNARY || matches!(expr.kind, Lambda { .. });
+                if !bare {
+                    self.e.w("(");
+                }
+                self.expr(expr, P_LOWEST);
+                if !bare {
+                    self.e.w(")");
+                }
+            }
             Raw(s) => {
                 let s = self.include_paths(s.trim());
                 self.e.raw_lines(&s);
@@ -3468,6 +3570,10 @@ impl<'a> Lowerer<'a> {
                 if n == "Self" || crate::lower::PRIMITIVES.contains(&n.as_str()) {
                     return Some((segs.clone(), PathKind::Type));
                 }
+                // `static N` (or one a `thread_local!` declares): `N.with { }` reads the value
+                if self.k.value_names.contains(n) && !self.k.is_user_type(n) {
+                    return None;
+                }
                 // Kotlin's names of the number types: `Int.MAX` is `i32::MAX`
                 if let Some(a) = crate::lower::kotlin_alias(n).filter(|a| *a != "()" && !self.k.is_user_type(n)) {
                     return Some((vec![a.to_string()], PathKind::Type));
@@ -3584,6 +3690,14 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.class.as_ref().and_then(|c| c.fields.get(name).map(|t| callable(t, &c.generics))).unwrap_or(true)
+    }
+
+    /// The body of `run { .. }`, which lowers to a plain block.
+    fn run_body<'e>(&self, e: &'e Expr) -> Option<&'e Expr> {
+        let ExprKind::Call { callee, args } = &e.kind else { return None };
+        let [arg] = &args[..] else { return None };
+        let ExprKind::Lambda { params, body, .. } = &arg.value.kind else { return None };
+        (callee.ident() == Some("run") && params.is_empty() && self.is_builtin_call("run")).then_some(&**body)
     }
 
     pub(crate) fn is_builtin_call(&self, name: &str) -> bool {
@@ -3841,7 +3955,8 @@ impl<'a> Lowerer<'a> {
                         return;
                     }
                 }
-                if let Some(cls) = self.class_info(&name).cloned() {
+                // a function named like the class (`fun SplitSink(lock): SplitSink`) is what Rust calls
+                if let Some(cls) = self.class_info(&name).cloned().filter(|_| !self.k.fun_in_scope(&name, &self.module)) {
                     if !cls.is_tuple && !cls.is_union {
                         self.calls.insert(format!("{}::new", name));
                         let g = generics.as_ref().map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
@@ -3923,7 +4038,7 @@ impl<'a> Lowerer<'a> {
                 }
                 if let Some(m) = en.methods.get(last).cloned() {
                     self.e.w(&path);
-                    self.arg_list(args, Some(&m.params), TyPos::Param, span);
+                    self.arg_list(args, Some(&through_type(&m, args)), TyPos::Param, span);
                     return;
                 }
             }
@@ -3941,7 +4056,7 @@ impl<'a> Lowerer<'a> {
                 }
                 if let Some(m) = c.methods.get(last).cloned() {
                     self.e.w(&path);
-                    self.arg_list(args, Some(&m.params), TyPos::Param, span);
+                    self.arg_list(args, Some(&through_type(&m, args)), TyPos::Param, span);
                     return;
                 }
             }
@@ -3986,12 +4101,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             VariantShape::Tuple(types) => {
-                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false }).collect();
+                let params: Vec<ParamInfo> = types.iter().map(|t| ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false }).collect();
                 self.e.w(path);
                 self.arg_list(args, Some(&params), TyPos::Field, span);
             }
             VariantShape::Named(fields) => {
-                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false }).collect();
+                let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false }).collect();
                 let slots = self.fill_args(args, &params, span);
                 self.e.w(&format!("{} {{ ", path));
                 for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
@@ -4018,6 +4133,12 @@ impl<'a> Lowerer<'a> {
         let named = |p: &ParamInfo, n: &str| p.name.as_deref() == Some(n) || p.context.is_some() && p.name.as_deref().and_then(|x| x.strip_prefix('_')) == Some(n);
         // a trailing lambda goes to the last parameter, as in Kotlin, past any with defaults
         let last = params.iter().rposition(|p| p.context.is_none() && p.name.as_deref() != Some("__this"));
+        // a parameter that exists only in some builds (`@cfg(feature = "full") flag: bool`) is left
+        // out by a call with an argument less for each: the call is for the other builds
+        let positional = args.iter().filter(|a| a.name.is_none()).count();
+        let cfg_params = params.iter().filter(|p| p.cfg).count();
+        let skip_cfg = cfg_params > 0 && positional + cfg_params == params.iter().filter(|p| p.context.is_none()).count();
+        let skipped: Vec<bool> = params.iter().map(|p| skip_cfg && p.cfg).collect();
         for a in args {
             match &a.name {
                 Some(n) => match params.iter().position(|p| named(p, n)) {
@@ -4026,7 +4147,7 @@ impl<'a> Lowerer<'a> {
                 },
                 None if a.trailing && last.is_some_and(|i| i >= next && slots[i].is_none()) => slots[last.unwrap()] = Some(a.value.clone()),
                 None => {
-                    while next < slots.len() && slots[next].is_some() {
+                    while next < slots.len() && (slots[next].is_some() || skipped[next]) {
                         next += 1;
                     }
                     if next < slots.len() {
@@ -4039,7 +4160,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         for (i, p) in params.iter().enumerate() {
-            if slots[i].is_none() {
+            if slots[i].is_none() && !skipped[i] {
                 if let (Some(fun), Some(d)) = (&p.context, &p.default) {
                     // a context: the variable of its name where the call is
                     let n = d.ident().unwrap_or_default().to_string();
@@ -4104,7 +4225,7 @@ impl<'a> Lowerer<'a> {
             if self.this_recv.is_none() {
                 self.error(span, format!("`{}()` passes `this` on, so only a method of the object can call it, not a constructor, an interface method or an operator", name));
             }
-            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false });
+            params.push(ParamInfo { name: Some("__this".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false });
             args.push(Arg { name: Some("__this".into()), value: Expr::new(ExprKind::Raw("__this".into()), span), trailing: false });
         }
         (args, params)
@@ -4668,9 +4789,11 @@ impl<'a> Lowerer<'a> {
                 return;
             }
         }
-        // `Square.name()` on a fieldless struct: the type name is also its value
+        // `Square.name()` on a fieldless struct: the type name is also its value (but
+        // `Square.name(square)` passes the receiver)
         if let Some(n) = recv.ident() {
-            if !self.is_local(n) && self.unit_value_method(n, name) {
+            let receiver_passed = self.class_info(n).and_then(|c| c.methods.get(name)).is_some_and(|m| args.len() == m.params.len() + 1);
+            if !self.is_local(n) && self.unit_value_method(n, name) && !receiver_passed {
                 self.e.w(&format!("{}.{}", esc(n), member(name)));
                 if let Some(g) = generics {
                     let gt = self.generic_args_text(g);
@@ -6267,7 +6390,7 @@ impl<'a> Lowerer<'a> {
         self.pop_scope();
     }
 
-    fn struct_lit(&mut self, path: &[String], generics: Option<&Vec<GenericArg>>, fields: &[(String, Option<Expr>)], base: Option<&Expr>) {
+    fn struct_lit(&mut self, path: &[String], generics: Option<&Vec<GenericArg>>, fields: &[(String, Option<Expr>)], base: Option<&Expr>, field_attrs: &[Vec<String>]) {
         let owner = if path.len() == 1 && path[0] == "Self" { self.class.as_ref().map(|c| c.name.clone()) } else { path.last().cloned() };
         let (p, shape) = self.resolve_variant_path(path);
         let field_types: Vec<(String, Type)> = match shape {
@@ -6287,6 +6410,9 @@ impl<'a> Lowerer<'a> {
         for (i, (n, v)) in fields.iter().enumerate() {
             if i > 0 {
                 self.e.w(", ");
+            }
+            for a in field_attrs.get(i).into_iter().flatten() {
+                self.e.w(&format!("#[{}] ", a));
             }
             let fty = field_types.iter().find(|(fname, _)| fname == n).map(|(_, t)| t.clone());
             match v {
@@ -6509,4 +6635,16 @@ fn imported_names(tree: &UseTree, prefix: &[String], out: &mut Vec<(String, Vec<
         // a glob is kept as `*` with the path it imports from
         UseTree::Glob { segments } => out.push(("*".into(), prefix.iter().chain(segments).cloned().collect())),
     }
+}
+
+/// The parameters of a method called through its type: `Graph.neighbors(g, n)` passes the
+/// receiver first, when the method has one and the call has an argument for it.
+fn through_type(m: &crate::sema::MethodInfo, args: &[Arg]) -> Vec<ParamInfo> {
+    let positional = args.iter().filter(|a| a.name.is_none()).count();
+    let mut params = m.params.clone();
+    // contexts may be passed too (`MarkdownPreview.path(self, cx)`)
+    if m.recv != Recv::Static && (positional == params.iter().filter(|p| p.context.is_none()).count() + 1 || positional == params.len() + 1) {
+        params.insert(0, ParamInfo { name: Some("self".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false });
+    }
+    params
 }

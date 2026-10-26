@@ -1,0 +1,77 @@
+#![allow(dead_code)]
+//! Rust forms Oxie accepts as written, each once.
+
+import std.cmp.max
+
+const LIMIT: usize = 4
+
+interface Make {
+    fun new(n: i32): Self
+}
+
+// an interface's `new` is the class's: no constructor hides it
+struct Pair {
+    a: i32,
+    b: i32,
+}
+
+impl Make for Pair {
+    fun new(n: i32): Pair = Pair { a: n, b: n * 2 }
+}
+
+class Counter(var n: i32) {
+    fun get(): i32 = n
+
+    // a method called through its type with the receiver first
+    fun twice(): i32 = Counter.get(self) * 2
+
+    @cfg(not(windows))
+    static fun make(n: i32): Counter = Counter(n)
+
+    @cfg(windows)
+    static fun make(n: i32, extra: i32): Counter = Counter(n + extra)
+}
+
+struct Token {
+    kind: u8,
+}
+
+// a function named like a type
+@allow(non_snake_case)
+fun Token(n: i32): i32 = n + 1
+
+pub struct Unit(pub ())
+
+enum Content {
+    Str(String)
+    Num(i32)
+}
+
+fun name(c: &Content): String = when (c) {
+    ref s @ Content.Str(_) -> "str ${s:?}"
+    Content.Num(n) -> "num $n"
+}
+
+fun size(n: usize): &'static str = when (n) {
+    0 -> "none"
+    1..=LIMIT -> "few"
+    else -> "many"
+}
+
+fun not(flag: bool): bool {
+    if (flag) {
+        return !flag
+    }
+    !flag
+}
+
+fun main() {
+    static var CALLS: u32 = 0
+    unsafe { CALLS += 1 }
+    val p = Pair.new(3)
+    val c = Counter.make(5)
+    val wrap = std.panic.AssertUnwindSafe { 7 }
+    println("${p.a} ${p.b} ${c.twice()} ${Token(1)} ${Unit(()).0:?}")
+    println("${name(&Content.Str("a"))} ${name(&Content.Num(2))} ${size(3)} ${size(9)}")
+    println("${not(true)} ${not(false)} ${wrap()} [${max(1, 2): >4}] [${7:*^5}] ${unsafe { CALLS }}")
+}

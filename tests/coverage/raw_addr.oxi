@@ -1,0 +1,11 @@
+class Packet(len: u16, flags: u8) {
+    fun len_ptr(): *const u16 = &raw const len
+}
+
+fun main() {
+    var x = 5
+    val p = &raw mut x
+    unsafe { *p += 1 }
+    val packet = Packet(7, 1)
+    println("$x ${unsafe { *packet.len_ptr() }} ${packet.flags}")
+}

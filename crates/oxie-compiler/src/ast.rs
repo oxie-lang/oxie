@@ -88,7 +88,8 @@ pub enum GenericParam {
 
 #[derive(Clone, Debug)]
 pub enum WherePred {
-    Type { ty: Type, bounds: Vec<Type> },
+    /// `T: Display`; `hrtb` is a `for<'a>` before the type
+    Type { ty: Type, bounds: Vec<Type>, hrtb: Option<String> },
     Lifetime { name: String, bounds: Vec<String> },
 }
 
@@ -114,6 +115,8 @@ pub enum SelfParam {
     RefMut,
     /// `self: Type`
     Typed(Type),
+    /// `mut self: Type` (`mut self: Pin<&mut Self>`)
+    TypedMut(Type),
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +129,8 @@ pub struct Param {
     /// Declared as a value that the body only reads, so Oxie lends it (`params.rs`): its type is
     /// now the reference, and every argument for it is lent.
     pub lent: bool,
+    /// Its attributes (`@cfg(unix) fd: i32`) as Rust text.
+    pub attrs: Vec<String>,
     pub span: Span,
 }
 
@@ -332,7 +337,12 @@ pub enum Type {
     Maybe(Box<Type>),
     Never,
     Infer,
-    /// Raw Rust text (e.g. `fn(i32) -> i32` pointer types, macro types).
+    /// A function pointer: `head` is what comes before the parameters (`fn`, `unsafe extern "C"
+    /// fn`, `for<'a> fn`), each parameter may be named, `variadic` ends them with `...`.
+    FnPtr { head: String, params: Vec<(Option<String>, Type)>, variadic: bool, ret: Option<Box<Type>> },
+    /// A tuple field's type with the field's attributes (`Small(@cfg(test) i32)`), as Rust text.
+    Attributed(Vec<String>, Box<Type>),
+    /// Raw Rust text (e.g. macro types).
     Raw(String),
 }
 
@@ -370,6 +380,12 @@ impl Type {
             Type::Slice(t) => Type::Slice(Box::new(sub(t))),
             Type::Option(t) => Type::Option(Box::new(sub(t))),
             Type::Fn { params, ret } => Type::Fn { params: params.iter().map(sub).collect(), ret: Box::new(sub(ret)) },
+            Type::FnPtr { head, params, variadic, ret } => Type::FnPtr {
+                head: head.clone(),
+                params: params.iter().map(|(n, t)| (n.clone(), sub(t))).collect(),
+                variadic: *variadic,
+                ret: ret.as_ref().map(|r| Box::new(sub(r))),
+            },
             _ => self.clone(),
         }
     }
@@ -615,6 +631,10 @@ pub enum UnOp {
     Deref,
     Ref,
     RefMut,
+    /// `&raw const x`
+    RawConst,
+    /// `&raw mut x`
+    RawMut,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -678,7 +698,8 @@ pub enum ExprKind {
     MapLit(Vec<Expr>),
     SetLit(Vec<Expr>),
     Range { start: Option<Box<Expr>>, end: Option<Box<Expr>>, inclusive: bool },
-    StructLit { path: Vec<String>, generics: Option<Vec<GenericArg>>, fields: Vec<(String, Option<Expr>)>, base: Option<Box<Expr>> },
+    /// `field_attrs` holds each field's attributes (`@cfg(unix) fd: 3`) as Rust text.
+    StructLit { path: Vec<String>, generics: Option<Vec<GenericArg>>, fields: Vec<(String, Option<Expr>)>, base: Option<Box<Expr>>, field_attrs: Vec<Vec<String>> },
     /// Raw macro call `name!(...)` - text passed through.
     Macro { path: String, text: String },
     TryCatch { body: Block, catch: Option<Box<Catch>> },
@@ -687,6 +708,8 @@ pub enum ExprKind {
     /// `const { ... }` evaluated at compile time
     ConstBlock(Block),
     Paren(Box<Expr>),
+    /// An argument or element with attributes (`@cfg(unix) fd`), attribute contents as Rust text.
+    Attributed { attrs: Vec<String>, expr: Box<Expr> },
     Raw(String),
     /// Placeholder after a parse error.
     Error,

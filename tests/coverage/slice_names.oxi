@@ -1,0 +1,22 @@
+import std.sync.Mutex
+
+// `slice<T>` is Rust's slice `[T]` where `[T]` would be a list.
+@derive(Debug)
+@repr(transparent)
+struct Bytes(slice<u8>)
+
+impl Bytes {
+    fun new(b: &[u8]): &Bytes {
+        unsafe { &*(b as *const [u8] as *const Bytes) }
+    }
+
+    fun len(): usize = self.0.len()
+}
+
+fun main() {
+    val m: &Mutex<slice<i32>> = &Mutex.new([1, 2, 3])
+    val sum: i32 = m.lock().unwrap().iter().sum()
+    val list: Mutex<[i32]> = Mutex.new(vec[4])
+    val b = Bytes.new(b"abc")
+    println("$sum ${list.lock().unwrap():?} ${b.len()} ${b:?}")
+}

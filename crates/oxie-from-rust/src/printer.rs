@@ -37,6 +37,15 @@ const MARK: char = '\u{1}';
 /// What an item macro is printed for the first time: as itself, an Oxie item.
 const ITEM_MACRO: &str = "item macro";
 
+/// A variant's fields in parentheses: on one line, or one per line when any has a doc comment.
+fn variant_fields(fs: &[String]) -> String {
+    if fs.iter().any(|f| f.contains('\n')) {
+        format!("(\n{}\n)", indent(&fs.join(",\n")))
+    } else {
+        format!("({})", fs.join(", "))
+    }
+}
+
 /// A method's text between marks.
 fn mark_method(item: usize, index: usize, text: &str) -> String {
     format!("{MARK}m{item}:{index}\n{text}\n{MARK}/")
@@ -78,6 +87,13 @@ pub struct Info {
     pub run_shadowed: bool,
     /// std's collections the file names without a path (`use std::collections::HashMap`)
     pub std_collections: HashSet<String>,
+    /// Names a module of the file imports from another crate (`mod printing { use
+    /// proc_macro2::Group; }`), as module prefix (`printing::`) and name: there they aren't the
+    /// file's types of that name.
+    pub outside_imports: HashSet<(String, String)>,
+    /// Types with a trait's `new` (`impl Watcher for FsEventWatcher { fn new(..) }`): as classes
+    /// they would get a constructor `new` that hides it.
+    pub trait_new: HashSet<String>,
 }
 
 #[derive(Clone, Default)]
@@ -141,9 +157,6 @@ pub struct Printer<'a> {
     pub slice_here: std::cell::Cell<bool>,
     /// The next path is a trait's, whose type arguments may be slices.
     pub trait_args: std::cell::Cell<bool>,
-    /// A slice was printed where Oxie reads `[T]` as a list (`type Bytes = [u8]`): Oxie has no
-    /// name for that type, so the item is kept as Rust.
-    pub slice_by_value: std::cell::Cell<bool>,
 }
 
 pub fn indent(s: &str) -> String {
@@ -187,7 +200,6 @@ impl<'a> Printer<'a> {
             after_item: Vec::new(),
             slice_here: Default::default(),
             trait_args: Default::default(),
-            slice_by_value: Default::default(),
         }
     }
 
@@ -240,7 +252,11 @@ impl<'a> Printer<'a> {
             lines.extend(comments);
             let msg = format!("kept as Rust: {}", reason);
             self.todos.push(format!("line {}: {}", line_of(&imp.items[j]), msg));
-            lines.push(format!("// TODO(from-rust): {}", msg));
+            // one line for the methods kept for the same reason
+            let todo = format!("// TODO(from-rust): {}", msg);
+            if !lines.contains(&todo) {
+                lines.push(todo);
+            }
         }
         lines.push(format!("rust {{\n{}\n}}", indent(&rust_item(&syn::Item::Impl(only)))));
         lines.join("\n")
@@ -329,9 +345,6 @@ impl<'a> Printer<'a> {
                 }
                 _ => self.item(it, &plan, i, items),
             };
-            if self.slice_by_value.take() {
-                text = self.raw_item(it, "Oxie has no name for a slice that isn't behind a reference or pointer");
-            }
             if self.pending.len() > pending {
                 let todo: Vec<String> = self.pending.drain(pending..).collect();
                 text = format!("{}\n{}", todo.join("\n"), text);
@@ -658,6 +671,9 @@ impl<'a> Printer<'a> {
     }
 
     fn struct_is_class(&self, s: &syn::ItemStruct) -> bool {
+        if self.info.trait_new.contains(&s.ident.to_string()) {
+            return false;
+        }
         match &s.fields {
             syn::Fields::Named(n) => !n.named.is_empty() && n.named.iter().all(|f| only_docs(&f.attrs) && f.mutability == syn::FieldMutability::None),
             _ => false,
@@ -668,9 +684,6 @@ impl<'a> Printer<'a> {
 
     fn item(&mut self, it: &syn::Item, plan: &Plan, idx: usize, items: &[syn::Item]) -> String {
         match it {
-            // `#[cfg(a)] { .. } #[cfg(not(a))] { .. }` at the end: the block a build keeps is the
-            // function's value, which Oxie can't say
-            syn::Item::Fn(f) if cfg_value_blocks(&f.block) => self.raw_item(it, "its value is a block chosen by `#[cfg]`, which Oxie has no syntax for"),
             syn::Item::Fn(f) => {
                 let saved = std::mem::take(&mut self.cx);
                 let s = self.fun(&f.attrs, &f.vis, &f.sig, Some(&f.block), FunKind::Free);
@@ -708,7 +721,17 @@ impl<'a> Printer<'a> {
                 if let Some(t) = self.test_blocks(m) {
                     return t;
                 }
-                let mut lines = self.attrs(&m.attrs, false);
+                // `mod x { //! docs }` documents the module as `/// docs` before it does
+                let attrs: Vec<syn::Attribute> = m
+                    .attrs
+                    .iter()
+                    .cloned()
+                    .map(|mut a| {
+                        a.style = syn::AttrStyle::Outer;
+                        a
+                    })
+                    .collect();
+                let mut lines = self.attrs(&attrs, false);
                 match &m.content {
                     Some((_, items)) => {
                         if m.ident == "__oxie" {
@@ -754,6 +777,14 @@ impl<'a> Printer<'a> {
                 lines.join("\n")
             }
             syn::Item::Macro(_) => self.raw_item(it, ITEM_MACRO),
+            // `extern crate alloc` and `extern "C" { .. }` are written as in Rust
+            syn::Item::ExternCrate(c) => {
+                let mut lines = self.attrs(&c.attrs, false);
+                let rename = c.rename.as_ref().map(|(_, r)| format!(" as {}", r)).unwrap_or_default();
+                lines.push(format!("{}extern crate {}{}", self.vis(&c.vis), c.ident, rename));
+                lines.join("\n")
+            }
+            syn::Item::ForeignMod(_) => rust_item(it),
             _ => self.raw_item(it, "no Oxie syntax for this item"),
         }
     }
@@ -1240,12 +1271,12 @@ impl<'a> Printer<'a> {
                 syn::Fields::Unit => {}
                 syn::Fields::Unnamed(u) => {
                     let fs: Vec<String> = u.unnamed.iter().map(|f| format!("{}{}", self.field_attrs_inline(&f.attrs), self.ty(&f.ty))).collect();
-                    s.push_str(&format!("({})", fs.join(", ")));
+                    s.push_str(&variant_fields(&fs));
                 }
                 syn::Fields::Named(n) => {
                     let fs: Vec<String> =
                         n.named.iter().map(|f| format!("{}{}: {}", self.field_attrs_inline(&f.attrs), id(f.ident.as_ref().unwrap()), self.ty(&f.ty))).collect();
-                    s.push_str(&format!("({})", fs.join(", ")));
+                    s.push_str(&variant_fields(&fs));
                 }
             }
             if let Some((_, d)) = &v.discriminant {
@@ -1351,6 +1382,11 @@ impl<'a> Printer<'a> {
                     l.push(format!("{}const {}: {} = {}", self.vis(&c.vis), id(&c.ident), self.ty(&c.ty), v));
                     s.push_str(&l.join("\n"));
                 }
+                // a macro that expands to members is called as in Rust: Oxie takes it in an `impl`
+                syn::ImplItem::Macro(m) => {
+                    let it = syn::Item::Macro(syn::ItemMacro { attrs: m.attrs.clone(), ident: None, mac: m.mac.clone(), semi_token: m.semi_token });
+                    s.push_str(&rust_item(&it));
+                }
                 other => {
                     self.todo(line_of(other), "impl item kept as Rust");
                     s.push_str(&format!("rust {{ {} }}", tok(other)));
@@ -1435,6 +1471,10 @@ impl<'a> Printer<'a> {
                     }
                     l.push(x);
                     s.push_str(&l.join("\n"));
+                }
+                syn::TraitItem::Macro(m) => {
+                    let it = syn::Item::Macro(syn::ItemMacro { attrs: m.attrs.clone(), ident: None, mac: m.mac.clone(), semi_token: m.semi_token });
+                    s.push_str(&rust_item(&it));
                 }
                 other => s.push_str(&format!("rust {{ {} }}", tok(other))),
             }
@@ -1774,11 +1814,21 @@ pub fn bound_names(sig: &syn::Signature, block: &syn::Block) -> HashSet<String> 
             self.0.insert(i.ident.to_string());
             syn::visit::visit_pat_ident(self, i);
         }
-        // a local `fn` binds its name, but its body isn't part of this function
+        // a local `fn` binds its name, but its body isn't part of this function; so does a `use`
         fn visit_item(&mut self, i: &'ast syn::Item) {
-            if let syn::Item::Fn(f) = i {
-                self.0.insert(f.sig.ident.to_string());
+            match i {
+                syn::Item::Fn(f) => {
+                    self.0.insert(f.sig.ident.to_string());
+                }
+                syn::Item::Use(u) => self.visit_use_tree(&u.tree),
+                _ => {}
             }
+        }
+        fn visit_use_name(&mut self, n: &'ast syn::UseName) {
+            self.0.insert(n.ident.to_string());
+        }
+        fn visit_use_rename(&mut self, r: &'ast syn::UseRename) {
+            self.0.insert(r.rename.to_string());
         }
     }
     let mut v = V(HashSet::new());
@@ -1795,7 +1845,17 @@ pub fn bound_names(sig: &syn::Signature, block: &syn::Block) -> HashSet<String> 
 /// A Rust item formatted by prettyplease.
 pub fn rust_item(it: &syn::Item) -> String {
     let f = syn::File { shebang: None, attrs: Vec::new(), items: vec![it.clone()] };
-    prettyplease::unparse(&f).trim_end().to_string()
+    unparse(&f).unwrap_or_else(|| tok(it)).trim_end().to_string()
+}
+
+/// `prettyplease::unparse`, or None for syntax it can't print yet (it panics on `safe fn` in an
+/// `unsafe extern` block, for one).
+pub fn unparse(f: &syn::File) -> Option<String> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let s = std::panic::catch_unwind(|| prettyplease::unparse(f)).ok();
+    std::panic::set_hook(hook);
+    s
 }
 
 #[derive(Default)]
@@ -1840,9 +1900,3 @@ pub enum BlockMode {
     Value,
 }
 
-/// Whether a function body ends in blocks with `#[cfg]` attributes and no semicolons: the one
-/// the build keeps gives the function's value.
-fn cfg_value_blocks(b: &syn::Block) -> bool {
-    let cfg_block = |s: &syn::Stmt| matches!(s, syn::Stmt::Expr(syn::Expr::Block(eb), None) if eb.attrs.iter().any(|a| a.path().is_ident("cfg")));
-    b.stmts.len() >= 2 && b.stmts[b.stmts.len() - 2..].iter().all(cfg_block)
-}

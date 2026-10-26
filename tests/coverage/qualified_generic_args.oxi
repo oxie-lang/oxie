@@ -1,0 +1,18 @@
+interface Shape {
+    type Unit
+    fun unit(): Self.Unit
+}
+
+struct Square
+
+impl Shape for Square {
+    type Unit = u8
+    fun unit(): u8 = 2
+}
+
+fun units<S: Shape>(s: &S): Vec<<S as Shape>::Unit> = vec[s.unit()]
+
+fun main() {
+    val v: Vec<<Square as Shape>::Unit> = units(&Square)
+    println("${v:?} ${<Square as Shape>::unit(&Square)}")
+}

@@ -1,0 +1,29 @@
+macro_rules! getter {
+    ($name:ident, $t:ty) => {
+        fn $name(&self) -> $t {
+            self.$name
+        }
+    };
+}
+
+class Size(width: u32, height: u32) {
+    getter!(width, u32)
+    getter!(height, u32)
+
+    const static fun area_of(w: u32, h: u32): u32 = w * h
+}
+
+fun main() {
+    macro_rules! twice {
+        ($e:expr) => {
+            $e * 2
+        };
+    }
+    thread_local! {
+        static CALLS: std::cell::Cell<u32> = std::cell::Cell::new(0)
+    }
+    CALLS.with { it.set(it.get() + 1) }
+    val s = Size(3, 4)
+    const AREA: u32 = Size.area_of(2, 5)
+    println("${s.width()} ${s.height()} ${twice!(AREA)} ${CALLS.with { it.get() }}")
+}

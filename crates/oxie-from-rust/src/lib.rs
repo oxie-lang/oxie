@@ -378,7 +378,44 @@ fn collect_info(file: &syn::File) -> Info {
         }
     }
     info.std_collections = std_collections(&file.items);
+    outside_imports(&file.items, "", &mut info.outside_imports);
     info
+}
+
+/// The names each module imports from another crate (see `Info::outside_imports`).
+fn outside_imports(items: &[syn::Item], prefix: &str, out: &mut HashSet<(String, String)>) {
+    fn walk(t: &syn::UseTree, first: Option<&str>, prefix: &str, out: &mut HashSet<(String, String)>) {
+        let outside = |f: Option<&str>| f.is_some_and(|f| !matches!(f, "crate" | "self" | "super"));
+        match t {
+            syn::UseTree::Path(p) => {
+                let f = first.or(Some(&*p.ident.to_string())).map(str::to_string);
+                walk(&p.tree, f.as_deref(), prefix, out);
+            }
+            syn::UseTree::Name(n) if outside(first) => {
+                out.insert((prefix.to_string(), n.ident.to_string()));
+            }
+            syn::UseTree::Rename(r) if outside(first) => {
+                out.insert((prefix.to_string(), r.rename.to_string()));
+            }
+            syn::UseTree::Group(g) => {
+                for t in &g.items {
+                    walk(t, first, prefix, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    for it in items {
+        match it {
+            syn::Item::Use(u) => walk(&u.tree, None, prefix, out),
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    outside_imports(inner, &format!("{}{}::", prefix, m.ident), out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The std collections the items import by their own names: `use std::collections::HashMap`,
@@ -428,6 +465,9 @@ fn collect_items(items: &[syn::Item], info: &mut Info, fn_counts: &mut HashMap<S
                         if printer::result_parts_of(&f.sig.output) {
                             info.throwing.insert(f.sig.ident.to_string());
                         }
+                        if f.sig.ident == "new" && f.sig.receiver().is_none() {
+                            info.trait_new.insert(facts::type_name(&imp.self_ty));
+                        }
                     }
                 }
                 continue;
@@ -465,7 +505,7 @@ fn collect_items(items: &[syn::Item], info: &mut Info, fn_counts: &mut HashMap<S
                 let class = matches!(&s.fields, syn::Fields::Named(n) if !n.named.is_empty() && n.named.iter().all(|f| printer::only_docs(&f.attrs)));
                 let named = matches!(&s.fields, syn::Fields::Named(_));
                 let new = news.get(&s.ident.to_string()).cloned();
-                let has_new = named && (new.is_some() || class);
+                let has_new = named && (new.is_some() || class) && !info.trait_new.contains(&s.ident.to_string());
                 let new_params = new.unwrap_or_else(|| fields.iter().map(|(_, t)| t.clone()).collect());
                 info.structs.insert(s.ident.to_string(), printer::StructInfo { fields, has_new, new_params });
             }

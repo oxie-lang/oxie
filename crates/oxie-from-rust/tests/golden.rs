@@ -439,7 +439,7 @@ fn main() {
 }
 
 #[test]
-fn attributes_oxie_cannot_express_stay_rust_with_a_todo() {
+fn attributes_on_values_elements_and_fields() {
     check(
         r#"
 struct P {
@@ -463,28 +463,21 @@ fn main() {
 
 fun mode(): &'static str {
     @cfg(test) return "test"
-    // TODO(from-rust): kept as Rust: Oxie has no attributes on expressions
-    rust { #[cfg(not(test))] "normal" }
+    @cfg(not(test)) "normal"
 }
 
 fun main() {
-    // TODO(from-rust): kept as Rust: Oxie has no attributes on expressions
-    val v = vec[1, rust { #[cfg(test)] 2 }, 3]
-    // TODO(from-rust): kept as Rust: Oxie has no attributes on expressions
-    val p = rust { P {
-        #[cfg(test)]
-        x: 1,
-        #[cfg(not(test))]
-        x: 2,
-    } }
+    val v = vec[1, @cfg(test) 2, 3]
+    val p = P { @cfg(test) x: 1, @cfg(not(test)) x: 2 }
     println("${mode()} ${v:?} ${p.x}")
 }
 "#,
     );
 }
 
+/// A field holding a function is called in parentheses, as in Rust.
 #[test]
-fn untranslatable_expressions_stay_rust_with_a_todo() {
+fn function_fields_are_called_in_parentheses() {
     check(
         r#"
 struct Button {
@@ -509,44 +502,89 @@ fn click_twice(b: &Button) -> i32 {
     }
 }
 
-// TODO(from-rust): kept as Rust: Oxie reads `(x.f)(args)` as a method call
-fun click_twice(b: &Button): i32 = rust { (b.on_click)() } * 2
+fun click_twice(b: &Button): i32 = (b.on_click)() * 2
 "#,
     );
 }
 
+/// Nightly-only syntax (a trait alias, a `try` block) has no Oxie form.
 #[test]
-fn untranslatable_items_stay_rust_with_a_todo() {
+fn untranslatable_code_stays_rust_with_a_todo() {
     check(
         r#"
+#![feature(try_blocks, trait_alias)]
+
+trait Number = Copy + std::ops::Add<Output = Self>;
+
+fn double<T: Number>(x: T) -> T {
+    x + x
+}
+
+fn parse_sum(a: &str, b: &str) -> Option<i32> {
+    let sum: Option<i32> = try { a.parse::<i32>().ok()? + b.parse::<i32>().ok()? };
+    sum
+}
+"#,
+        r#"#![feature(try_blocks, trait_alias)]
+
+// TODO(from-rust): kept as Rust: no Oxie syntax for this item
+rust {
+    trait Number = Copy + std::ops::Add<Output = Self>;
+}
+
+fun double<T: Number>(x: T): T = x + x
+
+fun parse_sum(a: &str, b: &str): i32? {
+    // TODO(from-rust): kept as Rust: no Oxie syntax for this expression
+    val sum: i32? = rust { try { a.parse::<i32>().ok()? + b.parse::<i32>().ok()? } }
+    sum
+}
+"#,
+    );
+}
+
+/// `extern` blocks, `extern crate` and raw pointers are written as in Rust.
+#[test]
+fn extern_blocks_and_raw_pointers() {
+    check(
+        r#"
+extern crate alloc;
+
 extern "C" {
     fn abs(x: i32) -> i32;
 }
 
 fn main() {
-    println!("{}", unsafe { abs(-3) });
+    let mut x = unsafe { abs(-3) };
+    let p = &raw mut x;
+    unsafe { *p += 1 }
+    println!("{}", x);
 }
 "#,
-        r#"// TODO(from-rust): kept as Rust: no Oxie syntax for this item
-rust {
-    extern "C" {
-        fn abs(x: i32) -> i32;
-    }
+        r#"extern crate alloc
+
+extern "C" {
+    fn abs(x: i32) -> i32;
 }
 
 fun main() {
-    println(unsafe { abs(-3) })
+    var x = unsafe { abs(-3) }
+    val p = &raw mut x
+    unsafe { *p += 1 }
+    println(x)
 }
 "#,
     );
 }
 
 /// A method Oxie rejects is kept as Rust in an `impl` block of its own; the class keeps the rest.
-/// (Rejected here: a typed `mut self` receiver, which Oxie doesn't parse.)
+/// (Rejected here: a `box` pattern, which only nightly Rust has.)
 #[test]
 fn rejected_method_stays_rust_alone() {
     check(
         r#"
+#![feature(box_patterns)]
+
 struct Counter {
     n: i32,
 }
@@ -557,39 +595,37 @@ impl Counter {
         self.n
     }
 
-    // doubles a boxed counter
-    fn into_doubled(mut self: Box<Self>) -> i32 {
-        self.n *= 2;
-        self.n
+    // reads a boxed value
+    fn unbox(&self, b: Box<i32>) -> i32 {
+        match b {
+            box v => v + self.n,
+        }
     }
 }
 
 fn main() {
     let mut c = Counter { n: 2 };
-    println!("{} {}", c.next(), Box::new(c).into_doubled());
+    println!("{} {}", c.next(), c.unbox(Box::new(4)));
 }
 "#,
-        r#"class Counter(n: i32) {
+        r#"#![feature(box_patterns)]
+
+class Counter(n: i32) {
     fun next(): i32 {
         n += 1
         n
     }
 }
 
-// doubles a boxed counter
-// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected `)`, found `:`)
+// reads a boxed value
+// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected `->`, found `v`)
 rust {
-    impl Counter {
-        fn into_doubled(mut self: Box<Self>) -> i32 {
-            self.n *= 2;
-            self.n
-        }
-    }
+    impl Counter { fn unbox(&self, b : Box<i32>) -> i32 { match b { box v => v + self.n, } } }
 }
 
 fun main() {
     var c = Counter { n: 2 }
-    println("${c.next()} ${Box.new(c).into_doubled()}")
+    println("${c.next()} ${c.unbox(Box.new(4))}")
 }
 "#,
     );
@@ -600,6 +636,8 @@ fun main() {
 fn rejected_method_of_an_impl_stays_rust_alone() {
     check(
         r#"
+#![feature(box_patterns)]
+
 struct Meters(i32);
 
 impl Meters {
@@ -607,36 +645,34 @@ impl Meters {
         self.0
     }
 
-    fn into_doubled(mut self: Box<Self>) -> i32 {
-        self.0 *= 2;
-        self.0
+    fn unbox(&self, b: Box<i32>) -> i32 {
+        match b {
+            box v => v + self.0,
+        }
     }
 }
 
 fn main() {
     let m = Meters(5);
-    println!("{} {}", m.get(), Box::new(m).into_doubled());
+    println!("{} {}", m.get(), m.unbox(Box::new(1)));
 }
 "#,
-        r#"struct Meters(i32)
+        r#"#![feature(box_patterns)]
+
+struct Meters(i32)
 
 impl Meters {
     fun get(): i32 = self.0
 }
 
-// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected `)`, found `:`)
+// TODO(from-rust): kept as Rust: Oxie rejected the translation (expected `->`, found `v`)
 rust {
-    impl Meters {
-        fn into_doubled(mut self: Box<Self>) -> i32 {
-            self.0 *= 2;
-            self.0
-        }
-    }
+    impl Meters { fn unbox(&self, b : Box<i32>) -> i32 { match b { box v => v + self.0, } } }
 }
 
 fun main() {
     val m = Meters(5)
-    println("${m.get()} ${Box.new(m).into_doubled()}")
+    println("${m.get()} ${m.unbox(Box.new(1))}")
 }
 "#,
     );

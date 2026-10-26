@@ -616,7 +616,7 @@ fn take_params(f: &mut FunDecl, s: &Split, notes: &mut Vec<ParamNote>) {
     let first = f.params.len();
     for (j, p) in s.fields.iter().enumerate() {
         let span = f.name_span;
-        f.params.push(Param { pat: Pat::Ident { name: p.name.clone(), by_ref: false, mutable: false, sub: None, span }, ty: p.ty.clone(), default: None, context: false, lent: false, span });
+        f.params.push(Param { pat: Pat::Ident { name: p.name.clone(), by_ref: false, mutable: false, sub: None, span }, ty: p.ty.clone(), default: None, context: false, lent: false, attrs: Vec::new(), span });
         let what = if p.pass == Pass::Mut { "changes" } else { "only reads" };
         let why = format!("`{}` {} `{}`, and `{}` calls it while {}", f.name, what, p.name, s.caller, s.borrow);
         notes.push(ParamNote { file: s.file, fun: f.name.clone(), fun_span: f.name_span, index: first + j, borrowed: true, why, cause: Some(s.at) });

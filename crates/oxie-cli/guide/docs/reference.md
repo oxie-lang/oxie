@@ -243,6 +243,8 @@ fun main() {
 | `T?` | `Option<T>` (`&T?` is `Option<&T>`) |
 | `[T]` | `Vec<T>`, a list; Rust's slice `[T]` right after `&`, `&mut`, `*const` and `*mut`, inside `Box`, `Rc`, `Arc`, `Cow` and `Weak`, in a trait's type arguments (`impl AsRef<[u8]>`), and as an `impl` block's type or an associated type (`type Target = [T]`); a `&mut [T]` parameter that its function grows (`push`, `insert`, `clear`, ...), or passes on to a function's `&mut Vec<T>` parameter, is `&mut Vec<T>` |
 | `[K: V]` | `HashMap<K, V>`, std's map |
+| `slice<T>` | Rust's slice `[T]` anywhere, for the places where `[T]` is a list: `Mutex<slice<u8>>`, the last field of an unsized struct (`struct Bytes(slice<u8>)`) |
+| `fn(&str, i32?) -> bool` | `fn(&str, Option<i32>) -> bool`, a function pointer (its types are Oxie's; `unsafe extern "C" fn(..)` and `for<'a> fn(..)` too) |
 | `(A, B) -> R` | `impl FnMut(A, B) -> R`, `Box<dyn Fn(A, B) -> R>` or `dyn Fn(..)` depending on position |
 | `Shape` (an interface used as a type) | `impl Shape` (parameters, returns; `impl Shape + 'static` for a parameter the function stores), `dyn Shape` (behind `&`, `Box`, `Rc`, `Arc`), `Box<dyn Shape>` (fields, collections, returns of different classes, and parameters and results of interface methods) |
 | `&T`, `&mut T`, `&[T]`, `[T; N]`, `(A, B)`, `Vec<T>`, `HashMap<K, V>`, `dyn T`, `impl T`, `*const T` | same |
@@ -289,10 +291,13 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
 }
 ```
 
-* Generates `struct Name<T> { a, b, c, d }` and `impl` with `fn new(a, b, c) -> Self`.
+* Generates `struct Name<T> { a, b, c, d }` and `impl` with `fn new(a, b, c) -> Self`, unless
+  the class declares `new` itself, or implements an interface whose `new` it provides
+  (`impl Make for Name { fun new(n: i32): Name = ... }`): a generated `new` would hide that one.
   A body property's default can use the constructor parameters and the properties before it
   (`val code = name.to_uppercase()`).
-* **Construction**: `Name(a, b)` → `Name::new(a, b)`; named arguments and defaults work.
+* **Construction**: `Name(a, b)` → `Name::new(a, b)`; named arguments and defaults work. A
+  function named like the class (`fun Name(..): Name`, as Rust allows) is what `Name(..)` calls.
   Zero-argument calls of external types (`HashMap()`, `String()`) become `Type::new()`.
 * `val`/`var` before constructor parameters are accepted (Kotlin habit) but don't matter:
   mutability belongs to the variable holding the object, as in Rust.
@@ -312,7 +317,10 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
     `from`, `from_str`, `try_from` or `from_iter`;
   * `&self` otherwise.
   Override with `mut fun`, `static fun`, or an explicit `self`, `&self`, `&mut self`,
-  `mut self` first parameter. Interface methods take the receiver their implementations need.
+  `mut self`, `self: Box<Self>` or `mut self: Box<Self>` first parameter. Interface methods take
+  the receiver their implementations need.
+* A method called through its type takes the receiver as its first argument, as in Rust:
+  `Counter.get(c)`, `Counter.add(&mut c, 2)`.
 * **`data class`** additionally derives `Debug`, `Clone`, `PartialEq`, and `Copy`, `Eq`,
   `Hash` when every field type supports them, and supports `x.copy(field = value)`.
 * **Supertypes** after `:` are traits to implement. Derivable traits (`Debug`, `Clone`,
@@ -553,6 +561,7 @@ the declared type of a variable, field, parameter or return value:
 "Hello, $name!"            // format!("Hello, {name}!")
 "sum: ${a + b}"            // format!("sum: {}", a + b)
 "${value:.2} ${point:?}"   // format specs after `:` (Rust's format syntax); `:?` is Debug
+"${n: >5} ${n:*^7}"         // a fill character before the alignment, a space too
 "$list $map $nick"         // format!("{list:?} {map:?} {}", or_null(&nick)): [1, 2] {"a": 1} ada
 "cost: $5, \$price"       // `$` before a digit is text; `\$` before a name too
 """
@@ -891,6 +900,28 @@ Attributes also work on statements (see [Statements](#statements)). A class prop
 only in some builds (`@cfg(test) var built: usize`) is no constructor parameter: it starts with
 its default value, or the type's `Default`.
 
+They also go before a parameter (`fun open(path: &str, @cfg(unix) mode: u32)`), an argument or
+element (`open(p, @cfg(unix) 0o644)`, `vec[1, @cfg(test) 2]`), a lambda
+(`fold(0, @inline(always) { acc, x -> acc + x })`), a field of a struct literal or of an enum case
+(`Fd { @cfg(unix) raw: 3 }`, `Bad(@cfg(feature = "std") got: String)`), and the statements a block
+ends with: the configuration keeps one of `@cfg(unix) run { .. }` and `@cfg(not(unix)) run { .. }`,
+and that one is the block's value. A call made only in the builds without a `@cfg` parameter
+leaves its argument out.
+
+```oxie
+fun scale(n: i32, @cfg(debug_assertions) factor: i32): i32 {
+    @cfg(debug_assertions) run { n * factor }
+    @cfg(not(debug_assertions)) run { n }
+}
+
+fun main() {
+    val xs = vec[1, @cfg(test) 2, 3]
+    @cfg(debug_assertions) println(scale(2, 10))
+    @cfg(not(debug_assertions)) println(scale(2))
+    println("${xs:?}")
+}
+```
+
 `#![...]` at the top of a file:
 
 * in a module file, it applies to that module (`#![allow(dead_code)]`);
@@ -923,10 +954,16 @@ Use any runtime: `@tokio::main async fun main()`. A throwing async `main` works 
 * `name!(...)`, `name![...]`, `name!{...}` — any Rust macro, passed through unchanged.
   Common std macros can also be called without `!` (`println(...)`, `assert_eq(...)`,
   `vec[...]`, `format(...)`, `panic(...)`, `todo()`, `dbg(...)`, `matches(...)`, ...).
-* `macro_rules!` definitions at top level.
+* `macro_rules!` definitions at top level, in functions and in classes, interfaces and `impl`
+  blocks; any macro that declares items (`thread_local! { static N: .. }`, `getter!(width, u32)`
+  among a class's members) works there too. Macros also stand for types (`Token![,]`) and
+  patterns (`ascii_whitespace!() -> ..`).
 * Rust syntax that Oxie shares (`let`, `match` with `=>`, `impl`, `fn`, `|x|` closures,
   `::<T>` turbofish, `if let`, `while let`, let chains, `'label:` loops and blocks, `const { }`,
-  `union`, `extern "C" { }`, `#[attr]`, `&'a self`) is accepted directly.
+  `union`, `extern crate`, `extern "C" { }` and `unsafe extern "C" { }` blocks (in functions
+  too), `&raw const x` and `&raw mut x`, `for<'a>` bounds in `where` clauses and supertypes,
+  qualified types such as `Vec<<T as Iterator>::Item>`, `#[attr]`, `&'a self`) is accepted
+  directly.
   [`tests/coverage`](../tests/coverage) has one program per Rust feature.
 
 ## Keywords

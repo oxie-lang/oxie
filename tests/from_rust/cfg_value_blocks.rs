@@ -1,4 +1,4 @@
-// A function whose value is one of two blocks chosen by `#[cfg]` stays Rust.
+// A function whose value is one of two blocks chosen by `#[cfg]`: `@cfg(..) run { .. }` in Oxie.
 fn platform() -> Result<String, String> {
     #[cfg(unix)]
     {

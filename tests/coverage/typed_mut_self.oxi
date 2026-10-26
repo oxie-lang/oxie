@@ -1,0 +1,19 @@
+class Counter(n: i32) {
+    fun into_doubled(mut self: Box<Self>): i32 {
+        n *= 2
+        n
+    }
+}
+
+struct Meters(i32)
+
+impl Meters {
+    fun into_tripled(mut self: Box<Self>): i32 {
+        self.0 *= 3
+        self.0
+    }
+}
+
+fun main() {
+    println("${Box.new(Counter(2)).into_doubled()} ${Box.new(Meters(5)).into_tripled()}")
+}

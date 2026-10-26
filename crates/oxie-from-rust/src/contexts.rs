@@ -28,8 +28,6 @@ const MIN_PERCENT: usize = 25;
 #[derive(Default, Debug, Clone)]
 pub struct Crate {
     pub classes: HashMap<String, Class>,
-    /// The names of the crate's free functions, in any file.
-    pub free_fns: HashSet<String>,
     /// The field names of every struct with named fields, by struct name (of all structs of a
     /// name, together).
     pub struct_fields: HashMap<String, HashSet<String>>,
@@ -174,7 +172,7 @@ pub fn scan(files: &[&syn::File]) -> Crate {
     for (i, f) in files.iter().enumerate() {
         s.impls(i, &f.items);
     }
-    let mut krate = Crate { free_fns: std::mem::take(&mut s.free_fns), struct_fields: std::mem::take(&mut s.struct_fields), ..Crate::default() };
+    let mut krate = Crate { struct_fields: std::mem::take(&mut s.struct_fields), ..Crate::default() };
     for (name, (file, decl)) in s.structs {
         // the stubs `stub` writes have no type parameters
         if s.ambiguous.contains(&name) || !decl.generics.params.is_empty() {
@@ -274,7 +272,6 @@ struct Scan {
     methods: HashMap<String, Vec<(usize, syn::Signature)>>,
     /// (type, method) referred to without a call.
     values: HashSet<(syn::Ident, String)>,
-    free_fns: HashSet<String>,
     struct_fields: HashMap<String, HashSet<String>>,
 }
 
@@ -327,7 +324,6 @@ impl Scan {
                     }
                 }
                 syn::Item::Fn(f) => {
-                    self.free_fns.insert(f.sig.ident.to_string());
                     let owner = syn::Ident::new("Self", proc_macro2::Span::call_site());
                     let mut v = Values { owner: &owner, called: HashSet::new(), out: &mut self.values };
                     v.visit_block(&f.block);

@@ -1,0 +1,14 @@
+extern crate alloc
+extern crate core as kore
+
+import alloc.collections.BTreeMap
+import { std.fmt.Write, std.collections.HashSet }
+
+fun main() {
+    var m = BTreeMap.new()
+    m.insert(1, "one")
+    var out = String()
+    write!(out, "{}", kore::cmp::max(1, 2)).unwrap()
+    val seen: HashSet<i32> = HashSet()
+    println("${m.len()} $out ${seen.len()}")
+}

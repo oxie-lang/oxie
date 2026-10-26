@@ -1,0 +1,14 @@
+// A string literal that spans lines inside a macro call or a `rust { }` block keeps its text:
+// the generated code's indentation isn't added to it.
+fun main() {
+    val a = format!("one
+two {}", 3)
+    val b = rust { "four
+  five" }
+    val c = r"six
+seven"
+    if (a.len() > 0) {
+        println!("{}|{}|{}", a, b,
+            c)
+    }
+}

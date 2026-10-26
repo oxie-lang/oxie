@@ -778,10 +778,12 @@ fn split_format_spec(inner: &str) -> (&str, Option<String>) {
     }
     if let Some(i) = cand {
         let spec = &inner[i + 1..];
-        let ok = !spec.is_empty()
-            && spec.chars().all(|c| c.is_ascii_alphanumeric() || "?<>^+-#.$_ ".contains(c))
-            && !spec.trim().is_empty()
-            && !spec.starts_with(' ');
+        // any character fills before an alignment: `${n: >5}`, `${n:*^7}`
+        let rest = match spec.char_indices().nth(1) {
+            Some((j, '<' | '>' | '^')) => &spec[j..],
+            _ => spec,
+        };
+        let ok = !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || "?<>^+-#.$_".contains(c));
         if ok {
             return (&inner[..i], Some(spec.to_string()));
         }

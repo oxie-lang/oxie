@@ -995,6 +995,10 @@ impl<'a> Lowerer<'a> {
     /// The function `name` means in this module (of a name several modules declare, the module's
     /// own one or the one it imports).
     pub(crate) fn fun_info(&self, name: &str) -> Option<&'a sema::FunInfo> {
+        // a block's `import super::escape` hides the module's `escape` (a test of that name)
+        if let Some((_, path)) = self.local_imports.iter().rev().find(|(n, _)| n == name) {
+            return self.k.fun_at(path, &self.module);
+        }
         self.k.fun_in(name, &self.module)
     }
 
@@ -1074,6 +1078,14 @@ impl<'a> Lowerer<'a> {
             Type::Maybe(t) => format!("?{}", self.ty(t, TyPos::Plain)),
             Type::Never => "!".into(),
             Type::Infer => "_".into(),
+            Type::FnPtr { head, params, variadic, ret } => {
+                let mut ps: Vec<String> = params.iter().map(|(n, t)| format!("{}{}", n.as_ref().map(|n| format!("{}: ", n)).unwrap_or_default(), self.ty(t, TyPos::Plain))).collect();
+                if *variadic {
+                    ps.push("...".into());
+                }
+                format!("{}({}){}", head, ps.join(", "), ret.as_ref().map(|r| format!(" -> {}", self.ty(r, TyPos::Plain))).unwrap_or_default())
+            }
+            Type::Attributed(attrs, t) => format!("{}{}", attrs.iter().map(|a| format!("#[{}] ", a)).collect::<String>(), self.ty(t, pos)),
             Type::Raw(s) => s.clone(),
         }
     }
@@ -1214,6 +1226,19 @@ impl<'a> Lowerer<'a> {
             .join(" + ")
     }
 
+    /// `generics_decl` for an `impl` of the type, which takes no defaults (`T = i32`).
+    fn impl_generics(&self, g: &Generics) -> String {
+        let mut g = g.clone();
+        for p in &mut g.params {
+            match p {
+                GenericParam::Type { default, .. } => *default = None,
+                GenericParam::Const { default, .. } => *default = None,
+                GenericParam::Lifetime { .. } => {}
+            }
+        }
+        self.generics_decl(&g)
+    }
+
     fn generics_decl(&self, g: &Generics) -> String {
         if g.params.is_empty() {
             return String::new();
@@ -1277,7 +1302,7 @@ impl<'a> Lowerer<'a> {
             .where_clause
             .iter()
             .map(|w| match w {
-                WherePred::Type { ty, bounds } => format!("{}: {}", self.ty(ty, TyPos::Plain), self.bounds(bounds)),
+                WherePred::Type { ty, bounds, hrtb } => format!("{}{}: {}", hrtb.as_ref().map(|h| format!("{} ", h)).unwrap_or_default(), self.ty(ty, TyPos::Plain), self.bounds(bounds)),
                 WherePred::Lifetime { name, bounds } => format!("'{}: {}", name, bounds.join(" + ")),
             })
             .collect();
@@ -1667,10 +1692,14 @@ impl<'a> Lowerer<'a> {
                 self.e.nl();
                 self.module.push(name.clone());
                 self.inline_depth += 1;
+                // its `test` blocks are tested inside it, where its own names are in scope
+                let outer_tests = std::mem::take(&mut self.tests);
                 for i in items {
                     self.e.nl();
                     self.item(i, ItemCtx::Top);
                 }
+                self.emit_tests();
+                self.tests = outer_tests;
                 self.inline_depth -= 1;
                 self.module.pop();
                 self.e.dedent();
@@ -1717,6 +1746,9 @@ impl<'a> Lowerer<'a> {
                     }
                     _ => s.clone(),
                 };
+                // `@cfg(windows) mod sys`, `@macro_use extern crate log`
+                self.docs(&it.docs);
+                self.attrs(&it.attrs, &[]);
                 let text = self.include_paths(&text);
                 self.e.raw_lines(&text);
                 self.e.nl();
@@ -1871,7 +1903,8 @@ impl<'a> Lowerer<'a> {
         let in_trait_impl = f.mods.is_override || self.class.as_ref().is_some_and(|c| c.trait_methods.as_ref().is_some_and(|t| t.contains(&f.name)));
         for p in &f.params {
             let fn_typed = matches!(p.ty, Type::Fn { .. });
-            let mut pat = self.pat(&p.pat);
+            // `#[cfg(unix)] fd: i32`
+            let mut pat = p.attrs.iter().map(|a| format!("#[{}] ", a)).collect::<String>() + &self.pat(&p.pat);
             // stored in a field or collection, where it is boxed: `impl Shape + 'static`,
             // `impl Fn(i32) + 'static` (a `Box<dyn Fn>` can't hold an `FnMut`)
             if !in_trait_impl && self.is_impl_type(&p.ty) && p.name().is_some_and(|n| f.body.as_ref().is_some_and(|b| visit::stores_ident(b, n))) {
@@ -2066,7 +2099,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn ext_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {
-        let by_ref = !matches!(f.self_param, Some(SelfParam::Value { .. }) | Some(SelfParam::Typed(_)));
+        let by_ref = !matches!(f.self_param, Some(SelfParam::Value { .. }) | Some(SelfParam::Typed(_)) | Some(SelfParam::TypedMut(_)));
         let f = &auto_lifetimes(&self.with_inferred_ret(f, None), by_ref, &|n| self.k.type_lifetimes_in(n, &self.module));
         let f = &crate::bounds::with_inferred_bounds(f, &[], &[], &[]);
         let recv_ty = f.receiver.as_ref().unwrap();
@@ -2075,6 +2108,7 @@ impl<'a> Lowerer<'a> {
             Some(SelfParam::Value { mutable }) => if *mutable { "mut self" } else { "self" }.to_string(),
             Some(SelfParam::RefMut) => "&mut self".into(),
             Some(SelfParam::Typed(t)) => format!("self: {}", self.ty(t, TyPos::Plain)),
+            Some(SelfParam::TypedMut(t)) => format!("mut self: {}", self.ty(t, TyPos::Plain)),
             _ if f.mods.is_mut => "&mut self".into(),
             _ => "&self".into(),
         };
@@ -2120,13 +2154,13 @@ impl<'a> Lowerer<'a> {
         if let Some(owner) = recv_ty.single_name() {
             if self.class_info(owner).is_some() || self.enum_info(owner).is_some() {
                 let mut ctx = self.class_ctx_for(owner, &[], &[]);
-                ctx.is_static = matches!(f.self_param, Some(SelfParam::Typed(_)));
+                ctx.is_static = matches!(f.self_param, Some(SelfParam::Typed(_) | SelfParam::TypedMut(_)));
                 self.class = Some(ctx);
             } else if iface && self.k.traits.contains_key(owner) {
                 // an interface's methods (and its supertraits') are callable without `this.`
                 let mut ctx = self.class_ctx_for(owner, &[], std::slice::from_ref(recv_ty));
                 ctx.trait_methods = None;
-                ctx.is_static = matches!(f.self_param, Some(SelfParam::Typed(_)));
+                ctx.is_static = matches!(f.self_param, Some(SelfParam::Typed(_) | SelfParam::TypedMut(_)));
                 self.class = Some(ctx);
             }
         }
@@ -2173,6 +2207,7 @@ impl<'a> Lowerer<'a> {
         let recv_text = match &f.self_param {
             Some(SelfParam::Value { mutable: true }) => Some("mut self".to_string()),
             Some(SelfParam::Typed(t)) => Some(format!("self: {}", self.ty(t, TyPos::Plain))),
+            Some(SelfParam::TypedMut(t)) => Some(format!("mut self: {}", self.ty(t, TyPos::Plain))),
             _ => match recv {
                 Recv::Static => None,
                 Recv::Ref => Some("&self".into()),
@@ -2281,7 +2316,7 @@ impl<'a> Lowerer<'a> {
         let vis = self.vis(&it.vis, ctx);
         let saved_members_pub = self.members_pub;
         self.members_pub = it.vis == Vis::Public;
-        let g = self.generics_decl(&t.generics);
+        let (g, gd) = (self.impl_generics(&t.generics), self.generics_decl(&t.generics));
         let gn = self.generics_names(&t.generics);
         let wc = self.where_clause(&t.generics);
         // a shared class is emitted as `{Name}Data` plus a handle named `Name`
@@ -2315,24 +2350,24 @@ impl<'a> Lowerer<'a> {
         match t.kind {
             TypeKind::TupleStruct => {
                 if t.tuple_fields.is_empty() {
-                    self.e.w(&format!("{}struct {}{}{};", vis, data_name, g, wc));
+                    self.e.w(&format!("{}struct {}{}{};", vis, data_name, gd, wc));
                 } else {
                     let parts: Vec<String> = t
                         .tuple_fields
                         .iter()
                         .map(|(v, ty)| format!("{}{}", self.vis(v, ItemCtx::Top), self.ty(ty, TyPos::Field)))
                         .collect();
-                    self.e.w(&format!("{}struct {}{}({}){};", vis, data_name, g, parts.join(", "), wc));
+                    self.e.w(&format!("{}struct {}{}({}){};", vis, data_name, gd, parts.join(", "), wc));
                 }
                 self.e.nl();
             }
             _ => {
                 let kw = if t.kind == TypeKind::Union { "union" } else { "struct" };
                 if fields.is_empty() {
-                    self.w_named(&format!("{}{} ", vis, kw), t.name_span, &data_name, &format!("{}{};", g, wc));
+                    self.w_named(&format!("{}{} ", vis, kw), t.name_span, &data_name, &format!("{}{};", gd, wc));
                     self.e.nl();
                 } else {
-                    self.w_named(&format!("{}{} ", vis, kw), t.name_span, &data_name, &format!("{}{} {{", g, wc));
+                    self.w_named(&format!("{}{} ", vis, kw), t.name_span, &data_name, &format!("{}{} {{", gd, wc));
                     self.e.indent();
                     for (f, ty) in &fields {
                         self.e.nl();
@@ -2908,7 +2943,7 @@ impl<'a> Lowerer<'a> {
             bare.generics = Generics::default();
             let out = crate::bounds::with_inferred_bounds(&bare, &c.generics, &fields, &cases);
             for w in &out.generics.where_clause {
-                if let WherePred::Type { ty, bounds } = w {
+                if let WherePred::Type { ty, bounds, .. } = w {
                     if !ty.single_name().is_some_and(|n| own.contains(n)) {
                         continue;
                     }
@@ -3133,7 +3168,7 @@ impl<'a> Lowerer<'a> {
         let vis = self.vis(&it.vis, ctx);
         let saved_members_pub = self.members_pub;
         self.members_pub = it.vis == Vis::Public;
-        let g = self.generics_decl(&t.generics);
+        let (g, gd) = (self.impl_generics(&t.generics), self.generics_decl(&t.generics));
         let gn = self.generics_names(&t.generics);
         let wc = self.where_clause(&t.generics);
         let self_ty = format!("{}{}", t.name, gn);
@@ -3148,7 +3183,7 @@ impl<'a> Lowerer<'a> {
         }
         self.docs(&it.docs);
         self.attrs(&it.attrs, &derives);
-        self.w_named(&format!("{}enum ", vis), t.name_span, &t.name, &format!("{}{} {{", g, wc));
+        self.w_named(&format!("{}enum ", vis), t.name_span, &t.name, &format!("{}{} {{", gd, wc));
         self.e.indent();
         for v in &t.variants {
             self.e.nl();
@@ -3163,6 +3198,21 @@ impl<'a> Lowerer<'a> {
                     s.push('(');
                     s.push_str(&ts.iter().map(|t| self.ty(t, TyPos::Field)).collect::<Vec<_>>().join(", "));
                     s.push(')');
+                }
+                // fields with docs or attributes (`@cfg(feature = "std") got: String`) one a line
+                VariantFields::Named(fs) if fs.iter().any(|f| !f.docs.is_empty() || !f.attrs.is_empty()) => {
+                    s.push_str(" {");
+                    for f in fs {
+                        s.push_str("\n    ");
+                        for d in &f.docs {
+                            s.push_str(&format!("///{}\n    ", d));
+                        }
+                        for a in crate::parser::attr_texts(&f.attrs) {
+                            s.push_str(&format!("#[{}]\n    ", a));
+                        }
+                        s.push_str(&format!("{}: {},", esc(&f.name), self.ty(&f.ty, TyPos::Field)));
+                    }
+                    s.push_str("\n}");
                 }
                 VariantFields::Named(fs) => {
                     s.push_str(" { ");

@@ -183,6 +183,15 @@ impl Printer<'_> {
         let mut out: Vec<String> = Vec::new();
         let mut prev_end: Option<usize> = None;
         let n = b.stmts.len();
+        // `#[cfg(a)] { x }` then `#[cfg(b)] { y }` at the end: the configuration keeps one of them,
+        // which is the block's value, so each is translated as the last statement
+        let cfg_value = |s: &syn::Stmt| matches!(s, syn::Stmt::Expr(e, None) if split_stmt_attrs(e).is_some());
+        let mut value_from = n.saturating_sub(1);
+        if b.stmts.last().is_some_and(cfg_value) {
+            while value_from > 0 && cfg_value(&b.stmts[value_from - 1]) {
+                value_from -= 1;
+            }
+        }
         for (i, s) in b.stmts.iter().enumerate() {
             let start = stmt_start_line(s);
             let cs = self.take_comments(lo, start);
@@ -193,7 +202,7 @@ impl Printer<'_> {
                 }
             }
             out.extend(cs);
-            let last = i + 1 == n;
+            let last = i >= value_from;
             let pending = self.pending.len();
             let mut text = self.stmt(s, last, ctx, semi_rule);
             if self.pending.len() > pending {
@@ -227,8 +236,8 @@ impl Printer<'_> {
     fn stmt(&mut self, s: &syn::Stmt, last: bool, ctx: &Ctx, semi_rule: bool) -> String {
         match s {
             syn::Stmt::Local(l) => self.local(l),
-            // Oxie has `macro_rules!` only at the top level
-            syn::Stmt::Item(it @ syn::Item::Macro(_)) => format!("rust {{\n{}\n}}", indent(&crate::printer::rust_item(it))),
+            // an item macro (`macro_rules! name { .. }`, `thread_local! { .. }`) is written as in Rust
+            syn::Stmt::Item(it @ syn::Item::Macro(_)) => crate::printer::rust_item(it),
             syn::Stmt::Item(it) => {
                 let prefix = std::mem::replace(&mut self.mod_prefix, self.cx.fn_path.clone());
                 let saved = std::mem::take(&mut self.cx);
@@ -238,15 +247,24 @@ impl Printer<'_> {
                 r
             }
             syn::Stmt::Expr(e, semi) => {
-                // attributes written before the statement go before it (Oxie has none for a block's
-                // value, which `ex` keeps as Rust). Oxie never takes a statement with attributes as
-                // the block's value, so it needs no `;`.
-                if !(last && semi.is_none() && !ctx.stmt) {
-                    if let Some((attrs, bare)) = split_stmt_attrs(e) {
-                        let (docs, prefix) = self.stmt_attrs(&attrs);
-                        let t = self.stmt(&syn::Stmt::Expr(bare, *semi), last, ctx, semi_rule && prefix.is_empty());
-                        return if t.is_empty() { t } else { format!("{}{}{}", docs, prefix, t) };
+                // `match x { #![deny(lint)] .. }` as a statement or a block's value: the same as
+                // `#[deny(lint)] match x { .. }`, which Oxie writes `@deny(lint) when (x) { .. }`
+                if let syn::Expr::Match(m) = e {
+                    if m.attrs.iter().any(|a| matches!(a.style, syn::AttrStyle::Inner(_))) {
+                        let mut m = m.clone();
+                        for a in &mut m.attrs {
+                            a.style = syn::AttrStyle::Outer;
+                        }
+                        return self.stmt(&syn::Stmt::Expr(syn::Expr::Match(m), *semi), last, ctx, semi_rule);
                     }
+                }
+                // attributes written before the statement go before it. A block ending in
+                // `#[cfg(a)] { x }` and `#[cfg(b)] { y }` keeps them: Oxie takes the attributed
+                // statements at its end as its value, as the configuration leaves one of them
+                if let Some((attrs, bare)) = split_stmt_attrs(e) {
+                    let (docs, prefix) = self.stmt_attrs(&attrs);
+                    let t = self.stmt(&syn::Stmt::Expr(bare, *semi), last, ctx, semi_rule && prefix.is_empty());
+                    return if t.is_empty() { t } else { format!("{}{}{}", docs, prefix, t) };
                 }
                 if last && semi.is_none() {
                     let t = self.ex(e, ctx);
@@ -572,6 +590,7 @@ impl Printer<'_> {
                 s
             }
             syn::Expr::Reference(r) => format!("&{}{}", if r.mutability.is_some() { "mut " } else { "" }, self.expr(&r.expr)),
+            syn::Expr::RawAddr(r) => format!("&raw {}{}", if matches!(r.mutability, syn::PointerMutability::Mut(_)) { "mut " } else { "const " }, self.expr(&r.expr)),
             syn::Expr::Repeat(r) => format!("[{}; {}]", self.expr(&r.expr), self.expr(&r.len)),
             syn::Expr::Return(r) => self.return_expr(r),
             syn::Expr::Struct(s) => self.struct_lit(s),
@@ -648,6 +667,17 @@ impl Printer<'_> {
     /// An expression with attributes (a block's value, an argument, a field of a struct literal),
     /// kept as Rust with them: Oxie has attributes on statements, not on expressions.
     fn attributed_expr(&mut self, e: &syn::Expr) -> String {
+        // an argument or element: `@cfg(unix) fd`, `@inline(always) { acc, x -> acc + x }`
+        if let Some((attrs, bare)) = split_stmt_attrs(e) {
+            let (docs, prefix) = self.stmt_attrs(&attrs);
+            if docs.is_empty() && !has_expr_attrs(&bare) {
+                let value = match &bare {
+                    syn::Expr::Closure(c) => self.closure(c, true),
+                    _ => self.expr(&bare),
+                };
+                return format!("{}{}", prefix, value);
+            }
+        }
         self.todo(line_of(e), "kept as Rust: Oxie has no attributes on expressions");
         format!("rust {{ {} }}", self.rust_expr_inline(e))
     }
@@ -657,7 +687,7 @@ impl Printer<'_> {
         let f: Result<syn::File, _> = syn::parse2(quote::quote!(fn __f() { #e; }));
         match f {
             Ok(f) => {
-                let s = prettyplease::unparse(&f);
+                let Some(s) = crate::printer::unparse(&f) else { return tok(e) };
                 let lines: Vec<&str> = s.lines().collect();
                 if lines.len() >= 3 {
                     let body: Vec<String> = lines[1..lines.len() - 1].iter().map(|l| l.strip_prefix("    ").unwrap_or(l).to_string()).collect();
@@ -694,6 +724,10 @@ impl Printer<'_> {
     /// An expression used as the receiver of `.x`, `?`, `[i]`.
     fn postfix(&mut self, e: &syn::Expr) -> String {
         let s = self.expr(e);
+        // `matches!(x, P).then(..)` → `(x is P).then(..)`
+        if matches!(e, syn::Expr::Macro(m) if m.mac.path.is_ident("matches")) && s.contains(" is ") {
+            return format!("({})", s);
+        }
         if is_postfix_safe(e) && !matches!(e, syn::Expr::Try(_)) {
             s
         } else if matches!(e, syn::Expr::Try(_)) {
@@ -876,10 +910,7 @@ impl Printer<'_> {
                     }
                 }
             }
-            if matches!(&*p.expr, syn::Expr::Field(_)) {
-                self.todo(line_of(c), "kept as Rust: Oxie reads `(x.f)(args)` as a method call");
-                return format!("rust {{ {} }}", self.rust_expr_inline(&syn::Expr::Call(c.clone())));
-            }
+
         }
         let mut expects: Vec<Option<syn::Type>> = Vec::new();
         let mut func = None;
@@ -915,7 +946,8 @@ impl Printer<'_> {
                 return format!("({} ?: {})", self.expr(&c.args[0]), self.expr(&c.args[1]));
             }
             if p.qself.is_none() && no_args && segs.len() == 2 && segs[1] == "new" {
-                if let Some(si) = self.info.structs.get(&segs[0]) {
+                let outside = self.info.outside_imports.contains(&(self.mod_prefix.clone(), segs[0].clone()));
+                if let Some(si) = self.info.structs.get(&segs[0]).filter(|_| !outside) {
                     if si.has_new {
                         expects = si.new_params.iter().cloned().map(Some).collect();
                         func = Some(id(&p.path.segments[0].ident));
@@ -930,13 +962,12 @@ impl Printer<'_> {
                 if let Some(ps) = self.info.fns.get(&segs[0]) {
                     expects = ps.iter().cloned().map(Some).collect();
                 }
-                // in a method, Oxie would call the type's own function of this name
+                // in a method, Oxie would call the type's own function of this name (Rust's bare
+                // `name()` never does; it may call a function a macro declares, or the prelude's
+                // `drop`)
                 let name = &segs[0];
-                if p.path.leading_colon.is_none()
-                    && self.cx.type_fns.contains(name)
-                    && !self.cx.bound.contains(name)
-                    && (self.info.free_fns.contains(name) || self.info.modules.contains(name) || self.krate.free_fns.contains(name))
-                {
+                let prelude = matches!(name.as_str(), "drop" | "Some" | "Ok" | "Err") && !self.info.free_fns.contains(name);
+                if p.path.leading_colon.is_none() && self.cx.type_fns.contains(name) && !self.cx.bound.contains(name) && !prelude {
                     func = Some(format!("self::{}", self.postfix(&c.func)));
                 }
             }
@@ -1122,10 +1153,8 @@ impl Printer<'_> {
         if !c.attrs.is_empty() {
             return self.attributed_expr(&syn::Expr::Closure(c.clone()));
         }
-        // Oxie would give `|| f(it)` a parameter `it`, hiding the variable it captures
-        if c.inputs.is_empty() && mentions(&c.body, "it") {
-            return format!("rust {{ {} }}", self.rust_expr_inline(&syn::Expr::Closure(c.clone())));
-        }
+        // `{ f(it) }` would have a parameter `it`, hiding the variable it captures: such a closure
+        // keeps Rust's `|| f(it)` (`kotlin_lambda_ok`)
         let kotlin = kotlin && self.kotlin_lambda_ok(c);
         let (todos, pending) = (self.todos.len(), self.pending.len());
         let saved = self.enter_closure();
@@ -1298,17 +1327,19 @@ impl Printer<'_> {
                 syn::Member::Unnamed(i) => i.index.to_string(),
             };
             let expect = field_types.iter().find(|(n, _)| *n == name).map(|(_, t)| t.clone());
+            // `#[cfg(unix)] fd: 3` → `@cfg(unix) fd: 3`
+            let (_, attrs) = self.stmt_attrs(&f.attrs);
             let shorthand = f.colon_token.is_none();
             if shorthand {
                 let val = self.ex(&f.expr, &Ctx::value());
                 if val == name {
-                    v.push(name);
+                    v.push(format!("{}{}", attrs, name));
                 } else {
-                    v.push(format!("{}: {}", name, val));
+                    v.push(format!("{}{}: {}", attrs, name, val));
                 }
             } else {
                 let val = self.ex(&f.expr, &Ctx::expect(expect.as_ref()));
-                v.push(format!("{}: {}", name, val));
+                v.push(format!("{}{}: {}", attrs, name, val));
             }
         }
         if let Some(r) = &s.rest {
@@ -1506,7 +1537,8 @@ impl Printer<'_> {
                     syn::Stmt::Expr(e, None) => self.ex(e, ctx),
                     st => self.stmt(st, false, &Ctx::stmt(), false),
                 };
-                if !t.contains('\n') && !t.starts_with("val ") && cond.len() + t.len() < 90 {
+                // `if (c) <T>::f()` would read as a comparison
+                if !t.contains('\n') && !t.starts_with("val ") && !t.starts_with('<') && cond.len() + t.len() < 90 {
                     return format!("if ({}) {}", cond, t);
                 }
                 self.todos.truncate(marks.0);
@@ -1641,6 +1673,10 @@ impl Printer<'_> {
 
     fn mac(&mut self, m: &syn::Macro, ctx: &Ctx) -> String {
         let name = if m.path.segments.len() == 1 { m.path.segments[0].ident.to_string() } else { String::new() };
+        // a bare `write(..)` would call the function or method `write` in scope
+        if self.name_taken(&name) {
+            return self.rust_macro(m);
+        }
         let r = match name.as_str() {
             "println" | "print" | "eprintln" | "eprint" | "format" | "panic" => self.fmt_macro(m, &name, 0),
             "write" | "writeln" => self.fmt_macro(m, &name, 1),
@@ -1655,6 +1691,11 @@ impl Printer<'_> {
             Some(s) => s,
             None => self.rust_macro(m),
         }
+    }
+
+    /// A function, method or variable named `name` is in scope, which a bare `name(..)` calls.
+    fn name_taken(&self, name: &str) -> bool {
+        self.info.free_fns.contains(name) || self.cx.bound.contains(name) || self.cx.class.as_ref().is_some_and(|c| c.methods.contains(name)) || self.cx.type_fns.contains(name)
     }
 
     /// A macro call passed through as Rust.
@@ -2096,7 +2137,7 @@ fn expr_attrs_mut(e: &mut syn::Expr) -> Option<&mut Vec<syn::Attribute>> {
 
 /// Attributes on an expression or on a field of a struct literal, which Oxie has no syntax for.
 fn has_expr_attrs(e: &syn::Expr) -> bool {
-    !expr_attrs(e).is_empty() || matches!(e, syn::Expr::Struct(s) if s.fields.iter().any(|f| !f.attrs.is_empty()))
+    !expr_attrs(e).is_empty()
 }
 
 /// Where `syn` keeps the attributes written before an expression statement: on the leftmost

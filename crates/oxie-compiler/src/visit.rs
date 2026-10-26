@@ -16,7 +16,7 @@ pub fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) {
                 }
             }
         }
-        Unary(_, x) | Try(x) | Unwrap(x) | Await(x) | Cast(x, _) | Paren(x) | Throw(x) => walk_expr(x, f),
+        Unary(_, x) | Try(x) | Unwrap(x) | Await(x) | Cast(x, _) | Paren(x) | Throw(x) | Attributed { expr: x, .. } => walk_expr(x, f),
         Field { recv, .. } => walk_expr(recv, f),
         Binary(_, a, b) | Assign(_, a, b) | Elvis(a, b) | Pair(a, b) | Index(a, b) | ArrayRepeat(a, b) => {
             walk_expr(a, f);
@@ -157,7 +157,7 @@ pub fn walk_expr_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr) -> bool) {
                 }
             }
         }
-        Unary(_, x) | Try(x) | Unwrap(x) | Await(x) | Cast(x, _) | Paren(x) | Throw(x) => walk_expr_mut(x, f),
+        Unary(_, x) | Try(x) | Unwrap(x) | Await(x) | Cast(x, _) | Paren(x) | Throw(x) | Attributed { expr: x, .. } => walk_expr_mut(x, f),
         Field { recv, .. } => walk_expr_mut(recv, f),
         Binary(_, a, b) | Assign(_, a, b) | Elvis(a, b) | Pair(a, b) | Index(a, b) | ArrayRepeat(a, b) => {
             walk_expr_mut(a, f);

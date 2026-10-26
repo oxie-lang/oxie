@@ -1,0 +1,16 @@
+// Attributes on parameters, arguments, elements and closures, and on a block's value.
+fun scale(n: i32, @cfg(debug_assertions) factor: i32, offset: i32): i32 {
+    @cfg(debug_assertions) return n * factor + offset
+    @cfg(not(debug_assertions)) n + offset
+}
+
+fun main() {
+    // a call for the builds without the parameter leaves it out
+    @cfg(debug_assertions) println(scale(2, 10, 1))
+    @cfg(not(debug_assertions)) println(scale(2, 1))
+    println(scale(3, @cfg(debug_assertions) 100, 4))
+    val v = vec[1, @cfg(test) 2, 3 + 4]
+    val pair = (1, @cfg(not(test)) "x")
+    val total = v.iter().fold(0, @inline(always) { acc, x -> acc + x })
+    println("${v:?} ${pair:?} $total")
+}

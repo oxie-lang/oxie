@@ -1,0 +1,24 @@
+class Fd(@cfg(unix) raw: i32, @cfg(not(unix)) handle: u64)
+
+fun open(): Fd = Fd { @cfg(unix) raw: 3, @cfg(not(unix)) handle: 3 }
+
+fun platform(): String throws String {
+    @cfg(unix) run {
+        val name = "unix"
+        name.to_string()
+    }
+    @cfg(not(unix)) run {
+        throw "not unix"
+    }
+}
+
+fun word(): &'static str {
+    @cfg(debug_assertions) return "debug"
+    @cfg(not(debug_assertions)) "release"
+}
+
+fun main() {
+    val fd = open()
+    @cfg(unix) println("${fd.raw}")
+    println("${platform().is_ok() || cfg!(not(unix))} ${word()}")
+}

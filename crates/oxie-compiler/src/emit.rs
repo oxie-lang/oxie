@@ -201,12 +201,135 @@ impl Emitter {
     }
 
     /// Writes raw multi-line text, re-indenting each line.
+    /// Writes Rust text taken from the source (a macro call, a `rust { }` block) with the
+    /// indentation of the code around it, except for the lines inside a string literal, which are
+    /// part of its text.
     pub fn raw_lines(&mut self, text: &str) {
-        for (i, l) in text.lines().enumerate() {
+        let in_string = lines_in_strings(text);
+        for (i, l) in text.split('\n').enumerate() {
             if i > 0 {
                 self.nl();
             }
-            self.w(l);
+            if in_string[i] {
+                self.verbatim(l);
+            } else {
+                self.w(l.strip_suffix('\r').unwrap_or(l));
+            }
         }
+    }
+
+    /// Writes a literal: lines after the first are part of its text and get no indentation.
+    pub fn literal(&mut self, text: &str) {
+        for (i, l) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.nl();
+                self.verbatim(l);
+            } else {
+                self.w(l);
+            }
+        }
+    }
+
+    fn verbatim(&mut self, text: &str) {
+        self.at_line_start = false;
+        self.buf.push_str(text);
+        self.col += text.chars().count() as u32;
+    }
+}
+
+/// For each line of Rust `text`, whether it starts inside a string literal (whose text it is).
+pub(crate) fn lines_in_strings(text: &str) -> Vec<bool> {
+    let b = text.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = vec![false];
+    let mut i = 0;
+    // `None` in code; `Some(None)` in a string with escapes; `Some(Some(n))` in a raw string
+    // closed by `"` and `n` `#`s
+    let mut string: Option<Option<usize>> = None;
+    let mut comment = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\n' {
+            out.push(string.is_some());
+            i += 1;
+            continue;
+        }
+        match string {
+            Some(None) if c == b'\\' => {
+                // an escaped newline continues the string on the next line
+                if b.get(i + 1) == Some(&b'\n') {
+                    out.push(true);
+                }
+                i += 2;
+                continue;
+            }
+            Some(None) if c == b'"' => string = None,
+            Some(Some(n)) if c == b'"' && b[i + 1..].iter().take(n).filter(|&&h| h == b'#').count() == n => {
+                string = None;
+                i += n;
+            }
+            Some(_) => {}
+            None if comment > 0 => {
+                if b[i..].starts_with(b"*/") {
+                    comment -= 1;
+                    i += 1;
+                } else if b[i..].starts_with(b"/*") {
+                    comment += 1;
+                    i += 1;
+                }
+            }
+            None if b[i..].starts_with(b"//") => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            None if b[i..].starts_with(b"/*") => {
+                comment = 1;
+                i += 1;
+            }
+            None if c == b'"' => {
+                // `r"..."`, `br#"..."#`: the `#`s before the quote close it too
+                let hashes = b[..i].iter().rev().take_while(|&&h| h == b'#').count();
+                let r = i - hashes;
+                let raw = r > 0 && b[r - 1] == b'r' && (r < 2 || !ident(b[r - 2]) || (matches!(b[r - 2], b'b' | b'c') && (r < 3 || !ident(b[r - 3]))));
+                string = Some(raw.then_some(hashes));
+            }
+            None if c == b'\'' => {
+                // a character literal (`'"'`, `'\''`), not a lifetime or a label
+                if b.get(i + 1) == Some(&b'\\') {
+                    let mut j = i + 3;
+                    while j < b.len() && b[j] != b'\'' && b[j] != b'\n' {
+                        j += 1;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                if let Some(ch) = text.get(i + 1..).and_then(|t| t.chars().next()) {
+                    if b.get(i + 1 + ch.len_utf8()) == Some(&b'\'') && ch != '\n' {
+                        i += 2 + ch.len_utf8();
+                        continue;
+                    }
+                }
+            }
+            None => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lines_in_strings;
+
+    #[test]
+    fn finds_lines_inside_strings() {
+        assert_eq!(lines_in_strings("a(\"x\n  y\")\nb"), [false, true, false]);
+        assert_eq!(lines_in_strings("r#\"a \" \n b\"#\nc"), [false, true, false]);
+        assert_eq!(lines_in_strings("'\"'\nx"), [false, false]);
+        assert_eq!(lines_in_strings("fn f<'a>(x: &'a str) {\n    \"s\\\n t\"\n}"), [false, false, true, false]);
+        assert_eq!(lines_in_strings("// \"\nx /* \" */\ny"), [false, false, false]);
+        assert_eq!(lines_in_strings("'\\''\n\"q\nr\""), [false, false, true]);
     }
 }

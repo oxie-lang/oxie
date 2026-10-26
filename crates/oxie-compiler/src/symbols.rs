@@ -130,6 +130,14 @@ fn text(t: &Type, slice: bool, is_trait: bool) -> String {
         Type::Maybe(t) => format!("?{}", type_text(t)),
         Type::Never => "!".into(),
         Type::Infer => "_".into(),
+        Type::FnPtr { head, params, variadic, ret } => {
+            let mut ps: Vec<String> = params.iter().map(|(n, t)| format!("{}{}", n.as_ref().map(|n| format!("{}: ", n)).unwrap_or_default(), type_text(t))).collect();
+            if *variadic {
+                ps.push("...".into());
+            }
+            format!("{}({}){}", head, ps.join(", "), ret.as_ref().map(|r| format!(" -> {}", type_text(r))).unwrap_or_default())
+        }
+        Type::Attributed(attrs, t) => format!("{}{}", attrs.iter().map(|a| format!("@{} ", a)).collect::<String>(), type_text(t)),
         Type::Raw(s) => s.clone(),
     }
 }
@@ -233,6 +241,7 @@ pub fn fun_signature(f: &FunDecl) -> String {
         Some(SelfParam::RefMut) => params.push("&mut self".into()),
         Some(SelfParam::Value { mutable }) => params.push(if *mutable { "mut self".into() } else { "self".into() }),
         Some(SelfParam::Typed(t)) => params.push(format!("self: {}", type_text(t))),
+        Some(SelfParam::TypedMut(t)) => params.push(format!("mut self: {}", type_text(t))),
         None => {}
     }
     params.extend(f.params.iter().map(param_text));

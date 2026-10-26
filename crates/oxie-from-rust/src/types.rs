@@ -136,12 +136,9 @@ impl Printer<'_> {
                 s.push_str(&self.ty(&r.elem));
                 s
             }
-            syn::Type::Slice(s) => {
-                if !slice {
-                    self.slice_by_value.set(true);
-                }
-                format!("[{}]", self.ty(&s.elem))
-            }
+            // where Oxie reads `[T]` as a list, Rust's slice is `slice<T>`
+            syn::Type::Slice(s) if !slice => format!("slice<{}>", self.ty(&s.elem)),
+            syn::Type::Slice(s) => format!("[{}]", self.ty(&s.elem)),
             syn::Type::Array(a) => format!("[{}; {}]", self.ty(&a.elem), self.rust_expr_inline(&a.len)),
             syn::Type::Tuple(t) => {
                 let v: Vec<String> = t.elems.iter().map(|e| self.ty(e)).collect();

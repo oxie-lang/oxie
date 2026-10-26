@@ -223,7 +223,7 @@ fn plan(files: &[(&[String], &File)]) -> (Adds, Vec<(usize, Diag)>) {
 fn context_param(p: &Param, ty: Type, unused: bool) -> Param {
     let name = p.name().unwrap_or_default().to_string();
     let default = Expr::new(ExprKind::Path { segs: vec![name.clone()], generics: None, global: false }, p.span);
-    let mut out = Param { pat: p.pat.clone(), ty, default: Some(default), context: true, lent: false, span: p.span };
+    let mut out = Param { pat: p.pat.clone(), ty, default: Some(default), context: true, lent: false, attrs: p.attrs.clone(), span: p.span };
     if let (true, Pat::Ident { name: n, .. }) = (unused, &mut out.pat) {
         *n = format!("_{}", name);
     }

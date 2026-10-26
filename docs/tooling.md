@@ -283,19 +283,21 @@ fun parse_point(s: &str): Point throws {
   list), `[k: v]` and `setOf(..)`, `HashMap::new()` becomes `[:]`, and `.collect::<Vec<_>>()`
   becomes `.to_list()`.
 * `Vec<T>` is written `[T]` and std's `HashMap<K, V>` `[K: V]`. `Vec<T>` stays where Oxie reads
-  `[T]` as a slice (`&mut Vec<T>`, `Arc<Vec<T>>`), and an item with a slice type Oxie can't write
-  (`type Bytes = [u8]`) is kept as Rust.
+  `[T]` as a slice (`&mut Vec<T>`, `Arc<Vec<T>>`), and a slice where Oxie reads `[T]` as a list
+  is `slice<T>` (`type Bytes = [u8]` becomes `typealias Bytes = slice<u8>`).
 * Receivers, `self.`, `Type::new` and literal `.to_string()`s are dropped where Oxie restores
   them, and a call to a function that a method of the same name hides in Oxie becomes
   `self::name(..)`. The translation is compiled with the Oxie compiler before it is printed:
-  receivers and derives Oxie would infer differently are written out, and items Oxie can't
-  express are kept as Rust in `rust { }` blocks with a `// TODO(from-rust)` comment (also
-  reported on stderr). Such a method of an `impl` is kept on its own, in an `impl` block after
-  the class, and the class's other methods are translated.
-* Attributes stay on their statements and `let`s: `#[cfg(test)] v.push(1);` becomes
-  `@cfg(test) v.push(1)`, and a doc comment on a statement, which documents nothing, becomes an
-  ordinary comment. Oxie has no attributes on expressions, so an expression with one (`#[cfg]`
-  on a block's value or on a `vec!` element) is kept as Rust with a TODO.
+  receivers and derives Oxie would infer differently are written out, and what Oxie can't
+  express (only nightly Rust is left: `box` patterns, `try` blocks, trait aliases) is kept as
+  Rust in `rust { }` blocks with a `// TODO(from-rust)` comment (also reported on stderr). Such a
+  method of an `impl` is kept on its own, in an `impl` block after the class, and the class's
+  other methods are translated.
+* Attributes stay where they are: `#[cfg(test)] v.push(1);` becomes `@cfg(test) v.push(1)`, and
+  parameters, arguments, `vec!` elements, closures and struct literal fields keep theirs
+  (`vec![1, #[cfg(test)] 2]` becomes `vec[1, @cfg(test) 2]`). A `#![..]` at the start of a
+  `match` becomes an attribute of the `when`, and a doc comment on a statement, which documents
+  nothing, becomes an ordinary comment.
 * Comments are kept. A `Box<dyn Error>` becomes `AnyError` (`Box<dyn Error + Send + Sync>`), so a
   failing `main` prints `error: ...` instead of Rust's `Error: ...` debug output.
 

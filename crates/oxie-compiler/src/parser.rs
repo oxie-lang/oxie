@@ -400,6 +400,15 @@ impl<'a> Parser<'a> {
                 inner_docs.push(d);
                 continue;
             }
+            // `#![no_std]` (before or after the `//!` docs)
+            if self.is_punct("#") && self.is_punct_at(1, "!") && self.is_punct_at(2, "[") {
+                self.bump();
+                self.bump();
+                if let Ok(g) = self.raw_group() {
+                    self.inner_attrs.push(g[1..g.len() - 1].to_string());
+                }
+                continue;
+            }
             if self.at_eof() {
                 break;
             }
@@ -483,7 +492,8 @@ impl<'a> Parser<'a> {
     fn visibility(&mut self) -> PResult<Vis> {
         if self.is_kw("pub") {
             self.bump();
-            if self.is_punct("(") {
+            // `pub(crate)`, `pub(in a::b)`; `pub ()` is a public field of type `()`
+            if self.is_punct("(") && (self.is_kw_at(1, "crate") || self.is_kw_at(1, "self") || self.is_kw_at(1, "super") || self.is_kw_at(1, "in")) {
                 let g = self.raw_group()?;
                 return Ok(Vis::Raw(format!("pub{}", g)));
             }
@@ -561,7 +571,7 @@ impl<'a> Parser<'a> {
         } else if self.is_kw("error") && self.is_kw_at(1, "enum") {
             self.bump();
             ItemKind::Type(self.enum_decl(true)?)
-        } else if self.is_kw("interface") || self.is_kw("trait") || (self.is_kw("unsafe") && self.is_kw_at(1, "trait")) {
+        } else if self.is_kw("interface") || self.is_kw("trait") || (self.is_kw("unsafe") && (self.is_kw_at(1, "trait") || self.is_kw_at(1, "interface"))) {
             ItemKind::Trait(self.trait_decl()?)
         } else if self.is_kw("impl") || (self.is_kw("unsafe") && self.is_kw_at(1, "impl")) {
             ItemKind::Impl(self.impl_decl()?)
@@ -608,14 +618,29 @@ impl<'a> Parser<'a> {
             let g = self.raw_group()?;
             ItemKind::Raw(dedent_raw(&g[1..g.len() - 1]))
         } else if self.is_kw("extern") && self.is_kw_at(1, "crate") {
-            let s = self.pos;
-            self.recover_stmt();
-            let text = self.src[self.toks[s].span.start as usize..self.prev_span().end as usize].to_string();
-            ItemKind::Raw(if text.ends_with(';') { text } else { format!("{};", text) })
+            // `extern crate alloc`, `extern crate core as std`
+            self.bump();
+            self.bump();
+            let name = if self.eat_kw("self") { "self".to_string() } else { self.ident()? };
+            let alias = if self.eat_kw("as") { Some(self.ident()?) } else { None };
+            self.eat_punct(";");
+            let vis = match &vis {
+                Vis::Public => "pub ".to_string(),
+                Vis::Internal => "pub(crate) ".to_string(),
+                Vis::Raw(r) => format!("{} ", r),
+                _ => String::new(),
+            };
+            ItemKind::Raw(match alias {
+                Some(a) => format!("{}extern crate {} as {};", vis, name, a),
+                None => format!("{}extern crate {};", vis, name),
+            })
         } else if self.is_kw("extern") && self.is_punct_at(1, "{")
             || self.is_kw("extern") && matches!(self.tok_at(1), Tok::Str(_) | Tok::RawStr(_)) && self.is_punct_at(2, "{")
+            || self.is_kw("unsafe") && self.is_kw_at(1, "extern") && (self.is_punct_at(2, "{") || self.is_punct_at(3, "{"))
         {
+            // `extern "C" { .. }`, `unsafe extern "C" { safe fn abs(x: i32) -> i32; }`
             let s = self.toks[self.pos].span.start as usize;
+            self.eat_kw("unsafe");
             self.bump();
             if !self.is_punct("{") {
                 self.bump();
@@ -624,24 +649,7 @@ impl<'a> Parser<'a> {
             let _ = g;
             ItemKind::Raw(self.src[s..self.prev_span().end as usize].to_string())
         } else if let Some(n) = self.item_macro_path() {
-            // item macro: macro_rules! name { ... } / thread_local! { ... } / a::b! { ... }
-            let s = self.toks[self.pos].span.start as usize;
-            for _ in 0..=n {
-                self.bump();
-            }
-            if self.is_ident() {
-                self.bump();
-            }
-            if !(self.is_punct("{") || self.is_punct("(") || self.is_punct("[")) {
-                return self.expected("macro body");
-            }
-            self.raw_group()?;
-            let mut text = self.src[s..self.prev_span().end as usize].to_string();
-            if !text.ends_with('}') {
-                text.push(';');
-            }
-            self.eat_punct(";");
-            ItemKind::Macro(text)
+            self.item_macro(n)?
         } else {
             if docs.is_empty() && attrs.is_empty() && vis == Vis::Default && contexts.is_empty() {
                 return Ok(None);
@@ -694,7 +702,7 @@ impl<'a> Parser<'a> {
                 self.diags.push(Diag::error(span, format!("`{}` is already a context here", name)));
             }
             let pat = Pat::Ident { name, by_ref: false, mutable: false, sub: None, span };
-            out.push(Param { pat, ty, default: None, context: true, lent: false, span: span.to(self.prev_span()) });
+            out.push(Param { pat, ty, default: None, context: true, lent: false, attrs: Vec::new(), span: span.to(self.prev_span()) });
             if !self.eat_punct(",") {
                 self.expect_punct(")")?;
                 break;
@@ -859,7 +867,7 @@ impl<'a> Parser<'a> {
             }
             let pstart = self.span();
             let (_, pattrs) = self.docs_and_attrs()?;
-            let _ = pattrs;
+            let attrs = attr_texts(&pattrs);
             // Kotlin `val`/`var` in params are meaningless; `vararg` unsupported
             if self.is_kw("val") {
                 self.bump();
@@ -874,7 +882,7 @@ impl<'a> Parser<'a> {
             self.expect_punct(":")?;
             let ty = self.ty()?;
             let default = if self.eat_punct("=") { Some(self.expr()?) } else { None };
-            params.push(Param { pat, ty, default, context: false, lent: false, span: pstart.to(self.prev_span()) });
+            params.push(Param { pat, ty, default, context: false, lent: false, attrs, span: pstart.to(self.prev_span()) });
             if !self.eat_punct(",") {
                 self.expect_punct(")")?;
                 break;
@@ -936,6 +944,9 @@ impl<'a> Parser<'a> {
         if self.is_kw("mut") && is_self(self, 1) {
             self.bump();
             self.bump();
+            if self.eat_punct(":") {
+                return Ok(Some(SelfParam::TypedMut(self.ty()?)));
+            }
             return Ok(Some(SelfParam::Value { mutable: true }));
         }
         if self.is_punct("&") {
@@ -1045,12 +1056,21 @@ impl<'a> Parser<'a> {
                 }
                 g.where_clause.push(WherePred::Lifetime { name: l, bounds });
             } else {
+                // `where for<'a> &'a T: Add<Output = T>`
+                let hrtb = if self.is_kw("for") && self.is_punct_at(1, "<") {
+                    let s = self.toks[self.pos].span.start as usize;
+                    self.bump();
+                    self.generics_opt()?;
+                    Some(self.src[s..self.prev_span().end as usize].to_string())
+                } else {
+                    None
+                };
                 // `where [T]: Ord`
                 self.slice = true;
                 let ty = self.ty()?;
                 self.expect_punct(":")?;
                 let bounds = self.bounds()?;
-                g.where_clause.push(WherePred::Type { ty, bounds });
+                g.where_clause.push(WherePred::Type { ty, bounds, hrtb });
             }
             if !self.eat_punct(",") {
                 break;
@@ -1113,8 +1133,33 @@ impl<'a> Parser<'a> {
         Ok(t)
     }
 
+    /// `<<` where a type or type arguments start (`<<T as A>::B as C>::D`, `Vec<<T as A>::B>`)
+    /// is two `<`: the lexer reads it as a shift.
+    fn split_shl(&mut self) {
+        self.split_shl_at(0);
+    }
+
+    /// Splits a `<<` token `n` tokens ahead into two `<` (`Vec<<T as Tr>::A>`, `f::<<T as Tr>::A>()`).
+    fn split_shl_at(&mut self, n: usize) {
+        if self.is_punct_at(n, "<<") {
+            let i = self.pos + n;
+            let sp = self.toks[i].span;
+            self.toks[i] = Token { tok: Tok::Punct("<"), span: Span { start: sp.start, end: sp.start + 1 } };
+            self.toks.insert(i + 1, Token { tok: Tok::Punct("<"), span: Span { start: sp.start + 1, end: sp.end } });
+        }
+    }
+
+    /// `::<` of a turbofish, splitting a `::<<`.
+    fn at_turbofish(&mut self) -> bool {
+        if self.is_punct("::") {
+            self.split_shl_at(1);
+        }
+        self.is_punct("::") && self.is_punct_at(1, "<")
+    }
+
     fn ty_base(&mut self, dots: bool) -> PResult<Type> {
         let slice = std::mem::take(&mut self.slice);
+        self.split_shl();
         match self.tok().clone() {
             Tok::Punct("&") | Tok::Punct("&&") => {
                 let double = self.is_punct("&&");
@@ -1244,16 +1289,41 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Ok(Type::Infer)
             }
-            Tok::Ident(s) if s == "fn" || s == "unsafe" || s == "extern" => {
+            // `fn(&str, i32?) -> bool`, `unsafe extern "C" fn(*const u8)`, `for<'a> fn(&'a str)`
+            Tok::Ident(s) if s == "fn" || s == "unsafe" || s == "extern" || (s == "for" && self.is_punct_at(1, "<")) => {
                 let start = self.toks[self.pos].span.start as usize;
+                if s == "for" {
+                    self.bump();
+                    self.generics_opt()?;
+                }
                 while !self.is_punct("(") && !self.at_eof() {
                     self.bump();
                 }
-                self.raw_group()?;
-                if self.fn_ret && self.eat_punct("->") {
-                    self.ty()?;
+                let head = self.src[start..self.span().start as usize].trim_end().to_string();
+                self.expect_punct("(")?;
+                let fn_ret = std::mem::replace(&mut self.fn_ret, true);
+                let (mut params, mut variadic) = (Vec::new(), false);
+                while !self.eat_punct(")") {
+                    if self.eat_punct("...") {
+                        variadic = true;
+                    } else {
+                        let name = if (self.is_ident() || self.is_kw("_")) && self.is_punct_at(1, ":") && !self.is_punct_at(1, "::") {
+                            let n = self.bump();
+                            self.bump();
+                            Some(self.src[n.span.start as usize..n.span.end as usize].to_string())
+                        } else {
+                            None
+                        };
+                        params.push((name, self.ty()?));
+                    }
+                    if !self.eat_punct(",") {
+                        self.expect_punct(")")?;
+                        break;
+                    }
                 }
-                Ok(Type::Raw(self.src[start..self.prev_span().end as usize].to_string()))
+                self.fn_ret = fn_ret;
+                let ret = if self.fn_ret && self.eat_punct("->") { Some(Box::new(self.ty()?)) } else { None };
+                Ok(Type::FnPtr { head, params, variadic, ret })
             }
             Tok::Ident(_) | Tok::RawIdent(_) | Tok::Punct("::") => self.ty_path_dots(dots),
             _ => self.expected("type"),
@@ -1279,6 +1349,19 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        // a type macro: `syn::Token![,]`, `Ty!(..)`, kept as written
+        if self.is_punct("!") && (self.is_punct_at(1, "[") || self.is_punct_at(1, "(") || self.is_punct_at(1, "{")) && self.adjacent(usize::MAX, 0) {
+            let s = start.start as usize;
+            self.bump();
+            self.raw_group()?;
+            return Ok(Type::Raw(self.src[s..self.prev_span().end as usize].to_string()));
+        }
+        // `slice<T>`: Rust's slice `[T]` where `[T]` would be a list (`Mutex<slice<u8>>`)
+        if let [PathSeg { name, generics: Some(g), .. }] = &segs[..] {
+            if let (false, "slice", [GenericArg::Type(t)]) = (global, name.as_str(), &g[..]) {
+                return Ok(Type::Slice(Box::new(t.clone())));
+            }
+        }
         Ok(Type::Path { global, segs, span: start.to(self.prev_span()) })
     }
 
@@ -1299,10 +1382,11 @@ impl<'a> Parser<'a> {
                     self.diags.truncate(nd);
                 }
             }
-        } else if self.is_punct("<") || (self.is_punct("::") && self.is_punct_at(1, "<")) {
+        } else if self.is_punct("<") || (self.is_punct("<<") && !cast) || (self.is_punct("::") && (self.is_punct_at(1, "<") || self.is_punct_at(1, "<<"))) {
             if self.is_punct("::") {
                 self.bump();
             }
+            self.split_shl();
             seg.generics = Some(self.generic_args_of(unsized_args)?);
         } else if self.is_punct("(") && matches!(seg.name.as_str(), "Fn" | "FnMut" | "FnOnce") {
             self.bump();
@@ -1338,6 +1422,7 @@ impl<'a> Parser<'a> {
     }
 
     fn generic_args_inner(&mut self, unsized_args: bool) -> PResult<Vec<GenericArg>> {
+        self.split_shl();
         self.expect_punct("<")?;
         let mut args = Vec::new();
         loop {
@@ -1393,6 +1478,19 @@ impl<'a> Parser<'a> {
                 if let Tok::Lifetime(l) = self.tok().clone() {
                     self.bump();
                     out.push(Type::Lifetime(l));
+                    if !(self.eat_punct(",") || self.eat_punct("+")) {
+                        break;
+                    }
+                    continue;
+                }
+                // `interface DeserializeOwned : for<'de> Deserialize<'de>`
+                if self.is_kw("for") && self.is_punct_at(1, "<") {
+                    let s = self.toks[self.pos].span.start as usize;
+                    self.bump();
+                    self.generics_opt()?;
+                    self.trait_path = true;
+                    self.ty_path()?;
+                    out.push(Type::Raw(self.src[s..self.prev_span().end as usize].to_string()));
                     if !(self.eat_punct(",") || self.eat_punct("+")) {
                         break;
                     }
@@ -1575,6 +1673,12 @@ impl<'a> Parser<'a> {
         let save = self.pos;
         let (docs, attrs) = self.docs_and_attrs()?;
         let vis = self.visibility()?;
+        // a macro that expands to members: `forward_methods!()`
+        if let Some(n) = self.item_macro_path() {
+            let kind = self.item_macro(n)?;
+            decl.members.push(Item { docs, attrs, vis, kind, span: start.to(self.prev_span()) });
+            return Ok(());
+        }
         if self.is_kw("init") && self.is_punct_at(1, "{") {
             self.bump();
             decl.init = Some(self.block()?);
@@ -1688,7 +1792,10 @@ impl<'a> Parser<'a> {
             let name = self.ident()?;
             let mut fields = VariantFields::Unit;
             if self.is_punct("(") {
-                let named = self.is_ident_at(1) && self.is_punct_at(2, ":") || self.is_kw_at(1, "val");
+                // doc comments and attributes may come before the first field:
+                // `Moved(/// where to  at: usize)`, `Bad(@cfg(feature = "std") got: String)`
+                let first = self.after_attrs(1).unwrap_or(1);
+                let named = self.is_ident_at(first) && self.is_punct_at(first + 1, ":") || self.is_kw_at(first, "val");
                 self.bump();
                 if named {
                     let mut fs = Vec::new();
@@ -1715,7 +1822,14 @@ impl<'a> Parser<'a> {
                         if self.eat_punct(")") {
                             break;
                         }
-                        ts.push(self.ty()?);
+                        // a tuple field's doc comment documents nothing Rust shows
+                        while matches!(self.tok(), Tok::DocOuter(_)) {
+                            self.bump();
+                        }
+                        // `Small(@cfg(test) i32)`
+                        let attrs = if self.is_punct("@") || (self.is_punct("#") && self.is_punct_at(1, "[")) { attr_texts(&self.docs_and_attrs()?.1) } else { Vec::new() };
+                        let ty = self.ty()?;
+                        ts.push(if attrs.is_empty() { ty } else { Type::Attributed(attrs, Box::new(ty)) });
                         if !self.eat_punct(",") {
                             self.expect_punct(")")?;
                             break;
@@ -1799,6 +1913,11 @@ impl<'a> Parser<'a> {
                 let save = self.pos;
                 let (docs, attrs) = self.docs_and_attrs()?;
                 let vis = self.visibility()?;
+                if let Some(n) = self.item_macro_path() {
+                    let kind = self.item_macro(n)?;
+                    items.push(Item { docs, attrs, vis, kind, span: istart.to(self.prev_span()) });
+                    return Ok(());
+                }
                 if self.is_kw("type") && self.is_ident_at(1) {
                     self.bump();
                     let name = self.ident()?;
@@ -1822,7 +1941,8 @@ impl<'a> Parser<'a> {
                     items.push(Item { docs, attrs, vis, kind: ItemKind::TypeAlias { name, generics, ty }, span: istart.to(self.prev_span()) });
                     return Ok(());
                 }
-                if self.is_kw("const") {
+                // `const fun` (Rust's `const fn`) is a function, not a constant
+                if self.is_kw("const") && !self.is_fun_start() {
                     self.bump();
                     let c = self.const_body(false)?;
                     items.push(Item { docs, attrs, vis, kind: ItemKind::Const(c), span: istart.to(self.prev_span()) });
@@ -1895,8 +2015,9 @@ impl<'a> Parser<'a> {
         // TS style: import { A, B as C } from path
         if self.is_punct("{") {
             let items = self.use_group()?;
+            // without `from`, Rust's `use {a::b, c::d}`
             if !self.eat_kw("from") {
-                return self.expected("`from`");
+                return Ok(ImportDecl { tree: UseTree::Group { segments: Vec::new(), items } });
             }
             let segments = self.use_path_segments()?;
             return Ok(ImportDecl { tree: UseTree::Group { segments, items } });
@@ -2038,6 +2159,40 @@ impl<'a> Parser<'a> {
         Ok(stmts)
     }
 
+    /// `text` from source offset `start` with the indentation of the line it starts on removed
+    /// from the lines after the first (but not from those inside a string literal), so the
+    /// generated code can indent it as its own.
+    fn dedent_from_line(&self, start: usize, text: &str) -> String {
+        let line = self.src[..start].rfind('\n').map_or(0, |p| p + 1);
+        let indent = self.src[line..].len() - self.src[line..].trim_start_matches([' ', '\t']).len();
+        let in_string = crate::emit::lines_in_strings(text);
+        let lines: Vec<&str> = text.split('\n').enumerate().map(|(i, l)| if i == 0 || in_string[i] { l } else { strip_indent(l, indent) }).collect();
+        lines.join("\n")
+    }
+
+    /// An item macro call, whose path ends at token `n` (`item_macro_path`):
+    /// `macro_rules! name { ... }`, `thread_local! { ... }`, `a::b!(...)`, also in a class, interface
+    /// or `impl` body (`deref_forward_buf!()`).
+    fn item_macro(&mut self, n: usize) -> PResult<ItemKind> {
+        let s = self.toks[self.pos].span.start as usize;
+        for _ in 0..=n {
+            self.bump();
+        }
+        if self.is_ident() {
+            self.bump();
+        }
+        if !(self.is_punct("{") || self.is_punct("(") || self.is_punct("[")) {
+            return self.expected("macro body");
+        }
+        self.raw_group()?;
+        let mut text = self.dedent_from_line(s, &self.src[s..self.prev_span().end as usize]);
+        if !text.ends_with('}') {
+            text.push(';');
+        }
+        self.eat_punct(";");
+        Ok(ItemKind::Macro(text))
+    }
+
     /// The number of tokens of the path before `!` when an item macro call starts here
     /// (`thread_local!`, `wasmtime::component::bindgen!`).
     fn item_macro_path(&self) -> Option<usize> {
@@ -2068,10 +2223,12 @@ impl<'a> Parser<'a> {
                 "enum" => self.is_ident_at(1),
                 "data" | "error" => self.is_kw_at(1, "class") || self.is_kw_at(1, "enum"),
                 "shared" => self.is_kw_at(1, "class"),
-                "static" => self.is_ident_at(1) || self.is_kw_at(1, "mut"),
+                "static" => self.is_ident_at(1) || self.is_kw_at(1, "mut") || self.is_kw_at(1, "var"),
                 "type" => self.is_ident_at(1) && (self.is_punct_at(2, "=") || self.is_punct_at(2, "<")),
                 "object" => self.is_ident_at(1) && self.is_punct_at(2, "{"),
-                "unsafe" => self.is_kw_at(1, "impl") || self.is_kw_at(1, "trait") || self.is_kw_at(1, "interface"),
+                "unsafe" => self.is_kw_at(1, "impl") || self.is_kw_at(1, "trait") || self.is_kw_at(1, "interface") || self.is_kw_at(1, "extern") && !self.is_kw_at(2, "fn") && !self.is_kw_at(3, "fn"),
+                // `extern "C" { .. }`, `extern crate alloc`
+                "extern" => self.is_punct_at(1, "{") || self.is_kw_at(1, "crate") || matches!(self.tok_at(1), Tok::Str(_) | Tok::RawStr(_)) && self.is_punct_at(2, "{"),
                 _ => false,
             },
             Tok::Punct("@") => true,
@@ -2118,14 +2275,7 @@ impl<'a> Parser<'a> {
             let (_, attrs) = self.docs_and_attrs()?;
             let declaration = self.is_item_start() || self.is_fun_start() || matches!(self.tok(), Tok::Ident(s) if matches!(s.as_str(), "pub" | "private" | "internal" | "public"));
             if !declaration && !attrs.is_empty() {
-                let texts = attrs
-                    .iter()
-                    .map(|a| match a {
-                        Attr::Oxie { name, args: Some(a), .. } => format!("{}({})", name, a),
-                        Attr::Oxie { name, args: None, .. } => name.clone(),
-                        Attr::Raw(r) => r.clone(),
-                    })
-                    .collect();
+                let texts = attr_texts(&attrs);
                 let inner = self.stmt()?;
                 return Ok(Stmt::Attributed { attrs: texts, stmt: Box::new(inner) });
             }
@@ -2177,6 +2327,14 @@ impl<'a> Parser<'a> {
                 return Ok(Stmt::Item(Box::new(ItemBox(item))));
             }
         }
+        // `macro_rules! name { .. }` declared in a function body (not `return !done`)
+        let declares_macro = |p: &Self, n: usize| {
+            p.adjacent(n - 1, n) && !matches!(p.tok(), Tok::Ident(s) if is_reserved(s)) && p.is_ident_at(n + 1) && ["{", "(", "["].iter().any(|b| p.is_punct_at(n + 2, b))
+        };
+        if let Some(n) = self.item_macro_path().filter(|&n| declares_macro(self, n)) {
+            let kind = self.item_macro(n)?;
+            return Ok(Stmt::Item(Box::new(ItemBox(Item { docs: Vec::new(), attrs: Vec::new(), vis: Vis::Default, kind, span: start.to(self.prev_span()) }))));
+        }
         let expr = self.expr_stmt_like()?;
         Ok(Stmt::Expr { expr, semi: false })
     }
@@ -2221,6 +2379,14 @@ impl<'a> Parser<'a> {
     // ------------------------------------------------------------------ expressions
 
     pub fn expr(&mut self) -> PResult<Expr> {
+        // `f(a, @cfg(unix) b)`, `vec[1, @cfg(test) 2]`
+        if (self.is_punct("@") && matches!(self.tok_at(1), Tok::Ident(_))) || (self.is_punct("#") && self.is_punct_at(1, "[")) {
+            let start = self.span();
+            let (_, attrs) = self.docs_and_attrs()?;
+            let e = self.range_expr()?;
+            let sp = start.to(e.span);
+            return Ok(Expr::new(ExprKind::Attributed { attrs: attr_texts(&attrs), expr: Box::new(e) }, sp));
+        }
         self.range_expr()
     }
 
@@ -2513,7 +2679,20 @@ impl<'a> Parser<'a> {
         if self.is_punct("&") || self.is_punct("&&") {
             let double = self.is_punct("&&");
             self.bump();
-            let op = if self.eat_kw("mut") { UnOp::RefMut } else { UnOp::Ref };
+            // `&raw const x`, `&raw mut x`: a raw pointer without a reference in between
+            let raw = matches!(self.tok(), Tok::Ident(s) if s == "raw") && (self.is_kw_at(1, "const") || self.is_kw_at(1, "mut"));
+            if raw {
+                self.bump();
+            }
+            let op = match (raw, self.eat_kw("mut")) {
+                (true, true) => UnOp::RawMut,
+                (true, false) => {
+                    self.bump();
+                    UnOp::RawConst
+                }
+                (false, true) => UnOp::RefMut,
+                (false, false) => UnOp::Ref,
+            };
             let e = self.unary_expr()?;
             let sp = start.to(e.span);
             let r = Expr::new(ExprKind::Unary(op, Box::new(e)), sp);
@@ -2559,7 +2738,7 @@ impl<'a> Parser<'a> {
                     }
                     let name = self.member_name()?;
                     let mut generics = None;
-                    if self.is_punct("::") && self.is_punct_at(1, "<") {
+                    if self.is_punct("::") && (self.is_punct_at(1, "<") || self.is_punct_at(1, "<<")) {
                         self.bump();
                         generics = Some(self.generic_args()?);
                     } else if self.is_punct("<") {
@@ -2891,7 +3070,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Punct("{") => self.lambda_braces(),
             Tok::Punct("|") | Tok::Punct("||") => self.rust_closure(false, start),
-            Tok::Punct("::") | Tok::Punct("<") => self.path_expr(),
+            Tok::Punct("::") | Tok::Punct("<") | Tok::Punct("<<") => self.path_expr(),
             Tok::Ident(ref s) => match s.as_str() {
                 "true" | "false" => {
                     self.bump();
@@ -3122,6 +3301,7 @@ impl<'a> Parser<'a> {
 
     fn path_expr(&mut self) -> PResult<Expr> {
         let start = self.span();
+        self.split_shl();
         if self.is_punct("<") {
             let t = self.ty_base(true)?;
             return Ok(Expr::new(ExprKind::QualifiedPath(t), start.to(self.prev_span())));
@@ -3141,7 +3321,7 @@ impl<'a> Parser<'a> {
         let mut segs = vec![first];
         let mut generics = None;
         loop {
-            if self.is_punct("::") && self.is_punct_at(1, "<") {
+            if self.at_turbofish() {
                 self.bump();
                 let g = self.generic_args()?;
                 // `Vec::<i32>::new`: the arguments belong to `Vec`, so this is `<Vec<i32>>::new`
@@ -3152,7 +3332,7 @@ impl<'a> Parser<'a> {
                     while self.is_punct("::") {
                         self.bump();
                         rest.push(PathSeg::plain(self.member_name()?));
-                        if self.is_punct("::") && self.is_punct_at(1, "<") {
+                        if self.at_turbofish() {
                             self.bump();
                             rest.last_mut().unwrap().generics = Some(self.generic_args()?);
                         }
@@ -3201,10 +3381,11 @@ impl<'a> Parser<'a> {
             }
         }
         let sp = start.to(self.prev_span());
-        // macro call
-        if self.is_punct("!") && (self.is_punct_at(1, "(") || self.is_punct_at(1, "[") || self.is_punct_at(1, "{")) && self.adjacent(0, 1) {
+        // macro call: `name!(..)`, `name![..]`, `name! { .. }` (the `!` right after the name)
+        if self.is_punct("!") && (self.is_punct_at(1, "(") || self.is_punct_at(1, "[") || self.is_punct_at(1, "{")) && (self.adjacent(0, 1) || self.adjacent(usize::MAX, 0)) {
             self.bump();
             let text = self.raw_group()?;
+            let text = self.dedent_from_line(sp.start as usize, &text);
             return Ok(Expr::new(ExprKind::Macro { path: segs.join("::"), text }, sp.to(self.prev_span())));
         }
         // vec[...]
@@ -3262,16 +3443,36 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `V2 { x: 1 }` with a capitalized name declared elsewhere: a field name and `:` follow.
+    /// `V2 { x: 1 }` with a capitalized name declared elsewhere, or a C type's `timeval { tv_sec:
+    /// 1 }`: a field name and `:` follow (a lambda's typed parameter, `{ x: i32 -> }`, has an arrow).
     fn is_capitalized_struct_lit(&self, name: &str) -> bool {
-        if !name.starts_with(|c: char| c.is_uppercase()) {
-            return false;
-        }
         let mut i = 1;
         while matches!(self.tok_at(i), Tok::Newline) {
             i += 1;
         }
-        matches!(self.tok_at(i), Tok::Ident(_)) && matches!(self.tok_at(i + 1), Tok::Punct(":"))
+        let field = matches!(self.tok_at(i), Tok::Ident(_)) && matches!(self.tok_at(i + 1), Tok::Punct(":"));
+        field && (name.starts_with(|c: char| c.is_uppercase()) || !self.braces_have_arrow())
+    }
+
+    /// The token index after the attributes, doc comments and line breaks starting `i` tokens
+    /// ahead (`@cfg(unix) fd`, `#[cfg(unix)] fd`); None if one doesn't close.
+    fn after_attrs(&self, mut i: usize) -> Option<usize> {
+        loop {
+            match self.tok_at(i) {
+                Tok::Newline | Tok::DocOuter(_) => i += 1,
+                Tok::Punct("@") if matches!(self.tok_at(i + 1), Tok::Ident(_)) => {
+                    i += 2;
+                    while matches!(self.tok_at(i), Tok::Punct("::" | ".")) && matches!(self.tok_at(i + 1), Tok::Ident(_)) {
+                        i += 2;
+                    }
+                    if matches!(self.tok_at(i), Tok::Punct("(")) {
+                        i = self.matching_close(self.pos + i)? - self.pos + 1;
+                    }
+                }
+                Tok::Punct("#") if matches!(self.tok_at(i + 1), Tok::Punct("[")) => i = self.matching_close(self.pos + i + 1)? - self.pos + 1,
+                _ => return Some(i),
+            }
+        }
     }
 
     fn looks_like_struct_lit(&self) -> bool {
@@ -3280,7 +3481,12 @@ impl<'a> Parser<'a> {
         while matches!(self.tok_at(i), Tok::Newline) {
             i += 1;
         }
+        // `Name { @cfg(unix) fd: 3, .. }`: attributes before the first field
+        let Some(after) = self.after_attrs(i) else { return false };
+        let attributed = after != i;
+        i = after;
         match self.tok_at(i) {
+            Tok::Punct("}") | Tok::Punct("..") if attributed => false,
             Tok::Punct("}") => true,
             Tok::Punct("..") => true,
             Tok::Ident(_) | Tok::Int(_) | Tok::RawIdent(_) => {
@@ -3288,8 +3494,11 @@ impl<'a> Parser<'a> {
                 while matches!(self.tok_at(j), Tok::Newline) {
                     j += 1;
                 }
-                matches!(self.tok_at(j), Tok::Punct(":") | Tok::Punct(","))
-                    || (matches!(self.tok_at(j), Tok::Punct("}")) && !matches!(self.tok_at(i), Tok::Ident(s) if s == "it"))
+                // `Pair { 0: a, 1: b }` names fields by number; `Wrapper { 1 }` is a lambda
+                let int = matches!(self.tok_at(i), Tok::Int(_));
+                matches!(self.tok_at(j), Tok::Punct(":"))
+                    || (!int && matches!(self.tok_at(j), Tok::Punct(",")))
+                    || (!int && matches!(self.tok_at(j), Tok::Punct("}")) && !matches!(self.tok_at(i), Tok::Ident(s) if s == "it"))
             }
             _ => false,
         }
@@ -3298,6 +3507,7 @@ impl<'a> Parser<'a> {
     fn struct_lit(&mut self, path: Vec<String>, generics: Option<Vec<GenericArg>>, start: Span) -> PResult<Expr> {
         self.expect_punct("{")?;
         let mut fields = Vec::new();
+        let mut field_attrs = Vec::new();
         let mut base = None;
         loop {
             self.skip_newlines();
@@ -3310,9 +3520,18 @@ impl<'a> Parser<'a> {
                 self.expect_punct("}")?;
                 break;
             }
+            // `@cfg(unix) fd: 3`, `#[cfg(unix)] fd: 3`
+            let attrs = if self.is_punct("@") || (self.is_punct("#") && self.is_punct_at(1, "[")) {
+                let (_, attrs) = self.docs_and_attrs()?;
+                self.skip_newlines();
+                attr_texts(&attrs)
+            } else {
+                Vec::new()
+            };
             let name = self.member_name()?;
             let value = if self.eat_punct(":") { Some(self.expr()?) } else { None };
             fields.push((name, value));
+            field_attrs.push(attrs);
             self.skip_nl_only();
             if !self.eat_punct(",") {
                 self.skip_newlines();
@@ -3320,7 +3539,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(Expr::new(ExprKind::StructLit { path, generics, fields, base }, start.to(self.prev_span())))
+        Ok(Expr::new(ExprKind::StructLit { path, generics, fields, base, field_attrs }, start.to(self.prev_span())))
     }
 
     /// `(expr)`, `(a, b)`, `()` or an arrow lambda `(a, b) => ...`.
@@ -3885,14 +4104,15 @@ impl<'a> Parser<'a> {
             if let Pat::Lit(lo) = &p {
                 let inclusive = self.is_punct("..=") || self.is_punct("...");
                 self.bump();
-                let hi = if self.lit_pattern_start() { Some(Box::new(self.lit_pattern_expr()?)) } else { None };
+                // `1..=MAX`, `0..=super::LIMIT`
+                let hi = if self.lit_pattern_start() || self.is_ident() || self.is_punct("::") || self.is_kw("super") || self.is_kw("crate") || self.is_kw("Self") { Some(Box::new(self.lit_pattern_expr()?)) } else { None };
                 return Ok(Pat::Range { lo: Some(lo.clone()), hi, inclusive });
             }
             if let Pat::Path(segs, _) = &p {
                 let inclusive = self.is_punct("..=");
                 self.bump();
                 let lo = Expr::new(ExprKind::Path { segs: segs.clone(), generics: None, global: false }, Span::default());
-                let hi = if self.lit_pattern_start() || self.is_ident() { Some(Box::new(self.lit_pattern_expr()?)) } else { None };
+                let hi = if self.lit_pattern_start() || self.is_ident() || self.is_punct("::") || self.is_kw("super") || self.is_kw("crate") || self.is_kw("Self") { Some(Box::new(self.lit_pattern_expr()?)) } else { None };
                 return Ok(Pat::Range { lo: Some(Box::new(lo)), hi, inclusive });
             }
         }
@@ -3910,7 +4130,7 @@ impl<'a> Parser<'a> {
             let sp = start.to(e.span);
             return Ok(Expr::new(ExprKind::Unary(UnOp::Neg, Box::new(e)), sp));
         }
-        if self.is_ident() {
+        if self.is_ident() || self.is_kw("super") || self.is_kw("crate") || self.is_kw("Self") || self.is_punct("::") {
             return self.path_expr();
         }
         self.primary()
@@ -4002,13 +4222,16 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let mutable = self.eat_kw("mut");
                 let name = self.ident()?;
-                Ok(Pat::Ident { name, by_ref: true, mutable, sub: None, span: start.to(self.prev_span()) })
+                // `ref s @ Content.Str(_)`
+                let sub = if self.eat_punct("@") { Some(Box::new(self.pattern_no_or()?)) } else { None };
+                Ok(Pat::Ident { name, by_ref: true, mutable, sub, span: start.to(self.prev_span()) })
             }
             // `val (tx, var rx) = ...`: only `rx` changes
             Tok::Ident(s) if s == "mut" || (s == "var" && self.is_ident_at(1)) => {
                 self.bump();
                 let name = self.ident()?;
-                Ok(Pat::Ident { name, by_ref: false, mutable: true, sub: None, span: start.to(self.prev_span()) })
+                let sub = if self.eat_punct("@") { Some(Box::new(self.pattern_no_or()?)) } else { None };
+                Ok(Pat::Ident { name, by_ref: false, mutable: true, sub, span: start.to(self.prev_span()) })
             }
             Tok::Ident(_) | Tok::RawIdent(_) | Tok::Punct("::") => {
                 let mut segs = Vec::new();
@@ -4016,7 +4239,8 @@ impl<'a> Parser<'a> {
                     segs.push(String::new());
                 }
                 let first = match self.tok().clone() {
-                    Tok::Ident(s) if s == "Self" || s == "crate" || s == "super" || !is_reserved(&s) => {
+                    // `self::BB`: a constant of this module
+                    Tok::Ident(s) if s == "Self" || s == "crate" || s == "super" || (s == "self" && self.is_punct_at(1, "::")) || !is_reserved(&s) => {
                         self.bump();
                         s
                     }
@@ -4031,11 +4255,17 @@ impl<'a> Parser<'a> {
                     self.bump();
                     segs.push(self.member_name()?);
                 }
-                if self.is_punct("::") && self.is_punct_at(1, "<") {
+                if self.at_turbofish() {
                     self.bump();
                     self.generic_args()?;
                 }
                 let span = start.to(self.prev_span());
+                // a macro that expands to a pattern: `ascii_tab_or_new_line_pattern!()`
+                if self.is_punct("!") && (self.is_punct_at(1, "(") || self.is_punct_at(1, "[") || self.is_punct_at(1, "{")) && self.adjacent(usize::MAX, 0) {
+                    self.bump();
+                    let g = self.raw_group()?;
+                    return Ok(Pat::Raw(format!("{}!{}", segs.join("::"), g)));
+                }
                 if self.is_punct("(") {
                     self.bump();
                     let mut elems = Vec::new();
@@ -4133,26 +4363,34 @@ fn bin(op: BinOp, l: Expr, r: Expr) -> Expr {
     Expr::new(ExprKind::Binary(op, Box::new(l), Box::new(r)), sp)
 }
 
-/// Which expressions may take a trailing lambda without parentheses: `foo { }`, `a.b { }`.
+/// Which expressions may take a trailing lambda without parentheses: `foo { }`, `a.b { }`,
+/// `AssertUnwindSafe { }` (a struct literal `Point { x: 1 }` was ruled out before).
 fn is_lambda_callee(e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Path { segs, .. } => segs.last().is_some_and(|s| !is_type_like(s)),
-        _ => false,
-    }
+    matches!(e.kind, ExprKind::Path { .. })
 }
 
-/// Removes common indentation from raw Rust blocks.
+/// `l` without up to `n` leading spaces or tabs.
+fn strip_indent(l: &str, n: usize) -> &str {
+    let ws = l.len() - l.trim_start_matches([' ', '\t']).len();
+    &l[ws.min(n)..]
+}
+
+/// Removes common indentation from raw Rust blocks, except from the lines inside a string literal.
 fn dedent_raw(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
+    let in_string = crate::emit::lines_in_strings(s);
     let min = lines
         .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
+        .zip(&in_string)
+        .filter(|(l, s)| !l.trim().is_empty() && !**s)
+        .map(|(l, _)| l.len() - l.trim_start().len())
         .min()
         .unwrap_or(0);
     let mut out = Vec::new();
-    for l in lines {
-        if l.trim().is_empty() {
+    for (l, s) in lines.into_iter().zip(in_string) {
+        if s {
+            out.push(l.to_string());
+        } else if l.trim().is_empty() {
             out.push(String::new());
         } else {
             out.push(l[min.min(l.len())..].to_string());
@@ -4178,4 +4416,16 @@ fn dot_path(e: &Expr) -> Option<Vec<String>> {
         }
         _ => None,
     }
+}
+
+/// Attributes as the Rust text inside `#[...]`.
+pub(crate) fn attr_texts(attrs: &[Attr]) -> Vec<String> {
+    attrs
+        .iter()
+        .map(|a| match a {
+            Attr::Oxie { name, args: Some(a), .. } => format!("{}({})", name, a),
+            Attr::Oxie { name, args: None, .. } => name.clone(),
+            Attr::Raw(r) => r.clone(),
+        })
+        .collect()
 }
