@@ -1,0 +1,22 @@
+// The values a null check unwraps are unwrapped only in the branch it guards: the `else` of
+// `if (a != null && b != null)` sees the optionals, and `else if (x == null) return` doesn't
+// take `x` away from the code after it.
+
+fun both(a: String?, b: String?): String =
+    if (a != null && b != null) "both: $a $b" else "incomplete: a=${a:?} b=${b:?} (${a == null} ${b == null})"
+
+fun f(x: String?): String {
+    if (val v = &x && v.len() > 3) {
+        return "long"
+    } else if (x == null) {
+        return "null"
+    }
+    "short: ${x!!.len()}"
+}
+
+fun main() {
+    println(both("x".to_string(), "y".to_string()))
+    println(both("x".to_string(), null))
+    println(both(null, "y".to_string()))
+    println("${f("abcde".to_string())} ${f(null)} ${f("ab".to_string())}")
+}

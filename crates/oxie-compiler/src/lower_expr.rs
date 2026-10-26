@@ -3300,7 +3300,7 @@ impl<'a> Lowerer<'a> {
         for seg in &segs {
             let next = self.fresh("v");
             self.e.w(&format!("if let Some({}) = {}", next, v));
-            self.segment_links(seg);
+            self.segment_links(seg, None);
             if matches!(seg.last().unwrap().kind, ExprKind::Field { .. } | ExprKind::Index(..)) {
                 self.e.w(".as_mut()");
             }
@@ -3352,6 +3352,11 @@ impl<'a> Lowerer<'a> {
     /// Let chains (`val a = x && a > 0 && val b = f(a)`), lowered to nested `if`/`match` so they
     /// work in every Rust edition. The `else` branch is repeated where a part can fail.
     fn let_chain(&mut self, parts: &[Cond], then: &Block, else_: Option<&Expr>, mode: Option<&Target>) {
+        if let Some(el) = else_ {
+            if self.let_tuple(parts, then, el, mode) {
+                return;
+            }
+        }
         if parts.is_empty() {
             match mode {
                 Some(t) => self.block_value(then, t),
@@ -3429,6 +3434,94 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `if (a != null && b != null) .. else ..` whose else uses `a` or `b`: one match on both
+    /// (`match (&a, &b) { (Some(a), Some(b)) => .., _ => .. }`), so the else sees them as they
+    /// are; inside nested matches it would see the unwrapped `a`. Only for variables and fields,
+    /// which reading early doesn't change. False when it doesn't apply.
+    fn let_tuple(&mut self, parts: &[Cond], then: &Block, el: &Expr, mode: Option<&Target>) -> bool {
+        fn flatten(parts: &[Cond], out: &mut Vec<Cond>) {
+            for c in parts {
+                match c {
+                    Cond::Chain(inner) => flatten(inner, out),
+                    c => out.push(c.clone()),
+                }
+            }
+        }
+        let mut flat = Vec::new();
+        flatten(parts, &mut flat);
+        let lets: Vec<(&Pat, &Expr, bool)> = flat.iter().filter_map(|c| if let Cond::Let { pat, expr, implicit_some } = c { Some((pat, expr, *implicit_some)) } else { None }).collect();
+        let mut bound = Vec::new();
+        for (pat, _, _) in &lets {
+            pat.bindings(&mut bound);
+        }
+        let uses = |n: &String| {
+            let mut found = false;
+            visit::walk_expr(el, &mut |x| {
+                found |= x.ident() == Some(n.as_str());
+                !found
+            });
+            found
+        };
+        let place = |e: &Expr| match &strip_paren(e).kind {
+            ExprKind::Unary(UnOp::Ref, x) => self.is_place(x),
+            _ => self.is_place(e),
+        };
+        if lets.len() < 2 || !lets.iter().all(|(_, e, _)| place(e)) || !bound.iter().any(uses) {
+            return false;
+        }
+        self.e.w("match (");
+        for (i, (pat, expr, implicit_some)) in lets.iter().enumerate() {
+            if i > 0 {
+                self.e.w(", ");
+            }
+            self.let_subject(pat, expr, *implicit_some);
+        }
+        self.e.w(") {");
+        self.e.indent();
+        self.e.nl();
+        self.push_scope();
+        self.e.w("(");
+        for (i, (pat, expr, implicit_some)) in lets.iter().enumerate() {
+            if i > 0 {
+                self.e.w(", ");
+            }
+            let p = self.let_cond_pat(pat, expr, *implicit_some);
+            if *implicit_some {
+                self.e.w(&format!("Some({})", p));
+            } else {
+                self.e.w(&p);
+            }
+            self.bind_pat(pat, None);
+            let field_by_ref = self.match_field_by_ref(expr, &[pat]);
+            for (name, t) in self.case_bindings(pat, Some(expr), field_by_ref) {
+                self.bind_name(&name, Some(t));
+            }
+            if let Pat::Ident { name, .. } = pat {
+                if let Some(i) = self.narrowed_types.iter().position(|(n, _)| n == name) {
+                    let (n, t) = self.narrowed_types.remove(i);
+                    self.bind_name(&n, Some(t));
+                }
+            }
+        }
+        self.e.w(")");
+        for (i, c) in flat.iter().filter(|c| matches!(c, Cond::Expr(_))).enumerate() {
+            self.e.w(if i == 0 { " if " } else { " && " });
+            if let Cond::Expr(x) = c {
+                self.expr(x, 5);
+            }
+        }
+        self.e.w(" => ");
+        self.chain_rest(&[], then, None, mode);
+        self.pop_scope();
+        self.e.nl();
+        self.e.w("_ => ");
+        self.chain_else(Some(el), mode);
+        self.e.dedent();
+        self.e.nl();
+        self.e.w("}");
+        true
+    }
+
     fn chain_rest(&mut self, rest: &[Cond], then: &Block, else_: Option<&Expr>, mode: Option<&Target>) {
         if rest.is_empty() {
             match mode {
@@ -3465,7 +3558,23 @@ impl<'a> Lowerer<'a> {
                     self.e.w("{");
                     self.e.indent();
                     self.e.nl();
+                    // `else if (x == null) return`: a `let Some(x) = x else` here would end with
+                    // the arm, after moving `x`
+                    let names: Vec<String> = match &el.kind {
+                        ExprKind::If { cond, .. } => match &**cond {
+                            Cond::Expr(c) => {
+                                let mut checks = Vec::new();
+                                or_operands(c, &mut checks);
+                                checks.iter().filter_map(|p| self.null_check(p, BinOp::Eq).map(str::to_string)).collect()
+                            }
+                            _ => Vec::new(),
+                        },
+                        _ => Vec::new(),
+                    };
+                    let before = self.unused_after_check.len();
+                    self.unused_after_check.extend(names);
                     let bl = self.stmt_expr(el);
+                    self.unused_after_check.truncate(before);
                     if !bl {
                         self.e.w(";");
                     }
@@ -4692,6 +4801,21 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// The extension function `recv.name(..)` calls: the only one of that name, or the one
+    /// for the receiver's type.
+    fn ext_fun_called(&self, recv: &Expr, name: &str) -> Option<crate::sema::FunInfo> {
+        let all = self.k.ext_funs.get(name)?;
+        let recv_name = self.infer_type(recv).map(|t| match t {
+            Type::Ref { inner, .. } => *inner,
+            t => t,
+        });
+        let recv_name = recv_name.as_ref().and_then(|t| t.single_name().map(String::from));
+        match all.as_slice() {
+            [(_, f)] if recv_name.is_none() => Some(f.clone()),
+            _ => all.iter().find(|(t, _)| recv_name.is_some() && t.single_name().map(String::from) == recv_name).map(|(_, f)| f.clone()),
+        }
+    }
+
     /// The `Home` of a method or constructor of a class (`this`: the object a method is called on).
     pub(crate) fn class_home(&self, c: &crate::sema::ClassInfo, this: Option<Expr>) -> Home {
         Home {
@@ -5387,10 +5511,11 @@ impl<'a> Lowerer<'a> {
                 self.unresolved.insert(name.to_string());
             }
         }
-        // an interface's method with interface parameters, which take boxes, on an interface
-        // value or a value whose class inherits it
+        // an interface's method, on an interface value, a type parameter bound by one or a value
+        // whose class inherits it: its parameters, as for a class's method (references lent,
+        // text converted, interface values boxed, defaults filled in)
         if !matches!(recv.kind, ExprKind::SelfValue) {
-            if let Some(m) = self.iface_method(recv, name).filter(|m| m.params.iter().any(|p| p.boxed)) {
+            if let Some(m) = self.iface_method(recv, name) {
                 self.expr(recv, P_POSTFIX);
                 self.e.w(&format!(".{}", esc(name)));
                 if let Some(g) = generics {
@@ -5440,6 +5565,18 @@ impl<'a> Lowerer<'a> {
             self.e.w(")");
             return;
         }
+        // an extension function (`fun i32.add_to(n: i32 = 10)`): its parameters, as for a function
+        if let Some(f) = self.ext_fun_called(recv, name) {
+            self.expr(recv, P_POSTFIX);
+            self.e.w(&format!(".{}", member(name)));
+            if let Some(g) = generics {
+                let gt = self.generic_args_text(g);
+                self.e.w(&format!("::{}", gt));
+            }
+            self.home = Some(Self::fun_home(&f.module));
+            self.arg_list(args, Some(&f.params), TyPos::Param, span);
+            return;
+        }
         let args = self.fix_lambda_arity(recv, name, args);
         self.expr(recv, P_POSTFIX);
         self.e.w(".");
@@ -5448,14 +5585,42 @@ impl<'a> Lowerer<'a> {
             let gt = self.generic_args_text(g);
             self.e.w(&format!("::{}", gt));
         }
+        let elem = self.lambda_elem(recv, name);
         if REF_PREDICATES.contains(&name) && args.len() == 1 && matches!(args[0].value.kind, ExprKind::Lambda { .. }) {
             self.e.w("(");
             self.next_lambda_refs = true;
+            self.next_lambda_elem = elem;
             self.lambda(&args[0].value, None, None);
             self.e.w(")");
             return;
         }
+        if args.len() == 1 && matches!(args[0].value.kind, ExprKind::Lambda { .. }) {
+            self.next_lambda_elem = elem;
+        }
         self.arg_list(&args, None, TyPos::Param, span);
+        self.next_lambda_elem = None;
+    }
+
+    /// The element a collection operation passes its lambda (`&Item` in `items.map { .. }` with
+    /// `items: [Item]`, `&&Item` in `items.iter().filter { .. }`), when the receiver's type tells.
+    fn lambda_elem(&self, recv: &Expr, name: &str) -> Option<Type> {
+        const OPS: &[&str] = &[
+            "map", "filter", "filter_not", "any", "all", "none", "count", "find", "find_last", "sum_of", "max_of", "min_of", "max_by_key", "min_by_key",
+            "sorted_by", "sorted_by_descending", "group_by", "associate_by", "distinct_by", "partition", "for_each", "flat_map", "filter_map",
+            "index_of_first", "index_of_last", "position", "take_while", "skip_while", "inspect",
+        ];
+        if !OPS.contains(&name) {
+            return None;
+        }
+        let (coll, through_iter) = match &recv.kind {
+            ExprKind::MethodCall { recv: inner, name: m, args, .. } if args.is_empty() && m == "iter" => (&**inner, true),
+            _ => (recv, false),
+        };
+        let elem = self.elem_type(coll).filter(|t| *t != Type::Infer)?;
+        let by_ref = |t: Type| Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) };
+        // an iterator's predicates get a reference to its item, itself a reference
+        let pred = through_iter && matches!(name, "filter" | "find" | "take_while" | "skip_while" | "inspect");
+        Some(if pred { by_ref(by_ref(elem)) } else { by_ref(elem) })
     }
 
     /// Can a method call on a value of type `t` reach a method of an Oxie class it didn't
@@ -5533,21 +5698,38 @@ impl<'a> Lowerer<'a> {
 
     // ------------------------------------------------------------------ safe navigation
 
-    fn link_suffix(&mut self, link: &Expr) {
+    /// A link of a `?.` chain after its value; `recv`, the value as a variable, when its type is
+    /// known, so a method of an Oxie class gets its parameters (defaults, lent references).
+    fn link_suffix(&mut self, link: &Expr, recv: Option<&Expr>) {
         match &link.kind {
             ExprKind::Field { name, .. } => {
                 self.e.w(".");
                 self.e.w(&member(name));
             }
             ExprKind::MethodCall { name, generics, args, .. } => {
-                self.unresolved.insert(name.clone());
+                let resolved = recv.and_then(|r| {
+                    let o = self.infer_type(r).and_then(|t| self.type_owner(&t))?;
+                    match self.class_at(&o) {
+                        Some(c) => c.methods.get(name).map(|m| (m.params.clone(), self.class_home(c, Some(r.clone())))),
+                        None => self.enum_at(&o).and_then(|en| en.methods.get(name).map(|m| (m.params.clone(), self.enum_home(en, Some(r.clone()))))),
+                    }
+                });
+                if resolved.is_none() {
+                    self.unresolved.insert(name.clone());
+                }
                 self.e.w(".");
                 self.e.w(&member(name));
                 if let Some(g) = generics {
                     let gt = self.generic_args_text(g);
                     self.e.w(&format!("::{}", gt));
                 }
-                self.arg_list(args, None, TyPos::Param, link.span);
+                match resolved {
+                    Some((params, home)) => {
+                        self.home = Some(home);
+                        self.arg_list(args, Some(&params), TyPos::Param, link.span);
+                    }
+                    None => self.arg_list(args, None, TyPos::Param, link.span),
+                }
             }
             ExprKind::Index(_, idx) => {
                 self.e.w("[");
@@ -5654,13 +5836,22 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh("v");
+            // the value of the first link: the optional's, borrowed when the optional is
+            let value = match (i, self.infer_type(prefix.last().copied().unwrap_or(base))) {
+                (0, Some(Type::Option(t))) => Some(if place { Type::Ref { lifetime: None, mutable: changes, inner: t } } else { *t }),
+                _ => None,
+            };
             // a shared object's field is read through its getter (a copy) at the end
             let getter = matches!(&seg.last().unwrap().kind, ExprKind::Field { recv, name, .. } if self.optional_shared_field(recv, name).is_some());
             let ends_in_field = matches!(seg.last().unwrap().kind, ExprKind::Field { .. } | ExprKind::Index(..)) && !getter;
             // a field read through a reference is borrowed (`&v.name`), like Kotlin's reference semantics
             let amp = borrowed && !flatten && ends_in_field;
             self.e.w(&format!(".{}(|{}| {}{}", method, v, if amp { "&" } else { "" }, v));
-            self.segment_links(seg);
+            self.push_scope();
+            self.bind_name(&v, value.filter(|t| *t != Type::Infer));
+            let recv = Expr::new(ExprKind::Path { segs: vec![v.clone()], generics: None, global: false }, e.span);
+            self.segment_links(seg, Some(&recv));
+            self.pop_scope();
             if flatten && ends_in_field {
                 self.e.w(".as_ref()");
             }
@@ -5672,7 +5863,7 @@ impl<'a> Lowerer<'a> {
     /// Emits the links of a `?.` segment after its value. A shared object's field is read as
     /// outside `?.`: through the getter, a copy (`v.name()`), at the end, and through one borrow
     /// inside (`v.0.read().items.len()`).
-    fn segment_links(&mut self, seg: &[&Expr]) {
+    fn segment_links(&mut self, seg: &[&Expr], first_recv: Option<&Expr>) {
         for (i, l) in seg.iter().enumerate() {
             let shared = match &l.kind {
                 ExprKind::Field { recv, name, .. } => self.optional_shared_field(recv, name).map(|sync| (name, sync)),
@@ -5693,7 +5884,7 @@ impl<'a> Lowerer<'a> {
                     let access = if write { "write()" } else { "read()" };
                     self.e.w(&format!(".0.{}.{}", access, member(name)));
                 }
-                None => self.link_suffix(l),
+                None => self.link_suffix(l, if i == 0 { first_recv } else { None }),
             }
         }
     }
@@ -6125,7 +6316,8 @@ impl<'a> Lowerer<'a> {
                     Some(call) => self.propagate(&call),
                     None => {
                         self.e.w(&var);
-                        self.segment_links(seg);
+                        let recv = Expr::new(ExprKind::Path { segs: vec![var.clone()], generics: None, global: false }, e.span);
+                        self.segment_links(seg, Some(&recv));
                     }
                 }
                 self.e.w(";");
@@ -7055,6 +7247,7 @@ impl<'a> Lowerer<'a> {
         }
         // predicates of `filter`, `find`, ... receive references to the elements
         let ref_params = std::mem::take(&mut self.next_lambda_refs);
+        let elem = std::mem::take(&mut self.next_lambda_elem);
         self.push_scope();
         let depth = self.scopes.len() - 1;
         let mut ps = Vec::new();
@@ -7068,7 +7261,7 @@ impl<'a> Lowerer<'a> {
             if ty.is_none() && typed_by_body {
                 self.untyped_params.push((depth, "it".into()));
             }
-            self.bind_name("it", ty);
+            self.bind_name("it", ty.or(elem.clone()));
         } else if *braces && params.is_empty() {
             // `{ println("hi") }` for a `(String) -> Unit`: the closure takes the argument anyway
             for t in param_tys.unwrap_or_default() {
@@ -7093,7 +7286,8 @@ impl<'a> Lowerer<'a> {
                     }
                 }
             }
-            self.bind_pat(&p.pat, ty);
+            let hint = if i == 0 && matches!(p.pat, Pat::Ident { .. }) { elem.clone() } else { None };
+            self.bind_pat(&p.pat, ty.or(hint));
         }
         self.e.w(&format!("|{}|", ps.join(", ")));
         let ret = ret.clone().or_else(|| ret_ty.cloned().filter(|t| !t.is_unit()));

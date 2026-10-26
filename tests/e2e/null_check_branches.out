@@ -1,0 +1,4 @@
+both: x y
+incomplete: a=Some("x") b=None (false true)
+incomplete: a=None b=Some("y") (true false)
+long null short: 2
