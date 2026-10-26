@@ -1,0 +1,13 @@
+// Defaults filled in by calls from another module that has names of its own like the callee's.
+
+const LIMIT: i32 = 99
+
+fun base(): i32 = -1
+
+fun main() {
+    println(limits.clamp(50))
+    println(limits.offset(1))
+    val w = limits.Window()
+    println(w.width())
+    println(LIMIT + base())
+}

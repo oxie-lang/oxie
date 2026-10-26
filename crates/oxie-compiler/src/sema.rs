@@ -205,6 +205,11 @@ pub struct Crate {
     /// Statics and constants whose names look like types (`static N`, also declared in a
     /// `thread_local!` or `lazy_static!` call): `N.with { }` reads the value, not a type's member.
     pub value_names: HashSet<String>,
+    /// The constants, statics and objects of each module: (module, name).
+    pub module_values: HashSet<(Vec<String>, String)>,
+    /// The names that default values of parameters read (`timeout: Duration = default_timeout()`):
+    /// calls fill these values in, so a private item with such a name is visible in the crate.
+    pub default_reads: HashSet<String>,
 }
 
 /// What `Crate` keys by module when several modules declare a name.
@@ -600,6 +605,7 @@ pub fn collect(units: &[SourceUnit], crate_name: &str, extern_crates: HashSet<St
     // pass 2: types and functions
     for u in units {
         collect_items(&mut k, &u.module, &u.file.items);
+        collect_default_reads(&mut k, &u.file.items);
     }
     // pass 3: inherent impl blocks add methods to classes
     for u in units {
@@ -1542,6 +1548,12 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                 m.push(name.clone());
                 collect_items(k, &m, items);
             }
+            ItemKind::Const(c) | ItemKind::Static(c) => {
+                k.module_values.insert((module.to_vec(), c.name.clone()));
+            }
+            ItemKind::Object { name, .. } => {
+                k.module_values.insert((module.to_vec(), name.clone()));
+            }
             _ => {}
         }
     }
@@ -1559,6 +1571,44 @@ fn impl_owner(k: &Crate, imp: &ImplDecl, module: &[String]) -> Option<String> {
 }
 
 /// The names of the constants among a type's members.
+fn collect_default_reads(k: &mut Crate, items: &[Item]) {
+    let read = |k: &mut Crate, e: &Expr| {
+        crate::visit::walk_expr(e, &mut |e| {
+            match &e.kind {
+                ExprKind::Path { segs, .. } => {
+                    k.default_reads.extend(segs.iter().take(2).cloned());
+                }
+                ExprKind::Call { callee, .. } => {
+                    if let Some(n) = callee.ident() {
+                        k.default_reads.insert(n.to_string());
+                    }
+                }
+                _ => {}
+            }
+            true
+        });
+    };
+    for it in items {
+        match &it.kind {
+            ItemKind::Fun(f) => {
+                for d in f.params.iter().filter_map(|p| p.default.as_ref()) {
+                    read(k, d);
+                }
+            }
+            ItemKind::Type(t) => {
+                for d in t.fields.iter().filter(|f| f.in_ctor).filter_map(|f| f.default.as_ref()) {
+                    read(k, d);
+                }
+                collect_default_reads(k, &t.members);
+            }
+            ItemKind::Trait(t) => collect_default_reads(k, &t.members),
+            ItemKind::Impl(i) => collect_default_reads(k, &i.members),
+            ItemKind::Mod { items, .. } | ItemKind::Object { items, .. } => collect_default_reads(k, items),
+            _ => {}
+        }
+    }
+}
+
 fn member_consts(members: &[Item]) -> Vec<String> {
     members.iter().filter_map(|m| if let ItemKind::Const(c) = &m.kind { Some(c.name.clone()) } else { None }).collect()
 }

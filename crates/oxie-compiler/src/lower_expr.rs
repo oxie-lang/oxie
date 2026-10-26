@@ -149,6 +149,14 @@ fn branch_target(e: &Expr) -> Target {
 
 /// An argument that reads the same when written twice: a literal, a variable, a field of one,
 /// or arithmetic and comparisons of those.
+/// What a default value would run twice at a call (see `Lowerer::default_here`).
+enum Rerun {
+    /// the argument of this parameter
+    Param(String),
+    /// the receiver of the method
+    Receiver,
+}
+
 fn is_plain_read(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Path { .. } | ExprKind::SelfValue => true,
@@ -3978,6 +3986,7 @@ impl<'a> Lowerer<'a> {
                             self.e.w(&esc(&name));
                         }
                         let (args, params) = self.with_this(&name, args, &m.params, span);
+                        self.home = self.own_home();
                         self.arg_list(&args, Some(&params), TyPos::Param, span);
                         return;
                     }
@@ -4013,6 +4022,7 @@ impl<'a> Lowerer<'a> {
                         self.e.w(&format!("{}{}::new", esc(&name), g));
                         let params = cls.ctor_params();
                         let pos = if cls.user_new { TyPos::Param } else { TyPos::Field };
+                        self.home = Some(self.class_home(&cls, None));
                         self.arg_list(args, Some(&params), pos, span);
                         return;
                     }
@@ -4023,6 +4033,7 @@ impl<'a> Lowerer<'a> {
                         let gt = self.generic_args_text(g);
                         self.e.w(&format!("::{}", gt));
                     }
+                    self.home = Some(Self::fun_home(&fi.module));
                     self.arg_list(args, Some(&fi.params), TyPos::Param, span);
                     return;
                 }
@@ -4088,6 +4099,7 @@ impl<'a> Lowerer<'a> {
                 }
                 if let Some(m) = en.methods.get(last).cloned() {
                     self.e.w(&path);
+                    self.home = Some(self.enum_home(&en, None));
                     self.arg_list(args, Some(&through_type(&m, args)), TyPos::Param, span);
                     return;
                 }
@@ -4101,11 +4113,13 @@ impl<'a> Lowerer<'a> {
                         self.e.w(&format!("::{}", gt));
                     }
                     let params = c.ctor_params();
+                    self.home = Some(self.class_home(&c, None));
                     self.arg_list(args, Some(&params), TyPos::Field, span);
                     return;
                 }
                 if let Some(m) = c.methods.get(last).cloned() {
                     self.e.w(&path);
+                    self.home = Some(self.class_home(&c, None));
                     self.arg_list(args, Some(&through_type(&m, args)), TyPos::Param, span);
                     return;
                 }
@@ -4118,6 +4132,7 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("{}{}::new", path, g));
                     let params = c.ctor_params();
                     let pos = if c.user_new { TyPos::Param } else { TyPos::Field };
+                    self.home = Some(self.class_home(&c, None));
                     self.arg_list(args, Some(&params), pos, span);
                     return;
                 }
@@ -4126,6 +4141,7 @@ impl<'a> Lowerer<'a> {
             if let Some(fi) = self.fun_at(segs).cloned() {
                 let g = generics.map(|g| format!("::{}", self.generic_args_text(g))).unwrap_or_default();
                 self.e.w(&format!("{}{}", path, g));
+                self.home = Some(Self::fun_home(&fi.module));
                 self.arg_list(args, Some(&fi.params), TyPos::Param, span);
                 return;
             }
@@ -4157,7 +4173,7 @@ impl<'a> Lowerer<'a> {
             }
             VariantShape::Named(fields) => {
                 let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false }).collect();
-                let slots = self.fill_args(args, &params, span);
+                let slots = self.fill_args(args, &params, None, span);
                 self.e.w(&format!("{} {{ ", path));
                 for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
                     if i > 0 {
@@ -4176,7 +4192,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Maps positional and named arguments onto parameters, filling defaults.
-    fn fill_args(&mut self, args: &[Arg], params: &[ParamInfo], span: Span) -> Vec<Option<Expr>> {
+    fn fill_args(&mut self, args: &[Arg], params: &[ParamInfo], home: Option<&Home>, span: Span) -> Vec<Option<Expr>> {
         let mut slots: Vec<Option<Expr>> = vec![None; params.len()];
         let mut next = 0;
         // a context the callee doesn't use is named `_cx`, and still passed as `cx`
@@ -4232,7 +4248,7 @@ impl<'a> Lowerer<'a> {
                     }
                     slots[i] = Some(Expr::new(d.kind.clone(), span));
                 } else if let Some(d) = &p.default {
-                    slots[i] = Some(self.default_in_callee_scope(p.name.as_deref().unwrap_or_default(), d, params, &slots, span));
+                    slots[i] = Some(self.default_in_callee_scope(p.name.as_deref().unwrap_or_default(), d, params, &slots, home, span));
                 } else {
                     let n = p.name.clone().unwrap_or_else(|| format!("#{}", i + 1));
                     self.error(span, format!("missing argument `{}`", n));
@@ -4242,29 +4258,171 @@ impl<'a> Lowerer<'a> {
         slots
     }
 
-    /// A default value as the callee sees it: a name of another parameter
-    /// (`verbose: bool = retries > 2`) is that parameter's argument, not a variable of the caller
-    /// that happens to have its name. Only arguments that read the same twice (literals,
-    /// variables, fields, arithmetic on them) are copied in; for others the default can't be
-/// filled in here.
-    fn default_in_callee_scope(&mut self, param: &str, d: &Expr, params: &[ParamInfo], slots: &[Option<Expr>], span: Span) -> Expr {
+    /// A default value as the callee sees it (see `default_here`).
+    fn default_in_callee_scope(&mut self, param: &str, d: &Expr, params: &[ParamInfo], slots: &[Option<Expr>], home: Option<&Home>, span: Span) -> Expr {
         let mut d = d.clone();
-        let mut complex = None;
+        // the value is part of this call (its span would point into the callee's file)
         visit::walk_expr_mut(&mut d, &mut |e| {
-            let Some(n) = e.ident() else { return true };
-            let Some(j) = params.iter().position(|p| p.name.as_deref() == Some(n) && p.context.is_none()) else { return true };
-            match &slots[j] {
-                Some(a) if is_plain_read(a) => *e = a.clone(),
-                Some(_) => complex = Some(n.to_string()),
-                // a later parameter's default: not reachable in Kotlin either
-                None => complex = Some(n.to_string()),
-            }
-            false
+            e.span = span;
+            true
         });
-        if let Some(n) = complex {
-            self.error(span, format!("the default value of `{}` uses the parameter `{}`, whose argument here would run twice: store the argument in a `val` first, or pass `{}` yourself", param, n, param));
+        let mut rerun = None;
+        self.default_here(&mut d, home, params, slots, &mut rerun);
+        match rerun {
+            Some(Rerun::Param(n)) => self.error(span, format!("the default value of `{}` uses the parameter `{}`, whose argument here would run twice: store the argument in a `val` first, or pass `{}` yourself", param, n, param)),
+            Some(Rerun::Receiver) => self.error(span, format!("the default value of `{}` reads the object the method is called on, which this call would compute twice: store it in a `val` first, or pass `{}` yourself", param, param)),
+            None => {}
         }
         d
+    }
+
+    /// Rewrites a default value to mean at this call what it means where the callee is declared
+    /// (`home`): a name of another parameter (`verbose: bool = retries > 2`) is that parameter's
+    /// argument; a field or method of the callee's class is the receiver's (`factor` is
+    /// `s.factor`); a constant or static method of the class goes through it (`MAX` is
+    /// `Gauge::MAX`); a name of the callee's module goes through the module when this call is in
+    /// another module or has a variable of that name. Arguments and receivers are copied in only
+    /// when they read the same twice (literals, variables, fields, arithmetic on them).
+    fn default_here(&self, e: &mut Expr, home: Option<&Home>, params: &[ParamInfo], slots: &[Option<Expr>], rerun: &mut Option<Rerun>) {
+        visit::walk_expr_mut(e, &mut |e| {
+            if let Some(n) = e.ident() {
+                if let Some(j) = params.iter().position(|p| p.name.as_deref() == Some(n) && p.context.is_none()) {
+                    match &slots[j] {
+                        Some(a) if is_plain_read(a) => *e = a.clone(),
+                        // a later parameter's default: not reachable in Kotlin either
+                        _ => *rerun = Some(Rerun::Param(n.to_string())),
+                    }
+                    return false;
+                }
+            }
+            let Some(home) = home else { return true };
+            let this = |rerun: &mut Option<Rerun>| {
+                let t = home.this.clone()?;
+                if !is_plain_read(&t) {
+                    *rerun = Some(Rerun::Receiver);
+                }
+                Some(t)
+            };
+            match &mut e.kind {
+                ExprKind::SelfValue => {
+                    if let Some(t) = this(rerun) {
+                        *e = t;
+                    }
+                    false
+                }
+                ExprKind::Call { callee, args } if callee.ident().is_some_and(|n| home.methods.iter().any(|(m, _)| m == n)) => {
+                    let n = callee.ident().unwrap_or_default().to_string();
+                    for a in args.iter_mut() {
+                        self.default_here(&mut a.value, Some(home), params, slots, rerun);
+                    }
+                    if home.methods.iter().any(|(m, is_static)| *m == n && *is_static) {
+                        if let Some(ty) = &home.ty {
+                            callee.kind = ExprKind::Path { segs: [ty.clone(), vec![n]].concat(), generics: None, global: false };
+                        }
+                    } else if let Some(t) = this(rerun) {
+                        let args = std::mem::take(args);
+                        e.kind = ExprKind::MethodCall { recv: Box::new(t), name: n, generics: None, args, safe: false };
+                    }
+                    false
+                }
+                ExprKind::Path { segs, global: false, .. } => {
+                    let n = segs[0].clone();
+                    if segs.len() == 1 && home.fields.contains(&n) {
+                        if let Some(t) = this(rerun) {
+                            e.kind = ExprKind::Field { recv: Box::new(t), name: n, safe: false };
+                        }
+                    } else if segs.len() == 1 && home.consts.contains(&n) {
+                        if let Some(ty) = &home.ty {
+                            *segs = [ty.clone(), vec![n]].concat();
+                        }
+                    } else if let Some(path) = self.home_item(&n, &home.module) {
+                        segs.splice(0..1, path);
+                    }
+                    false
+                }
+                _ => true,
+            }
+        });
+    }
+
+    /// The path to `name` from this call as the module `home` means it, when this call could
+    /// take the name for something else: it is in another module, or has a variable, field,
+    /// constant or method of that name.
+    fn home_item(&self, name: &str, home: &[String]) -> Option<Vec<String>> {
+        let here = home == self.module.as_slice();
+        let taken = self.is_local(name) || self.implicit_field(name).is_some() || self.class.as_ref().is_some_and(|c| c.consts.contains(name) || c.methods.contains_key(name));
+        if here && !taken {
+            return None;
+        }
+        let declared = self.k.module_values.contains(&(home.to_vec(), name.to_string()))
+            || self.k.fun_in(name, home).is_some_and(|f| f.module == home)
+            || self.k.class_in(name, home).is_some_and(|c| c.module == home)
+            || self.k.enum_in(name, home).is_some_and(|e| e.module == home);
+        if declared {
+            return Some([vec!["crate".to_string()], home.to_vec(), vec![name.to_string()]].concat());
+        }
+        // imported there: through the import's path, unless this module imports it the same way
+        let path = self.k.imports.get(&(home.to_vec(), name.to_string()))?;
+        if !taken && self.k.imports.get(&(self.module.clone(), name.to_string())) == Some(path) {
+            return None;
+        }
+        let first = path.first()?;
+        if self.k.modules.contains(first) && !self.k.extern_crates.contains(first) {
+            Some([vec!["crate".to_string()], path.clone()].concat())
+        } else if self.k.extern_crates.contains(first) || matches!(first.as_str(), "std" | "core" | "alloc") {
+            Some(path.clone())
+        } else {
+            None
+        }
+    }
+
+    /// The `Home` of a method or constructor of a class (`this`: the object a method is called on).
+    pub(crate) fn class_home(&self, c: &crate::sema::ClassInfo, this: Option<Expr>) -> Home {
+        Home {
+            module: c.module.clone(),
+            ty: Some(self.type_path_here(&c.module, &c.name)),
+            fields: c.fields.iter().map(|f| f.name.clone()).collect(),
+            consts: c.consts.clone(),
+            methods: c.methods.iter().map(|(n, m)| (n.clone(), m.recv == Recv::Static)).collect(),
+            this,
+        }
+    }
+
+    pub(crate) fn enum_home(&self, en: &crate::sema::EnumInfo, this: Option<Expr>) -> Home {
+        Home {
+            module: en.module.clone(),
+            ty: Some(self.type_path_here(&en.module, &en.name)),
+            consts: en.consts.clone(),
+            methods: en.methods.iter().map(|(n, m)| (n.clone(), m.recv == Recv::Static)).collect(),
+            this,
+            ..Home::default()
+        }
+    }
+
+    /// The `Home` of the class being lowered, for calls of its methods without a receiver.
+    fn own_home(&self) -> Option<Home> {
+        let c = self.class.as_ref()?;
+        Some(Home {
+            module: self.module.clone(),
+            ty: Some(vec!["Self".to_string()]),
+            fields: if c.is_static { Vec::new() } else { c.fields.keys().cloned().collect() },
+            consts: c.consts.iter().cloned().collect(),
+            methods: c.methods.iter().map(|(n, m)| (n.clone(), m.recv == Recv::Static)).collect(),
+            this: (!c.is_static).then(|| Expr::new(ExprKind::SelfValue, Span::default())),
+        })
+    }
+
+    fn fun_home(module: &[String]) -> Home {
+        Home { module: module.to_vec(), ..Home::default() }
+    }
+
+    /// The path to a type of `module` from here.
+    fn type_path_here(&self, module: &[String], name: &str) -> Vec<String> {
+        if module == self.module.as_slice() {
+            vec![name.to_string()]
+        } else {
+            [vec!["crate".to_string()], module.to_vec(), vec![name.to_string()]].concat()
+        }
     }
 
     /// The arguments and parameters of a call to a method of this shared class that takes the
@@ -4282,10 +4440,11 @@ impl<'a> Lowerer<'a> {
     }
 
     fn arg_list(&mut self, args: &[Arg], params: Option<&[ParamInfo]>, pos: TyPos, span: Span) {
+        let home = self.home.take();
         self.e.w("(");
         match params {
             Some(params) => {
-                let slots = self.fill_args(args, params, span);
+                let slots = self.fill_args(args, params, home.as_ref(), span);
                 let mut first = true;
                 for (p, a) in params.iter().zip(slots.iter()) {
                     if let Some(a) = a {
@@ -4887,12 +5046,17 @@ impl<'a> Lowerer<'a> {
             let owner = recv_ty.as_ref().and_then(|t| self.type_owner(t));
             let m = owner.as_ref().and_then(|o| self.class_at(o).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(o).and_then(|e| e.methods.get(name)))).cloned();
             if let Some(m) = m {
+                let home = owner.as_ref().and_then(|o| match self.class_at(o) {
+                    Some(c) => Some(self.class_home(c, Some(recv.clone()))),
+                    None => self.enum_at(o).map(|en| self.enum_home(en, Some(recv.clone()))),
+                });
                 self.expr(recv, P_POSTFIX);
                 self.e.w(&format!(".{}", esc(name)));
                 if let Some(g) = generics {
                     let gt = self.generic_args_text(g);
                     self.e.w(&format!("::{}", gt));
                 }
+                self.home = home;
                 self.arg_list(args, Some(&m.params), TyPos::Param, span);
                 return;
             }
@@ -4921,6 +5085,7 @@ impl<'a> Lowerer<'a> {
                     self.expr(recv, P_POSTFIX);
                     self.e.w(&format!(".{}", esc(name)));
                     let (args, params) = self.with_this(name, args, &m.params, span);
+                    self.home = self.own_home();
                     self.arg_list(&args, Some(&params), TyPos::Param, span);
                     return;
                 }
@@ -5964,6 +6129,41 @@ impl<'a> Lowerer<'a> {
                 .collect(),
             None => arms,
         };
+        // `when (x) { target -> }` with a variable `target` compares with it, as in Kotlin (in
+        // Rust the name would be a new binding that catches every value); an arm that uses the
+        // name binds it, as Rust's `n if n > 9 -> n` does
+        let uses = |e: &Expr, n: &str| {
+            let mut found = false;
+            visit::walk_expr(e, &mut |x| {
+                found |= x.ident() == Some(n);
+                !found
+            });
+            found
+        };
+        let arms: Vec<WhenArm> = match subject {
+            Some(_) if !rust_match && inner.is_none() => arms
+                .into_iter()
+                .map(|mut a| {
+                    let compares: Vec<bool> = a
+                        .conds
+                        .iter()
+                        .map(|c| match c {
+                            WhenCond::Pat(Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. }) => {
+                                self.is_local(name) && !self.pat_enum_has_variant(subject, name) && !uses(&a.body, name) && !a.guard.as_ref().is_some_and(|g| uses(g, name))
+                            }
+                            _ => false,
+                        })
+                        .collect();
+                    for (c, compare) in a.conds.iter_mut().zip(compares) {
+                        if let (true, WhenCond::Pat(Pat::Ident { name, span, .. })) = (compare, &c) {
+                            *c = WhenCond::Expr(Expr::new(ExprKind::Path { segs: vec![name.clone()], generics: None, global: false }, *span));
+                        }
+                    }
+                    a
+                })
+                .collect(),
+            _ => arms,
+        };
         let arms = &arms[..];
         match subject {
             Some(s) => {
@@ -6019,15 +6219,14 @@ impl<'a> Lowerer<'a> {
                         self.e.nl();
                     }
                     self.push_scope();
-                    let has_in = arm.conds.iter().any(|c| matches!(c, WhenCond::In { .. }));
+                    let has_in = arm.conds.iter().any(|c| matches!(c, WhenCond::In { .. } | WhenCond::Expr(_)));
                     if has_in {
                         has_literal = true;
                         let w = self.fresh("w");
                         let mut checks = Vec::new();
                         for c in &arm.conds {
                             match c {
-                                WhenCond::In { .. } => checks.push(c.clone()),
-                                WhenCond::Pat(_) => checks.push(c.clone()),
+                                WhenCond::In { .. } | WhenCond::Pat(_) | WhenCond::Expr(_) => checks.push(c.clone()),
                                 _ => {}
                             }
                         }
@@ -6086,6 +6285,10 @@ impl<'a> Lowerer<'a> {
                                 WhenCond::Pat(p) => {
                                     let ps = self.pat_against(p, subject);
                                     self.e.w(&format!("matches!({}, {})", w, ps));
+                                }
+                                WhenCond::Expr(e) => {
+                                    self.e.w(&format!("*{} == ", w));
+                                    self.expr(e, P_POSTFIX);
                                 }
                                 _ => {}
                             }

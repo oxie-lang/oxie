@@ -31,6 +31,13 @@ fn programs(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// The projects in `dir`: directories with a `Cargo.toml`.
+fn projects(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("Cargo.toml").exists()).collect();
+    v.sort();
+    v
+}
+
 #[test]
 fn e2e_programs() {
     run_programs("tests/e2e");
@@ -43,11 +50,19 @@ fn rust_feature_coverage() {
     run_programs("tests/coverage");
 }
 
+/// Runs the programs in `rel`, and its projects of several modules (`name/` beside `name.out`).
 fn run_programs(rel: &str) {
     let dir = repo().join(rel);
-    let results = parallel(&programs(&dir), |p, cache| {
+    let mut items = programs(&dir);
+    items.extend(projects(&dir));
+    let results = parallel(&items, |p, cache| {
         let Ok(expected) = std::fs::read_to_string(p.with_extension("out")) else { return None };
-        let out = oxie().arg("run").arg(p).current_dir(&dir).env("OXIE_CACHE", cache).output().unwrap();
+        let out = if p.is_dir() {
+            let target = cache.join("projects").join(p.file_name().unwrap());
+            oxie().arg("run").current_dir(p).env("OXIE_CACHE", cache).env("CARGO_TARGET_DIR", target).output().unwrap()
+        } else {
+            oxie().arg("run").arg(p).current_dir(&dir).env("OXIE_CACHE", cache).output().unwrap()
+        };
         let stdout = String::from_utf8_lossy(&out.stdout);
         (stdout != expected).then(|| {
             format!(
@@ -70,9 +85,7 @@ fn run_programs(rel: &str) {
 fn diagnostics_point_at_oxie_sources() {
     let dir = repo().join("tests/diagnostics");
     let mut items = programs(&dir);
-    let mut projects: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("Cargo.toml").exists()).collect();
-    projects.sort();
-    items.extend(projects);
+    items.extend(projects(&dir));
     let results = parallel(&items, |p, cache| {
         let mut failures = Vec::new();
         // (file name, source) of the files whose comments list the errors

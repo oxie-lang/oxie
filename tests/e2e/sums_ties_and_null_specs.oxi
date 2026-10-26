@@ -1,0 +1,14 @@
+// Results as Kotlin gives them: an empty sum of floats is 0 (Rust's is -0.0), `max_by_key` keeps
+// the first of equal maxima, and a precision in a template doesn't cut `null` short.
+
+data class Player(name: String, score: i32)
+
+fun main() {
+    val cart: [f64] = []
+    println("${cart.sum()} ${cart.sum_of { it * 2.0 }} ${[1.5, 2.5].sum()} ${[1, 2, 3].sum_of { it * 10 }}")
+    val players = [Player("ann", 9), Player("bob", 7), Player("cid", 9), Player("dee", 7)]
+    println("${players.max_by_key { it.score }?.name} ${players.min_by_key { it.score }?.name}")
+    val price: f64? = null
+    val known: f64? = 3.14159
+    println("[${price:.2}] [${price:>8.2}] [${price:<8.2}] [${price:^8.2}] [${known:.2}] [${price:6}]")
+}

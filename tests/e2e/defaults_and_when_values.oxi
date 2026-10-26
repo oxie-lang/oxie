@@ -1,0 +1,57 @@
+// Default values are computed as the callee sees them, `init` blocks all run in order, and a
+// `when` arm that names a constant or a variable compares with it.
+
+const LIMIT = 10
+
+class Scaler(factor: i32) {
+    const MAX = 100
+
+    fun default_step(): i32 = 3
+    fun scale(x: i32, k: i32 = factor): i32 = x * k
+    fun step(x: i32, by: i32 = default_step()): i32 = x + by
+    fun capped(x: i32, cap: i32 = MAX): i32 = if (x > cap) cap else x
+}
+
+class Other(factor: i32) {
+    fun default_step(): i32 = 1000
+    fun run(s: &Scaler): String = "${s.scale(10)} ${s.step(1)} ${s.capped(500)} $factor ${default_step()}"
+}
+
+class Log(x: i32) {
+    var lines: [String] = []
+    init {
+        lines.push("first $x")
+    }
+    init {
+        val x = x * 2
+        lines.push("second $x")
+    }
+}
+
+class Gauge(var level: i32) {
+    const FULL = 10
+    companion object {
+        const EMPTY = 0
+    }
+    fun describe(): String = when (level) {
+        FULL -> "full"
+        EMPTY -> "empty"
+        else -> "partial"
+    }
+}
+
+fun check(x: i32, target: i32): String = when (x) {
+    target -> "hit"
+    LIMIT -> "limit"
+    else -> "miss"
+}
+
+fun main() {
+    val factor = 7
+    val s = Scaler(2)
+    println("${s.scale(1)} ${s.step(1)} $factor")
+    println(Other(5).run(&s))
+    println(Log(4).lines)
+    println("${Gauge(10).describe()} ${Gauge(0).describe()} ${Gauge(5).describe()}")
+    println("${check(5, 5)} ${check(10, 5)} ${check(6, 5)}")
+}

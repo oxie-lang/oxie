@@ -1690,7 +1690,19 @@ impl<'a> Parser<'a> {
         }
         if self.is_kw("init") && self.is_punct_at(1, "{") {
             self.bump();
-            decl.init = Some(self.block()?);
+            let b = self.block()?;
+            // several `init` blocks run in order, each in its own scope
+            let scoped = |b: Block| Stmt::Expr { expr: Expr::new(ExprKind::Block(b.clone()), b.span), semi: false };
+            let is_scoped = |s: &Stmt| matches!(s, Stmt::Expr { expr: Expr { kind: ExprKind::Block(_), .. }, .. });
+            decl.init = Some(match decl.init.take() {
+                None => b,
+                Some(mut all) if all.stmts.iter().all(is_scoped) => {
+                    all.span = all.span.to(b.span);
+                    all.stmts.push(scoped(b));
+                    all
+                }
+                Some(first) => Block { span: first.span.to(b.span), stmts: vec![scoped(first), scoped(b)] },
+            });
             return Ok(());
         }
         if self.is_kw("companion") && self.is_kw_at(1, "object") {

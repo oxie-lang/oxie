@@ -1,0 +1,13 @@
+// Default values mean what they mean here, also when another module leaves the parameters out.
+
+const LIMIT: i32 = 5
+
+private fun base(): i32 = 1000
+
+fun clamp(x: i32, max: i32 = LIMIT): i32 = if (x > max) max else x
+
+fun offset(x: i32, by: i32 = base()): i32 = x + by
+
+class Window(start: i32 = LIMIT * 2) {
+    fun width(extra: i32 = LIMIT): i32 = start + extra
+}

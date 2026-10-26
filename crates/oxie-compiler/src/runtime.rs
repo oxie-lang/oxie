@@ -343,7 +343,7 @@ impl<T: fmt::Display> fmt::Display for OrNull<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             Some(v) => v.fmt(f),
-            None => f.pad("null"),
+            None => pad_null(f),
         }
     }
 }
@@ -352,9 +352,32 @@ impl<T: fmt::Debug> fmt::Debug for OrNull<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             Some(v) => v.fmt(f),
-            None => f.pad("null"),
+            None => pad_null(f),
         }
     }
+}
+
+/// `null` in the width a spec asks for; a precision (`${price:.2}`) is the number's, which
+/// would cut `null` short.
+fn pad_null(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if f.precision().is_none() {
+        return f.pad("null");
+    }
+    let pad = f.width().unwrap_or(0).saturating_sub(4);
+    let (before, after) = match f.align() {
+        Some(fmt::Alignment::Right) => (pad, 0),
+        Some(fmt::Alignment::Center) => (pad / 2, pad - pad / 2),
+        _ => (0, pad),
+    };
+    let fill = f.fill();
+    for _ in 0..before {
+        write!(f, "{}", fill)?;
+    }
+    f.write_str("null")?;
+    for _ in 0..after {
+        write!(f, "{}", fill)?;
+    }
+    Ok(())
 }
 
 /// Kotlin-style operations on lists, arrays and slices. Each one is the iterator chain you
@@ -382,8 +405,8 @@ pub trait ListOps<'a, T: 'a> {
     fn count<F: FnMut(&'a T) -> bool>(&'a self, f: F) -> usize;
     fn sum(&self) -> T
     where
-        T: for<'s> ::core::iter::Sum<&'s T>;
-    fn sum_of<S: ::core::iter::Sum<S>, F: FnMut(&'a T) -> S>(&'a self, f: F) -> S;
+        T: for<'s> ::core::iter::Sum<&'s T> + Default + ::core::ops::Add<Output = T>;
+    fn sum_of<S: ::core::iter::Sum<S> + Default + ::core::ops::Add<Output = S>, F: FnMut(&'a T) -> S>(&'a self, f: F) -> S;
     fn max_of<S: PartialOrd, F: FnMut(&'a T) -> S>(&'a self, f: F) -> Option<S>;
     fn min_of<S: PartialOrd, F: FnMut(&'a T) -> S>(&'a self, f: F) -> Option<S>;
     fn max_by_key<K: PartialOrd, F: FnMut(&'a T) -> K>(&'a self, f: F) -> Option<&'a T>;
@@ -507,13 +530,14 @@ impl<'a, T: 'a> ListOps<'a, T> for [T] {
     #[inline]
     fn sum(&self) -> T
     where
-        T: for<'s> ::core::iter::Sum<&'s T>,
+        T: for<'s> ::core::iter::Sum<&'s T> + Default + ::core::ops::Add<Output = T>,
     {
-        self.iter().sum()
+        // `+ 0`: Rust's sum of no floats is `-0.0`, Kotlin's `0.0`
+        self.iter().sum::<T>() + T::default()
     }
     #[inline]
-    fn sum_of<S: ::core::iter::Sum<S>, F: FnMut(&'a T) -> S>(&'a self, f: F) -> S {
-        self.iter().map(f).sum()
+    fn sum_of<S: ::core::iter::Sum<S> + Default + ::core::ops::Add<Output = S>, F: FnMut(&'a T) -> S>(&'a self, f: F) -> S {
+        self.iter().map(f).sum::<S>() + S::default()
     }
     #[inline]
     fn max_of<S: PartialOrd, F: FnMut(&'a T) -> S>(&'a self, f: F) -> Option<S> {
@@ -525,7 +549,8 @@ impl<'a, T: 'a> ListOps<'a, T> for [T] {
     }
     #[inline]
     fn max_by_key<K: PartialOrd, F: FnMut(&'a T) -> K>(&'a self, mut f: F) -> Option<&'a T> {
-        self.iter().map(|x| (f(x), x)).max_by(|a, b| by_partial(&a.0, &b.0)).map(|p| p.1)
+        // the first of equal keys, as Kotlin's `maxBy` and `min_by_key` (Rust's gives the last)
+        self.iter().map(|x| (f(x), x)).reduce(|a, b| if by_partial(&b.0, &a.0).is_gt() { b } else { a }).map(|p| p.1)
     }
     #[inline]
     fn min_by_key<K: PartialOrd, F: FnMut(&'a T) -> K>(&'a self, mut f: F) -> Option<&'a T> {

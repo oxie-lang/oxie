@@ -215,6 +215,22 @@ pub(crate) struct ClassCtx {
     pub(crate) consts: HashSet<String>,
 }
 
+/// Where the function, method or constructor of a call is declared, for the default values the
+/// call fills in (see `Lowerer::default_here`).
+#[derive(Clone, Default)]
+pub(crate) struct Home {
+    pub(crate) module: Vec<String>,
+    /// The path of the class or enum from the call (`Gauge`, `crate::a::Gauge`).
+    pub(crate) ty: Option<Vec<String>>,
+    pub(crate) fields: Vec<String>,
+    pub(crate) consts: Vec<String>,
+    /// Methods, and whether each is static.
+    pub(crate) methods: Vec<(String, bool)>,
+    /// The object a method is called on (`this` inside its class); `None` for constructors and
+    /// static calls, whose defaults can't read fields.
+    pub(crate) this: Option<Expr>,
+}
+
 #[derive(Clone)]
 pub(crate) struct FnCtx {
     pub(crate) throws: bool,
@@ -302,6 +318,8 @@ pub struct Lowerer<'a> {
     /// The type parameters of the functions being lowered, innermost last: a value of type `S`
     /// with `S: Sink` has `Sink`'s methods.
     pub(crate) fn_generics: Vec<Generics>,
+    /// Where the callee of the next `arg_list` is declared, set just before it.
+    pub(crate) home: Option<Home>,
     /// Lambda parameters without a known type: (scope depth, name). Rust passes collection
     /// elements by reference, so comparisons of these with literals read the value first.
     pub(crate) lambda_params: Vec<(usize, String)>,
@@ -502,6 +520,7 @@ impl<'a> Lowerer<'a> {
             docs_linted: false,
             no_std: false,
             fn_generics: Vec::new(),
+            home: None,
             lambda_params: Vec::new(),
             untyped_params: Vec::new(),
             typed_by_body: false,
@@ -926,6 +945,15 @@ impl<'a> Lowerer<'a> {
     /// class or enum default to `pub`. Keeping items unexported lets the optimizer inline them
     /// exactly like private Rust functions.
     pub(crate) fn vis(&self, v: &Vis, ctx: ItemCtx) -> String {
+        self.vis_of(v, ctx, None)
+    }
+
+    /// `vis` for an item named `name`: a private one that a default value reads is visible in the
+    /// crate, since the calls that leave the parameter out compute the value.
+    pub(crate) fn vis_of(&self, v: &Vis, ctx: ItemCtx, name: Option<&str>) -> String {
+        if matches!(v, Vis::Private) && ctx != ItemCtx::Local && name.is_some_and(|n| self.k.default_reads.contains(n)) {
+            return "pub(crate) ".into();
+        }
         match v {
             Vis::Default if ctx == ItemCtx::Local => String::new(),
             Vis::Default if self.members_pub => "pub ".into(),
@@ -1572,6 +1600,11 @@ impl<'a> Lowerer<'a> {
                     let shape = en.variant(n).cloned();
                     return (format!("{}::{}", en.name, n), shape);
                 }
+                // a constant of the class or companion object being lowered (a bare name would
+                // be a new binding)
+                if self.class.as_ref().is_some_and(|c| c.consts.contains(n)) {
+                    return (format!("Self::{}", esc(n)), None);
+                }
             }
             return (esc(n), None);
         }
@@ -1661,7 +1694,7 @@ impl<'a> Lowerer<'a> {
                 let is_static = matches!(it.kind, ItemKind::Static(_));
                 self.docs(&it.docs);
                 self.attrs(&it.attrs, &[]);
-                let vis = self.vis(&it.vis, ctx);
+                let vis = self.vis_of(&it.vis, ctx, Some(&c.name));
                 let at_run_time = c.value.as_ref().and_then(|v| self.run_time_part(v));
                 if let Some((span, why)) = &at_run_time {
                     let kind = if is_static { "a `static`" } else { "a Rust `const`" };
@@ -2043,7 +2076,7 @@ impl<'a> Lowerer<'a> {
             (Vec::new(), it.attrs.clone())
         };
         self.attrs(&other_attrs, &[]);
-        let vis = if is_main { String::new() } else { self.vis(&it.vis, ctx) };
+        let vis = if is_main { String::new() } else { self.vis_of(&it.vis, ctx, Some(&f.name)) };
         let name = if wrap_main { "__oxie_main".to_string() } else { esc(&f.name) };
         let header = self.fn_header(f);
         let g = self.generics_decl(&f.generics);
@@ -2255,7 +2288,7 @@ impl<'a> Lowerer<'a> {
         self.docs(&it.docs);
         let attrs: Vec<Attr> = it.attrs.clone();
         self.attrs(&attrs, &[]);
-        let vis = if vis_allowed { self.vis(&it.vis, ItemCtx::Top) } else { String::new() };
+        let vis = if vis_allowed { self.vis_of(&it.vis, ItemCtx::Top, Some(&f.name)) } else { String::new() };
         let recv_text = match &f.self_param {
             Some(SelfParam::Value { mutable: true }) => Some("mut self".to_string()),
             Some(SelfParam::Typed(t)) => Some(format!("self: {}", self.ty(t, TyPos::Plain))),
@@ -2818,7 +2851,7 @@ impl<'a> Lowerer<'a> {
                 self.e.nl();
             }
             ItemKind::Const(c) => {
-                let vis = if vis_allowed { self.vis(&m.vis, ItemCtx::Top) } else { String::new() };
+                let vis = if vis_allowed { self.vis_of(&m.vis, ItemCtx::Top, Some(&c.name)) } else { String::new() };
                 let ty = match &c.ty {
                     Some(t) => self.ty(t, TyPos::Plain),
                     None => c.value.as_ref().and_then(infer_lit_type).unwrap_or_else(|| "_".into()),

@@ -1,7 +1,8 @@
 target/
 .DS_Store
-# the lock files of the test projects under tests/diagnostics
+# the lock files of the test projects under tests/diagnostics and tests/e2e
 tests/diagnostics/*/Cargo.lock
+tests/e2e/*/Cargo.lock
 
 # eval results (evals/run.py)
 evals/results/
