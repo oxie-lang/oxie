@@ -558,7 +558,8 @@ fn dependency_errors_are_shown() {
     std::fs::write(&manifest, m).unwrap();
     let out = oxie().arg("build").current_dir(tmp.join("app")).env("CARGO_TARGET_DIR", tmp.join("target")).output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success() && stderr.contains("mismatched types") && stderr.contains("badlib/src/lib.rs:1"), "{stderr}");
+    // cargo shows the dependency's path with the system's separators
+    assert!(!out.status.success() && stderr.contains("mismatched types") && stderr.replace('\\', "/").contains("badlib/src/lib.rs:1"), "{stderr}");
     assert!(!stderr.contains("never used"), "{stderr}");
     let _ = std::fs::remove_dir_all(&tmp);
 }

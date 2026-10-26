@@ -298,7 +298,8 @@ fn report(out: &oxie_compiler::Output, root: &Path) -> bool {
     let color = cargo::color();
     let mut ok = true;
     for (path, text, diags) in &out.diags {
-        let shown = path.strip_prefix(root).unwrap_or(path).display().to_string();
+        // a script's root is the current directory, which Windows may report by its short name
+        let shown = path.strip_prefix(root).ok().map(Path::to_path_buf).or_else(|| cargo::relative_to_cwd(path)).unwrap_or_else(|| path.to_path_buf()).display().to_string();
         for d in diags {
             if d.severity == Severity::Error {
                 ok = false;
@@ -335,7 +336,7 @@ fn project_of(file: Option<&str>) -> Result<(Project, Option<PathBuf>), String> 
 
 /// How a script is named in cargo's messages instead of its hidden crate: by its file.
 fn script_name(script: Option<&Path>) -> Option<String> {
-    script.map(|s| s.strip_prefix(cwd()).unwrap_or(s).display().to_string())
+    script.map(|s| cargo::relative_to_cwd(s).unwrap_or_else(|| s.to_path_buf()).display().to_string())
 }
 
 /// Checks a script with the Oxie compiler before cargo builds it, like `precheck`. A script runs
@@ -368,7 +369,7 @@ fn precheck_script(proj: &Project, abs: &Path, testing: bool) -> Result<bool, St
     };
     let what = if testing { "neither `fun main` nor `test` blocks" } else { "no `fun main`" };
     let d = oxie_compiler::Diag::error(oxie_compiler::diag::Span::new(0, 0), format!("the script has {}", what)).with_help(help);
-    let shown = abs.strip_prefix(cwd()).unwrap_or(abs).display().to_string();
+    let shown = cargo::relative_to_cwd(abs).unwrap_or_else(|| abs.to_path_buf()).display().to_string();
     eprintln!("{}", diag::render(&d, &shown, &src, cargo::color()));
     Ok(false)
 }

@@ -540,12 +540,25 @@ pub fn color() -> bool {
     std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err()
 }
 
+/// The current directory as the system reports it, then in its canonical form when that differs:
+/// Windows can report a short name (`C:\Users\RUNNER~1`) where a canonical path has the long one,
+/// and a script's path is canonical.
+pub fn cwd_forms() -> Vec<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let canonical = oxie_compiler::compile::canonicalize(&cwd).ok().filter(|c| *c != cwd);
+    std::iter::once(cwd).chain(canonical).collect()
+}
+
+/// `p` relative to the current directory (in either form), when it is inside it.
+pub fn relative_to_cwd(p: &Path) -> Option<PathBuf> {
+    cwd_forms().iter().find_map(|c| p.strip_prefix(c).ok().map(Path::to_path_buf))
+}
+
 pub fn render(d: &MappedDiag, root: &Path) -> String {
     let c = color();
     let (red, yellow, blue, bold, reset) = if c { ("\x1b[31m", "\x1b[33m", "\x1b[34m", "\x1b[1m", "\x1b[0m") } else { ("", "", "", "", "") };
     let lc = if d.level == "error" { red } else { yellow };
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let shown = |p: &Path| p.strip_prefix(&cwd).or_else(|_| p.strip_prefix(root)).unwrap_or(p).display().to_string();
+    let shown = |p: &Path| relative_to_cwd(p).or_else(|| p.strip_prefix(root).ok().map(Path::to_path_buf)).unwrap_or_else(|| p.to_path_buf()).display().to_string();
     let text = std::fs::read_to_string(&d.file).unwrap_or_default();
     let lines: Vec<&str> = text.lines().collect();
     let primary_width = if d.end_line == d.line { d.end_col.saturating_sub(d.col).max(1) } else { 1 };
@@ -855,8 +868,8 @@ fn package_root(v: &Value, root: &Path, level: &str) -> Option<PathBuf> {
 /// rustc's text with the paths of the project's files relative to the current directory, as
 /// `render` shows them: a hand-written `.rs` module is included by its absolute path.
 fn relative_paths(rendered: &str, root: &Path) -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let base = if root.starts_with(&cwd) && cwd.parent().is_some() { cwd } else { root.to_path_buf() };
+    let cwd = cwd_forms().into_iter().find(|c| root.starts_with(c) && c.parent().is_some());
+    let base = cwd.unwrap_or_else(|| root.to_path_buf());
     rendered.replace(&format!("{}{}", base.display(), std::path::MAIN_SEPARATOR), "")
 }
 
