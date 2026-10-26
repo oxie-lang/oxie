@@ -1,0 +1,17 @@
+eval y
+eval x
+placed 1,2
+eval py
+eval px
+3 4
+eval dy
+eval dx
+draw 5,6
+eval h
+eval w
+rect 7 x 8
+eval text
+3
+eval x2
+eval y2
+placed 1,2

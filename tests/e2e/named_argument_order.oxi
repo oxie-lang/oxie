@@ -1,0 +1,36 @@
+// Named arguments run in the order they are written, as in Kotlin, whatever the order of the
+// parameters: functions, constructors, methods and enum cases with named fields.
+
+enum Shape {
+    Rect(w: i32, h: i32)
+}
+
+class Point(x: i32, y: i32)
+
+class Canvas {
+    fun draw(x: i32, y: i32) = println("draw $x,$y")
+}
+
+fun log(s: &str, v: i32): i32 {
+    println("eval $s")
+    return v
+}
+
+fun place(x: i32, y: i32): String = "placed $x,$y"
+
+fun label(text: String, tag: &str): String = "$tag:$text"
+
+fun main() {
+    println(place(y = log("y", 2), x = log("x", 1)))
+    val p = Point(y = log("py", 4), x = log("px", 3))
+    println("${p.x} ${p.y}")
+    Canvas().draw(y = log("dy", 6), x = log("dx", 5))
+    val r = Shape.Rect(h = log("h", 8), w = log("w", 7))
+    when (r) {
+        Shape.Rect(w, h) -> println("rect $w x $h")
+    }
+    // a statement that goes on after the call
+    println(label(tag = "t", text = log("text", 9).to_string()).len())
+    // in order already: nothing moves
+    println(place(x = log("x2", 1), y = log("y2", 2)))
+}

@@ -2385,7 +2385,11 @@ impl<'a> Lowerer<'a> {
                     _ => self.expr(value, P_LOWEST),
                 }
             }
-            Call { callee, args } => self.call(callee, args, e.span),
+            Call { callee, args } => {
+                let saved = if args.iter().any(|a| a.name.is_some()) { self.call_start.replace((e.span, self.e.text_pos())) } else { self.call_start.take() };
+                self.call(callee, args, e.span);
+                self.call_start = saved;
+            }
             MethodCall { .. } | Field { .. } | Index(..) if has_safe_link(e) => {
                 let r = self.resolve_question_dots(e);
                 if has_safe_link(&r) {
@@ -2394,7 +2398,11 @@ impl<'a> Lowerer<'a> {
                     self.expr_inner(&r);
                 }
             }
-            MethodCall { recv, name, generics, args, .. } => self.method_call(recv, name, generics.as_ref(), args, e.span),
+            MethodCall { recv, name, generics, args, .. } => {
+                let saved = if args.iter().any(|a| a.name.is_some()) { self.call_start.replace((e.span, self.e.text_pos())) } else { self.call_start.take() };
+                self.method_call(recv, name, generics.as_ref(), args, e.span);
+                self.call_start = saved;
+            }
             Field { recv, name, .. } => {
                 if let Some((p, _)) = self.field_path(e) {
                     self.e.w(&p);
@@ -4173,10 +4181,14 @@ impl<'a> Lowerer<'a> {
             }
             VariantShape::Named(fields) => {
                 let params: Vec<ParamInfo> = fields.iter().map(|(n, t)| ParamInfo { name: Some(n.clone()), ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false }).collect();
-                let slots = self.fill_args(args, &params, None, span);
+                let (slots, written) = self.fill_args(args, &params, None, span);
                 self.e.w(&format!("{} {{ ", path));
-                for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
-                    if i > 0 {
+                // in the order the call writes them, which is the order they run in
+                let mut order: Vec<usize> = (0..params.len()).collect();
+                order.sort_by_key(|i| written[*i].unwrap_or(usize::MAX));
+                for (k, i) in order.into_iter().enumerate() {
+                    let (p, a) = (&params[i], &slots[i]);
+                    if k > 0 {
                         self.e.w(", ");
                     }
                     let name = p.name.clone().unwrap();
@@ -4191,9 +4203,11 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Maps positional and named arguments onto parameters, filling defaults.
-    fn fill_args(&mut self, args: &[Arg], params: &[ParamInfo], home: Option<&Home>, span: Span) -> Vec<Option<Expr>> {
+    /// Maps positional and named arguments onto parameters, filling defaults; also gives each
+    /// parameter the position of its argument in the call (`None` for a default).
+    fn fill_args(&mut self, args: &[Arg], params: &[ParamInfo], home: Option<&Home>, span: Span) -> (Vec<Option<Expr>>, Vec<Option<usize>>) {
         let mut slots: Vec<Option<Expr>> = vec![None; params.len()];
+        let mut written: Vec<Option<usize>> = vec![None; params.len()];
         let mut next = 0;
         // a context the callee doesn't use is named `_cx`, and still passed as `cx`
         let named = |p: &ParamInfo, n: &str| p.name.as_deref() == Some(n) || p.context.is_some() && p.name.as_deref().and_then(|x| x.strip_prefix('_')) == Some(n);
@@ -4205,19 +4219,26 @@ impl<'a> Lowerer<'a> {
         let cfg_params = params.iter().filter(|p| p.cfg).count();
         let skip_cfg = cfg_params > 0 && positional + cfg_params == params.iter().filter(|p| p.context.is_none()).count();
         let skipped: Vec<bool> = params.iter().map(|p| skip_cfg && p.cfg).collect();
-        for a in args {
+        for (at, a) in args.iter().enumerate() {
             match &a.name {
                 Some(n) => match params.iter().position(|p| named(p, n)) {
-                    Some(i) => slots[i] = Some(a.value.clone()),
+                    Some(i) => {
+                        slots[i] = Some(a.value.clone());
+                        written[i] = Some(at);
+                    }
                     None => self.error(a.value.span, format!("no parameter named `{}`", n)),
                 },
-                None if a.trailing && last.is_some_and(|i| i >= next && slots[i].is_none()) => slots[last.unwrap()] = Some(a.value.clone()),
+                None if a.trailing && last.is_some_and(|i| i >= next && slots[i].is_none()) => {
+                    slots[last.unwrap()] = Some(a.value.clone());
+                    written[last.unwrap()] = Some(at);
+                }
                 None => {
                     while next < slots.len() && (slots[next].is_some() || skipped[next]) {
                         next += 1;
                     }
                     if next < slots.len() {
                         slots[next] = Some(a.value.clone());
+                        written[next] = Some(at);
                         next += 1;
                     } else {
                         self.error(a.value.span, format!("too many arguments: expected {}", params.len()));
@@ -4255,7 +4276,68 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        slots
+        (slots, written)
+    }
+
+    /// Named arguments run in the order they are written, as in Kotlin, also when the
+    /// parameters come in another order (`place(y = next(), x = next())`): when the call would run
+    /// them in another order, they are computed into variables first, in a block put at `at` (where
+    /// the call's text starts). Returns the variable of each parameter and the text that closes
+    /// the block after the call, or `None` when nothing moves.
+    fn hoist_reordered(&mut self, params: &[ParamInfo], slots: &[Option<Expr>], written: &[Option<usize>], pos: TyPos, at: crate::emit::Pos) -> Option<(Vec<Option<String>>, &'static str)> {
+        let order: Vec<usize> = written.iter().flatten().copied().collect();
+        if order.windows(2).all(|w| w[0] < w[1]) {
+            return None;
+        }
+        // literals, variables and lambdas do nothing when they are computed, so only the other
+        // arguments can tell the order
+        let acts = |a: &Expr| !is_plain_read(a) && !matches!(a.kind, ExprKind::Lambda { .. });
+        if !slots.iter().flatten().any(acts) {
+            return None;
+        }
+        let mut in_order: Vec<usize> = (0..params.len()).filter(|i| written[*i].is_some()).collect();
+        in_order.sort_by_key(|i| written[*i]);
+        let diags = self.diags.len();
+        let mut lets = String::new();
+        let mut names = vec![None; params.len()];
+        for i in in_order {
+            let Some(a) = &slots[i] else { continue };
+            if is_literal(a) || matches!(a.kind, ExprKind::Lambda { .. }) {
+                continue;
+            }
+            let saved = std::mem::replace(&mut self.e, crate::emit::Emitter::new());
+            self.emit_arg(&params[i], a, pos);
+            let text = std::mem::replace(&mut self.e, saved).buf;
+            // the variables go on the line where the call starts
+            if text.contains('\n') {
+                self.diags.truncate(diags);
+                return None;
+            }
+            let name = self.fresh(params[i].name.as_deref().unwrap_or("arg"));
+            lets.push_str(&format!("let {} = {}; ", name, text));
+            names[i] = Some(name);
+        }
+        // a statement can't go on after a block (`{ .. }.len()`): there it gets parentheses
+        let (open, close) = if self.e.starts_statement(at) { ("({ ", " })") } else { ("{ ", " }") };
+        self.e.insert_into(at, &format!("{}{}", open, lets));
+        Some((names, close))
+    }
+
+    /// One argument for the parameter `p`: lent or converted as the parameter needs.
+    fn emit_arg(&mut self, p: &ParamInfo, a: &Expr, pos: TyPos) {
+        // a lambda can't be annotated with the callee's type parameters
+        if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
+            self.expr(a, P_LOWEST);
+        } else if p.lent && !is_collection_lit(a) && self.lends_value(a) {
+            // its callers passed the owned value before Oxie lent the parameter
+            self.e.mark(a.span);
+            self.e.w("&");
+            self.expr(a, P_UNARY);
+            let param = self.ty(&p.ty, TyPos::Param);
+            self.e.decide(a.span, "&", format!("the parameter is `{}`", param), None);
+        } else {
+            self.coerce(a, &p.ty, if p.boxed { TyPos::Generic } else { pos });
+        }
     }
 
     /// A default value as the callee sees it (see `default_here`).
@@ -4441,34 +4523,38 @@ impl<'a> Lowerer<'a> {
 
     fn arg_list(&mut self, args: &[Arg], params: Option<&[ParamInfo]>, pos: TyPos, span: Span) {
         let home = self.home.take();
-        self.e.w("(");
+        // where the call's text starts, when `expr_inner` started this call
+        let start = match self.call_start {
+            Some((s, at)) if s == span => {
+                self.call_start = None;
+                Some(at)
+            }
+            _ => None,
+        };
         match params {
             Some(params) => {
-                let slots = self.fill_args(args, params, home.as_ref(), span);
+                let (slots, written) = self.fill_args(args, params, home.as_ref(), span);
+                let (hoisted, close) = start.and_then(|at| self.hoist_reordered(params, &slots, &written, pos, at)).unwrap_or_default();
+                self.e.w("(");
                 let mut first = true;
-                for (p, a) in params.iter().zip(slots.iter()) {
+                for (i, (p, a)) in params.iter().zip(slots.iter()).enumerate() {
                     if let Some(a) = a {
                         if !first {
                             self.e.w(", ");
                         }
                         first = false;
-                        // a lambda can't be annotated with the callee's type parameters
-                        if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
-                            self.expr(a, P_LOWEST);
-                        } else if p.lent && !is_collection_lit(a) && self.lends_value(a) {
-                            // its callers passed the owned value before Oxie lent the parameter
-                            self.e.mark(a.span);
-                            self.e.w("&");
-                            self.expr(a, P_UNARY);
-                            let param = self.ty(&p.ty, TyPos::Param);
-                            self.e.decide(a.span, "&", format!("the parameter is `{}`", param), None);
-                        } else {
-                            self.coerce(a, &p.ty, if p.boxed { TyPos::Generic } else { pos });
+                        match hoisted.get(i).cloned().flatten() {
+                            Some(name) => self.e.w(&name),
+                            None => self.emit_arg(p, a, pos),
                         }
                     }
                 }
+                self.e.w(")");
+                self.e.w(close);
+                return;
             }
             None => {
+                self.e.w("(");
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         self.e.w(", ");

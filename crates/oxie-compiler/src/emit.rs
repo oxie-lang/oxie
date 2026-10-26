@@ -121,14 +121,39 @@ impl Emitter {
         Pos { offset: self.buf.len(), line: self.line, col: self.col }
     }
 
+    /// `pos`, after the line's indentation (which is written with the line's first text): text
+    /// inserted there goes after it.
+    pub fn text_pos(&mut self) -> Pos {
+        self.write_indent();
+        self.pos()
+    }
+
+    /// Whether text put at `at` would start a statement or a match arm's value, where a block
+    /// is a statement of its own (`{ .. }.len()` doesn't parse there).
+    pub fn starts_statement(&self, at: Pos) -> bool {
+        let before = self.buf[..at.offset].trim_end();
+        before.is_empty() || before.ends_with([';', '{', '}']) || before.ends_with("=>")
+    }
+
     /// Inserts `s` (without newlines) at `at`, keeping the marks and decisions after it in place.
     pub fn insert(&mut self, at: Pos, s: &str) {
+        self.insert_at(at, s, true);
+    }
+
+    /// `insert`, for text that belongs to what starts at `at`: the marks there stay, so the
+    /// inserted text maps to the same source.
+    pub fn insert_into(&mut self, at: Pos, s: &str) {
+        self.insert_at(at, s, false);
+    }
+
+    fn insert_at(&mut self, at: Pos, s: &str, move_marks_at: bool) {
         self.buf.insert_str(at.offset, s);
         let n = s.chars().count() as u32;
-        for m in self.marks.iter_mut().filter(|m| m.gen_line == at.line && m.gen_col >= at.col) {
+        let moves = |line: u32, col: u32| line == at.line && (col > at.col || move_marks_at && col == at.col);
+        for m in self.marks.iter_mut().filter(|m| moves(m.gen_line, m.gen_col)) {
             m.gen_col += n;
         }
-        for d in self.decisions.iter_mut().filter(|d| d.gen_line == at.line && d.gen_col >= at.col) {
+        for d in self.decisions.iter_mut().filter(|d| moves(d.gen_line, d.gen_col)) {
             d.gen_col += n;
         }
         if self.line == at.line {
