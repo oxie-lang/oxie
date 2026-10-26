@@ -3071,7 +3071,7 @@ impl<'a> Parser<'a> {
             }
             // `'outer: for`, and Kotlin's `outer@ for`
             Tok::Lifetime(label) if self.is_punct_at(1, ":") => self.labeled(label, start),
-            Tok::Ident(label) if self.is_punct_at(1, "@") && (["for", "while", "loop"].iter().any(|k| self.is_kw_at(2, k)) || self.is_punct_at(2, "{")) => self.labeled(label, start),
+            Tok::Ident(label) if self.is_punct_at(1, "@") && (["for", "while", "loop", "do"].iter().any(|k| self.is_kw_at(2, k)) || self.is_punct_at(2, "{")) => self.labeled(label, start),
             Tok::Punct("(") => self.paren_or_lambda(),
             Tok::Punct("[") => {
                 self.bump();
@@ -3142,20 +3142,7 @@ impl<'a> Parser<'a> {
                 "for" => self.for_expr(None, start),
                 "while" => self.while_expr(None, start),
                 // `do { } while (c)`, or with a single statement: `do x += 1 while (c)`
-                "do" if self.is_punct_at(1, "{") || self.can_start_expr_at(1) => {
-                    self.bump();
-                    let body = self.branch_body(true)?;
-                    if !self.peek_past_newlines_kw("while") {
-                        return self.expected("`while` after `do { }`");
-                    }
-                    self.bump();
-                    let (c, _) = self.if_header()?;
-                    let cond = match c {
-                        Cond::Expr(e) => e,
-                        Cond::Let { .. } | Cond::Chain(_) => return self.err("`do { } while (val ...)` is not supported"),
-                    };
-                    Ok(Expr::new(ExprKind::DoWhile { label: None, body, cond: Box::new(cond) }, start.to(self.prev_span())))
-                }
+                "do" if self.is_punct_at(1, "{") || self.can_start_expr_at(1) => self.do_while(None, start),
                 "loop" => {
                     self.bump();
                     let body = self.block()?;
@@ -3872,6 +3859,22 @@ impl<'a> Parser<'a> {
         Ok(Expr::new(ExprKind::If { cond: Box::new(cond), then, else_ }, start.to(self.prev_span())))
     }
 
+    /// `do { } while (c)` at `do`.
+    fn do_while(&mut self, label: Option<String>, start: Span) -> PResult<Expr> {
+        self.bump();
+        let body = self.branch_body(true)?;
+        if !self.peek_past_newlines_kw("while") {
+            return self.expected("`while` after `do { }`");
+        }
+        self.bump();
+        let (c, _) = self.if_header()?;
+        let cond = match c {
+            Cond::Expr(e) => e,
+            Cond::Let { .. } | Cond::Chain(_) => return self.err("`do { } while (val ...)` is not supported"),
+        };
+        Ok(Expr::new(ExprKind::DoWhile { label, body, cond: Box::new(cond) }, start.to(self.prev_span())))
+    }
+
     /// A labeled loop or block, after its label (`'outer:` or `outer@`).
     fn labeled(&mut self, label: String, start: Span) -> PResult<Expr> {
         self.bump();
@@ -3888,11 +3891,14 @@ impl<'a> Parser<'a> {
         if self.is_kw("for") {
             return self.for_expr(label, start);
         }
+        if self.is_kw("do") {
+            return self.do_while(label, start);
+        }
         if self.is_punct("{") {
             let block = self.block()?;
             return Ok(Expr::new(ExprKind::LabeledBlock { label: label.unwrap(), block }, start.to(self.prev_span())));
         }
-        self.expected("`loop`, `while`, `for` or `{` after label")
+        self.expected("`loop`, `while`, `do`, `for` or `{` after label")
     }
 
     /// The label of `break 'outer` or Kotlin's `break@outer`.

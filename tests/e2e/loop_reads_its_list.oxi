@@ -1,0 +1,16 @@
+// A loop whose body reads the list it goes over borrows the list instead of consuming it, and a
+// borrowed element compares with a value of its type.
+
+fun main() {
+    val xs = vec["a".to_string(), "b".to_string(), "a".to_string()]
+    var count = 0
+    for (x in xs) if (x == xs[0]) count += 1
+    println(count)
+    val names = vec["ann", "bob"]
+    for (a in names) {
+        for (b in names) {
+            if (a < b) println("$a-$b")
+        }
+    }
+    for (n in names) println("$n of ${names.len()}")
+}

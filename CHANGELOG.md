@@ -108,6 +108,24 @@ Those are fixed below; the silent ones first.
   method that stores it is `move`, and an extension function can take a lambda.
 * A field read after a call in a `?.` chain (`parent?.borrow().value`) is read by value; it
   referred to a temporary.
+* An interface value that already is a reference (a `&Shape` field, an element in
+  `iter().filter { }`) is passed to an `&Shape` parameter as it is, not as `&&dyn Shape`.
+* A method whose interface result is an associated type set to `()` returned its last
+  expression; a result type came from an untyped number (`if (n == 0) 1 else n` with `n: u64` gave
+  `i32`).
+* A file that imports `anyhow.Context` gets anyhow's `context` without a clash with Oxie's.
+* `Step { n: i32 -> n * 2 }` is a trailing lambda, not a struct literal; `1..=10 step 3` steps
+  through the whole range; a `rust { }` block with statements is a value; an enum case named
+  `None` matches in a `when` on an optional; an extension of a number takes it by value
+  (`fun i32.is_positive() = this > 0`).
+* `var label = "none"` that later gets a `String` (`label = "$n items"`) is a `String`.
+* The condition of `do { } while (cond)` sees the variables of the body, as in Kotlin, and a `do`
+  loop can be labeled (`outer@ do`).
+* Tools: the language server crashed finding references in text with characters of several
+  bytes; a UTF-8 byte order mark at the start of a file was rejected; `oxie new build` made a
+  project cargo refuses; `oxie init` in a crate with a build script didn't call
+  `oxie_build::compile()`; `oxie from-rust` kept a type as Rust when two of its traits have a
+  method of the same name.
 * A string literal that spans lines inside a macro call, a `rust { }` block or an `r"..."` string
   kept the generated code's indentation on its later lines, which changed the string.
 * Attributes on a function's parameters, and on the named fields of an enum case, were dropped.

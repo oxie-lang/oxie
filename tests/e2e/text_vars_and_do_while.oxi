@@ -1,0 +1,29 @@
+// A `var` made from a text literal that later gets a `String` is a `String`; a `do-while`
+// condition sees the body's variables, and a `do` loop can be labeled.
+
+fun main() {
+    val n = 3
+    var label = "none"
+    if (n > 0) label = "$n items"
+    println(label)
+    var acc = ""
+    for (w in ["a", "b"]) acc = acc + w
+    println(acc)
+
+    val inputs = ["a", "b", "quit", "c"]
+    var i = 0
+    do {
+        val line = inputs[i]
+        i += 1
+    } while (line != "quit")
+    println(i)
+
+    var found = 0
+    outer@ do {
+        found += 1
+        for (k in 0..10) {
+            if (k == 2) break@outer
+        }
+    } while (true)
+    println(found)
+}

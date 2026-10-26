@@ -729,7 +729,7 @@ match x { Some(v) => v, None => 0 } // Rust match syntax works too
 for (item in items) { }             // also `for item in items { }`
 for ((i, x) in xs.iter().enumerate()) { }
 while (cond) { }
-do { } while (cond)                 // also `do x += 1 while (cond)`
+do { } while (cond)                 // also `do x += 1 while (cond)`; cond sees the body's variables
 loop { }
 'outer: for (...) { break 'outer } // or Kotlin's `outer@ for`, `break@outer`
 val v = 'found: { if (c) break 'found 1; 0 }   // labeled block with a value

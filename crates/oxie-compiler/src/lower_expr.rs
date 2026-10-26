@@ -641,6 +641,12 @@ impl<'a> Lowerer<'a> {
     }
 
     fn let_stmt(&mut self, pat: &Pat, ty: Option<&Type>, init: Option<&Expr>, else_: Option<&Block>) {
+        // `var label = "none"` that later gets a `String` (`label = "$n items"`) is a `String`
+        let text = Type::simple("String");
+        let ty = match (ty, pat, init.map(|e| &e.kind)) {
+            (None, Pat::Ident { name, mutable: true, sub: None, .. }, Some(ExprKind::Str(_))) if self.text_reassigned.contains(name) => Some(&text),
+            _ => ty,
+        };
         let fields = self.data_class_destructuring(pat, ty.cloned().or_else(|| init.and_then(|e| self.infer_type(e))));
         let pat = fields.as_ref().unwrap_or(pat);
         let mut p = self.pat(pat);
@@ -1092,7 +1098,7 @@ impl<'a> Lowerer<'a> {
 
     /// Why `for (x in iter)` borrows `iter` (just written): it is used after the loop, a loop
     /// around this one uses it again, or it is a field of `this`.
-    fn loop_borrow_decision(&mut self, iter: &Expr) {
+    fn loop_borrow_decision(&mut self, iter: &Expr, loop_end: u32) {
         let root = match &iter.kind {
             ExprKind::Field { recv, .. } if !matches!(recv.kind, ExprKind::SelfValue) => field_root(iter),
             _ => None,
@@ -1105,7 +1111,10 @@ impl<'a> Lowerer<'a> {
         let used = root.map_or(name.as_str(), |r| r).to_string();
         let (why, cause) = match self.reused_iters.get(&iter.span.start) {
             _ if root.is_some_and(|r| matches!(self.local(r), Some(Some(Type::Ref { .. })))) => (format!("`{}` is a reference", used), None),
-            Some(Some(at)) if self.local(&used).is_some() => (format!("`{}` is used after the loop", used), Some(Span::new(*at as usize, *at as usize + used.len()))),
+            Some(Some(at)) if self.local(&used).is_some() => {
+                let place = if *at < loop_end { "in the loop" } else { "after the loop" };
+                (format!("`{}` is used {}", used, place), Some(Span::new(*at as usize, *at as usize + used.len())))
+            }
             Some(None) if self.local(&used).is_some() => (format!("the loop around this one uses `{}` again", used), None),
             _ => (format!("`{}` belongs to `this`", name), None),
         };
@@ -2692,16 +2701,23 @@ impl<'a> Lowerer<'a> {
                 let lbl = if needs_label { Some(self.fresh("body")) } else { None };
                 self.e.w("loop {");
                 self.e.indent();
-                self.e.nl();
                 self.loops.push(self.new_loop(outer, lbl.clone()));
-                if let Some(l) = &lbl {
-                    self.e.w(&format!("'{}: ", l));
+                // the condition sees the body's variables, as in Kotlin (unless a `continue` needs
+                // the body in a block of its own, which it leaves)
+                self.push_scope();
+                match &lbl {
+                    Some(l) => {
+                        self.e.nl();
+                        self.e.w(&format!("'{}: ", l));
+                        self.block_stmt(body);
+                    }
+                    None => self.stmts_with_tail(&body.stmts, None),
                 }
-                self.block_stmt(body);
                 self.loops.pop();
                 self.e.nl();
                 self.e.w("if !(");
                 self.expr(cond, P_LOWEST);
+                self.pop_scope();
                 self.e.w(") {");
                 self.e.indent();
                 self.e.nl();
@@ -2795,7 +2811,7 @@ impl<'a> Lowerer<'a> {
                             }
                             None => {
                                 self.expr(iter, P_POSTFIX);
-                                self.loop_borrow_decision(iter);
+                                self.loop_borrow_decision(iter, e.span.end);
                             }
                         }
                     }
@@ -3021,6 +3037,10 @@ impl<'a> Lowerer<'a> {
             self.expr(l, P_UNARY);
         } else if text(r) && self.is_ref_lambda_param(l) {
             self.read_text(l);
+        } else if cmp && self.ref_against_value(l, r) {
+            // a reference compared with a value of its type (`x == xs[0]` with `x: &String`)
+            self.e.w("*");
+            self.expr(l, P_UNARY);
         } else {
             self.operand(l, lp, matches!(op, BinOp::Lt | BinOp::Shl));
         }
@@ -3032,9 +3052,19 @@ impl<'a> Lowerer<'a> {
             self.expr(r, P_UNARY);
         } else if text(l) && self.is_ref_lambda_param(r) {
             self.read_text(r);
+        } else if cmp && self.ref_against_value(r, l) {
+            self.e.w("*");
+            self.expr(r, P_UNARY);
         } else {
             self.operand(r, p + 1, before_lt);
         }
+    }
+
+    /// Is `a` a reference to a value of `b`'s type (`&String` against `String`), which Rust
+    /// doesn't compare?
+    fn ref_against_value(&self, a: &Expr, b: &Expr) -> bool {
+        let (Some(Type::Ref { inner, .. }), Some(other)) = (self.infer_type(a), self.infer_type(b)) else { return false };
+        !matches!(other, Type::Ref { .. } | Type::Infer) && !crate::infer::has_infer(&inner) && crate::symbols::type_text(&inner) == crate::symbols::type_text(&other)
     }
 
     /// For `push`, `insert`, `push_back` and `push_front` on a std list, set or map of `String`s

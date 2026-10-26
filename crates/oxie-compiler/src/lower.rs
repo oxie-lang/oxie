@@ -329,6 +329,9 @@ pub struct Lowerer<'a> {
     pub(crate) call_start: Option<(Span, crate::emit::Pos)>,
     /// The assignments of the function being lowered (`visit::assignments`).
     pub(crate) writes: Vec<(String, u32)>,
+    /// The variables of the function being lowered that are assigned something other than a
+    /// text literal (`visit::text_reassigned`).
+    pub(crate) text_reassigned: Vec<String>,
     /// The type of the next lambda's first parameter, known from the collection operation it
     /// goes to (`&Item` in `items.map { it.price }`): calls on it are resolved, nothing written.
     pub(crate) next_lambda_elem: Option<Type>,
@@ -637,6 +640,7 @@ impl<'a> Lowerer<'a> {
             home: None,
             call_start: None,
             writes: Vec::new(),
+            text_reassigned: Vec::new(),
             next_lambda_elem: None,
             try_errs: HashMap::new(),
             lambda_params: Vec::new(),
@@ -2298,6 +2302,7 @@ impl<'a> Lowerer<'a> {
         let outer = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
         self.reused_iters.extend(visit::reused_loop_iters(outer, b));
         let outer_writes = std::mem::replace(&mut self.writes, visit::assignments(b));
+        let outer_text = std::mem::replace(&mut self.text_reassigned, visit::text_reassigned(b));
         self.e.w("{");
         self.e.indent();
         self.push_scope();
@@ -2319,6 +2324,7 @@ impl<'a> Lowerer<'a> {
         self.e.w("}");
         self.tmp = outer_tmp;
         self.writes = outer_writes;
+        self.text_reassigned = outer_text;
     }
 
     fn ext_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {

@@ -524,6 +524,23 @@ pub fn assignments(body: &Block) -> Vec<(String, u32)> {
     out
 }
 
+/// The variables `body` assigns a value to that isn't a plain text literal (`label = "$n items"`,
+/// `acc = acc + w`): a `var` made from a literal must then be a `String`.
+pub fn text_reassigned(body: &Block) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_block(body, &mut |e| {
+        if let ExprKind::Assign(None, target, value) = &e.kind {
+            if let Some(n) = target.ident() {
+                if !matches!(value.kind, ExprKind::Str(_) | ExprKind::RawStr(_)) {
+                    out.push(n.to_string());
+                }
+            }
+        }
+        true
+    });
+    out
+}
+
 /// Does `body` use the name `n` as a variable (or as the object of a field or method)?
 pub fn mentions_name(body: &Block, n: &str) -> bool {
     let mut found = false;
@@ -816,8 +833,10 @@ pub fn reused_loop_iters(outer: Vec<String>, body: &Block) -> std::collections::
             let scope_end = self.scopes[d].end;
             let other_field = |p: &u32| field.is_some_and(|f| self.fields.get(p).is_some_and(|g| g != f));
             let later = self.uses.iter().filter(|(n, p)| n == name && *p >= end && *p < scope_end && !other_field(p)).map(|(_, p)| *p).min();
-            if in_loop || later.is_some() {
-                self.found.insert(start, later);
+            // the loop's own body uses it too (`for (x in xs) if (x == xs[0])`)
+            let inside = self.uses.iter().filter(|(n, p)| n == name && *p > start && *p < end && !other_field(p)).map(|(_, p)| *p).min();
+            if in_loop || later.is_some() || inside.is_some() {
+                self.found.insert(start, later.or(inside));
             }
         }
     }
