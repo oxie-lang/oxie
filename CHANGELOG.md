@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 - 2026-10-26
+
+Fixes for the tools around the compiler; the language is unchanged. Projects on `oxie-build`
+0.4.0 can stay on it, or move with `cargo update -p oxie-build`.
 
 * `oxie` keeps cargo's output plain when it doesn't color its own (`NO_COLOR`, or output to a
   pipe), even with `CARGO_TERM_COLOR=always` in the environment. Before, that variable colored
@@ -8,6 +11,9 @@
 * On Rust before 1.84, rustc's "use parentheses to call this closure" suggestion for a lambda
   passed where a value is expected is no longer offered as a fix: mapped onto Oxie's braces, it
   broke the line.
+* On Windows, messages name files relative to the current directory again when the system
+  reports it by its short name (`C:\Users\RUNNER~1`): a script's errors and its
+  "could not compile" line showed the full path instead.
 
 ## 0.4.0 - 2026-10-26
 

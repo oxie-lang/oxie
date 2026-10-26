@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "oxie"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "oxie-compiler",
  "oxie-from-rust",
@@ -145,18 +145,18 @@ dependencies = [
 
 [[package]]
 name = "oxie-build"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "oxie-compiler",
 ]
 
 [[package]]
 name = "oxie-compiler"
-version = "0.4.0"
+version = "0.4.1"
 
 [[package]]
 name = "oxie-from-rust"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "oxie-compiler",
  "prettyplease",
