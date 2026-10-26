@@ -34,6 +34,8 @@ enum Kind {
     Coll(String),
     /// A hash map or set with keys of the type parameter.
     Keys(String),
+    /// An optional value of the type parameter (`T?`).
+    Opt(String),
 }
 
 type Names = HashMap<String, Kind>;
@@ -125,6 +127,17 @@ fn kind_of(t: &Type, tnames: &HashSet<String>) -> Option<Kind> {
     match t {
         Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && tnames.contains(&segs[0].name) => Some(Kind::Elem(segs[0].name.clone())),
         Type::Ref { inner, .. } => kind_of(inner, tnames),
+        Type::Option(inner) => match kind_of(inner, tnames) {
+            Some(Kind::Elem(n)) => Some(Kind::Opt(n)),
+            _ => None,
+        },
+        Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Option" => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(inner)]) => match kind_of(inner, tnames) {
+                Some(Kind::Elem(n)) => Some(Kind::Opt(n)),
+                _ => None,
+            },
+            _ => None,
+        },
         Type::Slice(inner) | Type::Array(inner, _) => match kind_of(inner, tnames) {
             Some(Kind::Elem(n)) => Some(Kind::Coll(n)),
             _ => None,
@@ -176,8 +189,27 @@ fn elem(e: &Expr, names: &Names) -> Option<String> {
         ExprKind::Paren(x) | ExprKind::Unary(UnOp::Deref, x) | ExprKind::Unary(UnOp::Ref, x) => elem(x, names),
         ExprKind::Index(c, _) => coll(c, names),
         ExprKind::MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "clone" | "to_owned") => elem(recv, names),
+        // `value!!` of a `T?`
+        ExprKind::Unwrap(x) => opt(x, names),
+        ExprKind::MethodCall { recv, name, args, .. } if args.is_empty() && name == "unwrap" => opt(recv, names),
         _ => match names.get(e.ident()?) {
             Some(Kind::Elem(t)) => Some(t.clone()),
+            _ => None,
+        },
+    }
+}
+
+/// The type parameter of an optional value expression (`value`, `&value` for `value: T?`).
+fn opt(e: &Expr, names: &Names) -> Option<String> {
+    match &e.kind {
+        ExprKind::Paren(x) | ExprKind::Unary(UnOp::Ref, x) | ExprKind::Unary(UnOp::RefMut, x) => opt(x, names),
+        ExprKind::MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "as_ref" | "as_mut" | "clone") => opt(recv, names),
+        ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => match names.get(name) {
+            Some(Kind::Opt(t)) => Some(t.clone()),
+            _ => None,
+        },
+        _ => match names.get(e.ident()?) {
+            Some(Kind::Opt(t)) => Some(t.clone()),
             _ => None,
         },
     }
@@ -279,6 +311,13 @@ fn scan(e: &Expr, names: &Names, cx: &Cx, found: &mut Found) {
                         // `"$xs"` prints a list in its debug form too
                         } else if let Some(t) = coll(v, names).filter(|_| debug || spec.is_none()) {
                             add(found, &t, "Debug", path(&["std", "fmt", "Debug"]));
+                        // a `T?` prints its value or `null`
+                        } else if let Some(t) = opt(v, names) {
+                            if debug {
+                                add(found, &t, "Debug", path(&["std", "fmt", "Debug"]));
+                            } else {
+                                display(found, &t);
+                            }
                         }
                     }
                 }
@@ -359,6 +398,10 @@ fn scan(e: &Expr, names: &Names, cx: &Cx, found: &mut Found) {
                         _ => {}
                     }
                 }
+                // `value.clone()` of a `T?` clones the `T`
+                if let (Some(t), "clone") = (opt(recv, names), name.as_str()) {
+                    add(found, &t, "Clone", Type::simple("Clone"));
+                }
                 let hash_op = matches!(name.as_str(), "insert" | "contains" | "contains_key" | "entry" | "get" | "get_mut" | "remove");
                 if recv.ident().is_some_and(|r| cx.sets.contains(r)) && hash_op {
                     if let Some(t) = args.first().and_then(|a| elem(&a.value, names)) {
@@ -419,6 +462,18 @@ fn scan(e: &Expr, names: &Names, cx: &Cx, found: &mut Found) {
                     inner.insert(name.clone(), Kind::Elem(t));
                 }
                 scan_block(body, &inner, cx, found);
+                return false;
+            }
+            // `if (val v = value)` on a `T?` binds a `T`
+            If { cond, then, else_ } if matches!(&**cond, Cond::Let { pat: Pat::Ident { .. }, expr, .. } if opt(expr, names).is_some()) => {
+                let Cond::Let { pat: Pat::Ident { name, .. }, expr, .. } = &**cond else { unreachable!() };
+                scan(expr, names, cx, found);
+                let mut inner = names.clone();
+                inner.insert(name.clone(), Kind::Elem(opt(expr, names).unwrap()));
+                scan_block(then, &inner, cx, found);
+                if let Some(el) = else_ {
+                    scan(el, names, cx, found);
+                }
                 return false;
             }
             // the fields of a generic enum's case hold `T`s: `Leaf(x) -> x.clone()`
@@ -500,6 +555,10 @@ mod tests {
         assert_eq!(bounds_of("fun f<T>(xs: &[T], x: &T): bool = xs.contains(x)"), "T: PartialEq");
         assert_eq!(bounds_of("fun f<T>(xs: &[T]): Option<&T> = xs.iter().max()"), "T: Ord");
         assert_eq!(bounds_of("fun f<K, V>(m: &mut HashMap<K, V>, k: K, v: V) { m.insert(k, v) }"), "K: Eq + Hash");
+        // an optional `T`: cloned, printed, or unwrapped by `if (val v = x)`
+        assert_eq!(bounds_of("fun f<T>(x: T?, d: T): T = x.clone() ?: d"), "T: Clone");
+        assert_eq!(bounds_of("fun f<T>(x: &T?): String = \"got $x\""), "T: Display");
+        assert_eq!(bounds_of("fun f<T>(x: &T?): String = if (val v = x) \"${v:?}\" else \"none\""), "T: Debug");
         // a lambda over something else doesn't make `it` a `T`
         assert_eq!(bounds_of("fun f<T>(x: T, ys: Vec<i32>): Vec<String> = ys.iter().map { \"$it\" }.collect()"), "");
     }

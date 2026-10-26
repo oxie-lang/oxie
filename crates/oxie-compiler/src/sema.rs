@@ -1392,8 +1392,20 @@ fn add_method(methods: &mut HashMap<String, MethodInfo>, name: &str, mi: MethodI
     }
 }
 
+/// The declared result type, or for `fun f() = a?.b` (not `throws`) an optional of a type that
+/// lowering infers: callers know the result may be null (`"${f()}"` prints `null`).
+fn known_ret(f: &FunDecl) -> Option<Type> {
+    if f.ret.is_some() || !matches!(f.throws, Throws::No) {
+        return f.ret.clone();
+    }
+    match &f.body {
+        Some(FunBody::Expr(e)) if crate::lower_expr::has_safe_link(e) => Some(Type::Option(Box::new(Type::Infer))),
+        _ => None,
+    }
+}
+
 fn default_mi(f: &FunDecl) -> MethodInfo {
-    MethodInfo { recv: Recv::Ref, params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), explicit: false, recv_why: None, iface: false }
+    MethodInfo { recv: Recv::Ref, params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: known_ret(f), explicit: false, recv_why: None, iface: false }
 }
 
 /// Receiver determined purely from syntax, or None if it must be inferred.
@@ -1413,7 +1425,7 @@ fn method_info_explicit(f: &FunDecl, trait_recv: Option<Recv>) -> Option<MethodI
         None if f.mods.is_operator => Some(Recv::Value),
         None => None,
     };
-    recv.map(|recv| MethodInfo { recv, params, throws, ret: f.ret.clone(), explicit: trait_recv.is_none() || f.self_param.is_some() || f.mods.is_static || f.mods.is_mut, recv_why: None, iface: false })
+    recv.map(|recv| MethodInfo { recv, params, throws, ret: known_ret(f), explicit: trait_recv.is_none() || f.self_param.is_some() || f.mods.is_static || f.mods.is_mut, recv_why: None, iface: false })
 }
 
 fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
@@ -1442,7 +1454,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                     f.generics.params.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if names.contains(&name.as_str())))
                 });
                 let type_names = type_param_names(&f.generics);
-                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), raw: false, generic_ret, type_names };
+                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: known_ret(f), raw: false, generic_ret, type_names };
                 if let Some(key) = fun_key_for(k, &f.name, module) {
                     k.funs.insert(key, info);
                 }
@@ -1472,7 +1484,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                     k.ext_throws.insert(f.name.clone());
                 }
                 if let Some(recv) = &f.receiver {
-                    let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), raw: false, generic_ret: false, type_names: type_param_names(&f.generics) };
+                    let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: known_ret(f), raw: false, generic_ret: false, type_names: type_param_names(&f.generics) };
                     k.ext_funs.entry(f.name.clone()).or_default().push((recv.clone(), info));
                 }
             }

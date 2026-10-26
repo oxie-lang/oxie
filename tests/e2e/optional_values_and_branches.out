@@ -1,0 +1,20 @@
+1 200 3
+7
+Some(Point { x: 100, y: 2 }) Some(Point { x: 3, y: 40 }) Some(Point { x: 3, y: 0 })
+Some(Point { x: 11, y: 2 }) None Some(Named { name: "ada!" })
+empty 7 null 3 set to 4 4 null
+set to ada
+10
+[2, -4, 6]
+1 null null
+ADA none ADA ada
+42
+--name=ada: name=ada
+--verbose: verbose=<none>
+plain: not a flag
+timed out after 5000ms
+failed: network down
+failed: slow: 300
+2
+h null
+3 null

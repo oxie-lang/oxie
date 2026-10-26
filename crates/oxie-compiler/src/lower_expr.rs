@@ -568,11 +568,20 @@ impl<'a> Lowerer<'a> {
                             let mut checks = Vec::new();
                             or_operands(c, &mut checks);
                             self.unused_after_check = checks.iter().filter_map(|p| self.null_check(p, BinOp::Eq)).filter(|x| !visit::stmts_use(&stmts[i + 1..], x)).map(str::to_string).collect();
+                            let rest = Block { stmts: stmts[i + 1..].to_vec(), span: expr.span };
+                            let empty = Block { stmts: Vec::new(), span: expr.span };
+                            self.changed_after_check = checks
+                                .iter()
+                                .filter_map(|p| self.null_check(p, BinOp::Eq))
+                                .filter(|x| self.narrowable(x, &empty).is_some_and(|t| visit::writes_through(&rest, x, &|m| self.changing_methods(Some(&t)).contains(m))))
+                                .map(str::to_string)
+                                .collect();
                         }
                     }
                 }
                 self.stmt(s);
                 self.unused_after_check.clear();
+                self.changed_after_check.clear();
             }
         }
         self.local_funs.truncate(outer_funs);
@@ -1429,6 +1438,10 @@ impl<'a> Lowerer<'a> {
                 self.e.w("*");
                 self.expr(e, P_UNARY);
             }
+            Type::Path { .. } if self.copy_ref_local(e, ty) => {
+                self.e.w("*");
+                self.expr(e, P_UNARY);
+            }
             // an owned box (a recursive field bound by a `when` arm) where its value is expected: `*x`
             Type::Path { segs, .. }
                 if ty.auto_boxed().is_none()
@@ -1489,8 +1502,41 @@ impl<'a> Lowerer<'a> {
                 let param = self.ty(ty, TyPos::Param);
                 self.e.decide(e.span, if *mutable { "&mut" } else { "&" }, format!("the parameter is `{}`", param), None);
             }
+            // a tuple for a tuple type, part by part (`(k, null)` for `(String, String?)`)
+            Type::Tuple(ts) if matches!(&e.kind, ExprKind::Tuple(xs) if xs.len() == ts.len() && xs.len() > 1) => {
+                let ExprKind::Tuple(xs) = &e.kind else { unreachable!() };
+                self.e.w("(");
+                for (i, (x, t)) in xs.iter().zip(ts).enumerate() {
+                    if i > 0 {
+                        self.e.w(", ");
+                    }
+                    match t {
+                        Type::Infer => self.expr(x, P_LOWEST),
+                        t => self.coerce(x, t, TyPos::Generic),
+                    }
+                }
+                self.e.w(")");
+            }
             Type::Option(inner) => match &e.kind {
                 ExprKind::Null => self.e.w("None"),
+                // `&x` of a value (not a `T?`) for a `&T?`: `Some(&x)`
+                ExprKind::Unary(UnOp::Ref | UnOp::RefMut, x) if matches!(&**inner, Type::Ref { .. }) && !self.is_option_expr(x) && !matches!(x.kind, ExprKind::Null) && (self.is_value_like(x) || self.infer_type(x).is_some()) => {
+                    self.e.w("Some(");
+                    self.expr(e, P_LOWEST);
+                    self.e.w(")");
+                }
+                // a `T?` lent to a `&T?` parameter (`Option<&T>`): `x.as_ref()`, also for `&x`
+                _ if pos == TyPos::Param && matches!(&**inner, Type::Ref { .. }) && self.owned_option_place(e).is_some() => {
+                    let place = self.owned_option_place(e).unwrap();
+                    self.expr(place, P_POSTFIX);
+                    self.e.w(if matches!(&**inner, Type::Ref { mutable: true, .. }) { ".as_mut()" } else { ".as_ref()" });
+                }
+                // a `Copy` value changed in place after a null check (`let Some(p) = &mut p`)
+                _ if self.copy_ref_local(e, inner) => {
+                    self.e.w("Some(*");
+                    self.expr(e, P_UNARY);
+                    self.e.w(")");
+                }
                 _ if self.is_value_like(e) || inner.is_string() && self.is_str_var(e) => {
                     self.e.w("Some(");
                     self.coerce(e, inner, TyPos::Generic);
@@ -2629,13 +2675,15 @@ impl<'a> Lowerer<'a> {
             }
             If { cond, then, else_ } => {
                 if else_.is_some() {
-                    self.if_expr(cond, then, else_.as_deref(), Some(&branch_target(e)));
+                    let t = self.branch_target(e);
+                    self.if_expr(cond, then, else_.as_deref(), Some(&t));
                 } else {
                     self.if_expr(cond, then, None, None);
                 }
             }
             When { subject, binding, arms, rust_match } => {
-                self.when_with_binding(subject.as_deref(), binding.as_ref(), arms, *rust_match, Some(&branch_target(e)), e.span);
+                let t = self.branch_target(e);
+                self.when_with_binding(subject.as_deref(), binding.as_ref(), arms, *rust_match, Some(&t), e.span);
             }
             Block(b) => self.block_value(b, &Target::none()),
             LabeledBlock { label, block } => {
@@ -3169,6 +3217,36 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Is `e` a local whose type is a reference to a number, `char` or `bool` (`&char`)?
+    /// `x` or `&x` for a variable or field `x` holding a `T?` of an owned `T`: the place.
+    fn owned_option_place<'e>(&self, e: &'e Expr) -> Option<&'e Expr> {
+        let place = match &e.kind {
+            ExprKind::Unary(UnOp::Ref | UnOp::RefMut, x) => &**x,
+            _ => e,
+        };
+        if !self.is_place(place) {
+            return None;
+        }
+        match self.infer_type(place)? {
+            Type::Option(t) if !matches!(*t, Type::Ref { .. } | Type::Infer) => Some(place),
+            _ => None,
+        }
+    }
+
+    /// `branch_target`, and for branches giving tuples with `null` in a part, the tuple type
+    /// with that part optional.
+    fn branch_target(&self, e: &Expr) -> Target {
+        match branch_target(e) {
+            t if t.ty.is_none() => self.tuple_with_null_parts(e).map_or(t, |ty| Target::ty(&ty)),
+            t => t,
+        }
+    }
+
+    /// A local bound to a reference to a `Copy` value of type `t` (`&mut Point` for `Point`).
+    fn copy_ref_local(&self, e: &Expr, t: &Type) -> bool {
+        let Some(n) = e.ident() else { return false };
+        matches!(self.local(n), Some(Some(Type::Ref { inner, .. })) if inner.single_name().is_some() && inner.single_name() == t.single_name() && self.copy_elem(&inner))
+    }
+
     fn is_scalar_ref_local(&self, e: &Expr) -> bool {
         let Some(n) = e.ident() else { return false };
         matches!(self.local(n), Some(Some(Type::Ref { inner, .. })) if inner.single_name().is_some_and(|t| is_std_value(t) && !matches!(t, "String" | "str" | "Vec" | "HashMap" | "HashSet" | "Option")))
@@ -3658,9 +3736,10 @@ impl<'a> Lowerer<'a> {
             match self.null_check(p, BinOp::Ne).filter(used).and_then(|x| self.narrowable(x, then).map(|t| (x, t))) {
                 Some((x, inner)) => {
                     let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
-                    let by_value = crate::sema::is_copy_simple(&inner, &copy);
                     let changing = self.changing_methods(Some(&inner));
-                    let mutable = !by_value && visit::writes_through(then, x, &|m| changing.contains(m));
+                    let mutable = visit::writes_through(then, x, &|m| changing.contains(m));
+                    // a `Copy` value the branch changes is changed in place, not in a copy
+                    let by_value = !mutable && crate::sema::is_copy_simple(&inner, &copy);
                     let var = Expr::new(ExprKind::Path { segs: vec![x.to_string()], generics: None, global: false }, p.span);
                     let expr = if by_value { var } else { Expr::new(ExprKind::Unary(if mutable { UnOp::RefMut } else { UnOp::Ref }, Box::new(var)), p.span) };
                     let ty = if by_value { inner } else { Type::Ref { lifetime: None, mutable, inner: Box::new(inner) } };
@@ -3754,9 +3833,16 @@ impl<'a> Lowerer<'a> {
         let exits = matches!(then.stmts.last(), Some(Stmt::Expr { expr, .. }) if expr.diverges());
         let empty = Block { stmts: Vec::new(), span: then.span };
         let Some(inner) = names.iter().map(|x| self.narrowable(x, &empty)).collect::<Option<Vec<Type>>>().filter(|_| exits) else { return false };
-        // a name the rest of the block doesn't use is checked, not bound
-        let pats: Vec<String> = names.iter().map(|x| format!("Some({})", if self.unused_after_check.contains(x) { "_".to_string() } else { esc(x) })).collect();
-        let vals: Vec<String> = names.iter().map(|x| esc(x)).collect();
+        // a name the rest of the block doesn't use is checked, not bound; one it changes is
+        // changed in place when it is a `Copy` value, and taken out of the optional otherwise
+        let changed: Vec<bool> = names.iter().map(|x| self.changed_after_check.contains(x)).collect();
+        let in_place: Vec<bool> = inner.iter().zip(&changed).map(|(t, c)| *c && self.copy_elem(t)).collect();
+        let pats: Vec<String> = names
+            .iter()
+            .enumerate()
+            .map(|(i, x)| format!("Some({})", if self.unused_after_check.contains(x) { "_".to_string() } else if changed[i] && !in_place[i] { format!("mut {}", esc(x)) } else { esc(x) }))
+            .collect();
+        let vals: Vec<String> = names.iter().enumerate().map(|(i, x)| format!("{}{}", if in_place[i] { "&mut " } else { "" }, esc(x))).collect();
         if names.len() == 1 {
             self.e.w(&format!("let {} = {} else ", pats[0], vals[0]));
         } else {
@@ -3766,9 +3852,9 @@ impl<'a> Lowerer<'a> {
         self.e.w(";");
         let shown = names.iter().map(|x| format!("`{}`", x)).collect::<Vec<_>>().join(" and ");
         self.e.decide(c.span, format!("let {} = {} else", pats.join(", "), vals.join(", ")), format!("{} {} not null after this line", shown, if names.len() == 1 { "is" } else { "are" }), None);
-        for (x, t) in names.iter().zip(inner) {
+        for ((x, t), by_ref) in names.iter().zip(inner).zip(in_place) {
             if !self.unused_after_check.contains(x) {
-                self.bind_name(x, Some(t));
+                self.bind_name(x, Some(if by_ref { Type::Ref { lifetime: None, mutable: true, inner: Box::new(t) } } else { t }));
             }
         }
         true
@@ -5699,6 +5785,11 @@ impl<'a> Lowerer<'a> {
         let elem = self.elem_type(coll).filter(|t| *t != Type::Infer)?;
         // a list of interface values holds boxes
         let elem = self.boxed_iface(&elem).unwrap_or(elem);
+        // an array's own `map` takes the elements by value
+        let array = matches!(coll.kind, ExprKind::Array(_) | ExprKind::ArrayRepeat(..)) || matches!(self.infer_type(coll), Some(Type::Array(..)));
+        if array && !through_iter && name == "map" {
+            return Some(elem);
+        }
         let by_ref = |t: Type| Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) };
         // an iterator's predicates get a reference to its item, itself a reference
         let pred = through_iter && matches!(name, "filter" | "find" | "take_while" | "skip_while" | "inspect");
@@ -5879,7 +5970,18 @@ impl<'a> Lowerer<'a> {
     /// `a?.b.c?.d()` -> `a.as_ref().and_then(|v| v.b.c.as_ref()).map(|v| v.d())`
     fn safe_chain(&mut self, e: &Expr) {
         let (base, links) = chain_links(e);
-        let (prefix, segs) = Self::split_segments(&links);
+        let (prefix, mut segs) = Self::split_segments(&links);
+        // `?.` after a link that always gives a value reads as `.`, as in Kotlin: the links stay
+        // in one closure (`word?.chars()?.next()` → `word.as_ref().and_then(|v| v.chars().next())`)
+        let mut i = 0;
+        while i + 1 < segs.len() {
+            if segs[i].last().is_some_and(|l| self.never_null_link(l)) {
+                let next = segs.remove(i + 1);
+                segs[i].extend(next);
+            } else {
+                i += 1;
+            }
+        }
         let base_expr_borrowed = prefix.last().map_or_else(|| self.yields_borrowed_option(base), |l| self.yields_borrowed_option(l));
         // `stack?.pop()` changes the value: borrowed mutably
         let inner = match self.infer_type(base) {
@@ -5936,7 +6038,9 @@ impl<'a> Lowerer<'a> {
             let recv = Expr::new(ExprKind::Path { segs: vec![v.clone()], generics: None, global: false }, e.span);
             self.segment_links(seg, Some(&recv));
             self.pop_scope();
-            if flatten && ends_in_field {
+            // an optional field of a borrowed value is borrowed too; one of an owned value (a
+            // call's result) is taken
+            if flatten && ends_in_field && (borrowed || amp) {
                 self.e.w(".as_ref()");
             }
             self.e.w(")");
@@ -6046,6 +6150,19 @@ impl<'a> Lowerer<'a> {
 
     /// Does this `?.` link give a `T?` (`Some(true)`), a plain value (`Some(false)`), or is that
     /// unknown?
+    /// A link of a `?.` chain that gives an iterator over its value (`chars()`, `iter()`,
+    /// `split(..)`), never null.
+    fn never_null_link(&self, l: &Expr) -> bool {
+        const ITERATORS: &[&str] = &["chars", "bytes", "lines", "split_whitespace", "char_indices", "iter", "iter_mut", "into_iter", "keys", "values", "values_mut", "split", "rsplit", "splitn", "split_terminator", "windows", "chunks"];
+        match &l.kind {
+            ExprKind::MethodCall { recv, name, .. } if ITERATORS.contains(&name.as_str()) => {
+                let rt = self.link_recv_type(recv, true);
+                !rt.as_ref().and_then(|t| self.type_owner(t)).is_some_and(|o| self.class_at(&o).is_some() || self.enum_at(&o).is_some())
+            }
+            _ => false,
+        }
+    }
+
     fn link_is_option(&self, l: &Expr) -> Option<bool> {
         if let Some(t) = self.link_type(l) {
             return Some(option_inner(&t).is_some());
@@ -6498,6 +6615,16 @@ impl<'a> Lowerer<'a> {
     fn elvis(&mut self, l: &Expr, r: &Expr) {
         let saved = self.force_safe;
         self.force_safe = true;
+        // `a ?: b` over two results (`"x".parse<i32>() ?: "7".parse<i32>() ?: 0`): `b` when `a`
+        // failed, still a result
+        if self.is_result_expr(l) && self.is_result_expr(r) {
+            self.expr(l, P_POSTFIX);
+            self.force_safe = saved;
+            self.e.w(".or_else(|_| ");
+            self.expr(r, P_LOWEST);
+            self.e.w(")");
+            return;
+        }
         // `a ?: b` with an optional `b` is optional too (`a ?: b ?: 0`): `a.or(b)`, and
         // `a.or_else(|| f())` so that `f()` runs only when `a` is null
         let r_opt = matches!(strip_paren(r).kind, ExprKind::Null) || has_safe_link(r) || self.place_is_option(r) || self.infer_type(r).is_some_and(|t| option_inner(&t).is_some());
@@ -6530,13 +6657,16 @@ impl<'a> Lowerer<'a> {
             self.e.w(")");
             return;
         }
+        // `m.get(k) ?: f()` on a map of numbers: the number behind the reference, like `f()`
+        let copied = self.infer_type(l).and_then(|t| option_inner(&t)).is_some_and(|t| matches!(&t, Type::Ref { mutable: false, inner, .. } if self.copy_elem(inner)))
+            && self.infer_type(r).is_some_and(|t| !matches!(t, Type::Ref { .. }));
         let v = self.fresh("v");
         self.e.w(&format!("match {}::Elvis::opt(", RT));
         self.expr(l, P_LOWEST);
         self.force_safe = saved;
         self.e.w(") {");
         self.e.indent();
-        self.e.w(&format!("\nSome({v}) => {v},\nNone => "));
+        self.e.w(&format!("\nSome({v}) => {}{v},\nNone => ", if copied { "*" } else { "" }));
         self.expr(r, P_LOWEST);
         self.e.w(",");
         self.e.dedent();
@@ -7511,7 +7641,7 @@ fn option_inner(t: &Type) -> Option<Type> {
 
 /// The expressions whose value a block or branch gives (the last expression of each branch of
 /// an `if` or `when`); branches that leave (`return`, `throw`) give none.
-fn value_tails<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+pub(crate) fn value_tails<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
     match &e.kind {
         ExprKind::Paren(x) => value_tails(x, out),
         ExprKind::Block(b) => match b.stmts.last() {

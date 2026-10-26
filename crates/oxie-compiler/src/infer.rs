@@ -106,6 +106,32 @@ impl<'a> Lowerer<'a> {
     }
 
     /// `through_try`: the expression is the operand of `?`, so a throwing call yields its value type.
+    /// The type of an `if` or `when` whose branches give tuples, some with `null` in a part.
+    pub(crate) fn tuple_with_null_parts(&self, e: &Expr) -> Option<Type> {
+        let mut tails = Vec::new();
+        crate::lower_expr::value_tails(e, &mut tails);
+        let tuples: Vec<&Vec<Expr>> = tails.iter().map(|t| if let ExprKind::Tuple(xs) = &t.kind { Some(xs) } else { None }).collect::<Option<_>>()?;
+        let n = tuples.first()?.len();
+        if tuples.len() < 2 || n < 2 || tuples.iter().any(|t| t.len() != n) {
+            return None;
+        }
+        let mut nulls = false;
+        let mut parts = Vec::new();
+        for i in 0..n {
+            let null = tuples.iter().any(|t| matches!(t[i].kind, ExprKind::Null));
+            nulls |= null;
+            let ty = tuples.iter().filter(|t| !matches!(t[i].kind, ExprKind::Null)).find_map(|t| self.infer_type(&t[i]));
+            parts.push(if null { optional(ty) } else { ty.unwrap_or(Type::Infer) });
+        }
+        nulls.then_some(Type::Tuple(parts))
+    }
+
+    /// `Option<&T>` (`Option<&mut T>` when `mutable`) for an element of the list `recv`.
+    fn list_elem_ref(&self, recv: &Expr, mutable: bool) -> Option<Type> {
+        let t = self.infer_type(recv).as_ref().and_then(list_elem).filter(|t| *t != Type::Infer)?;
+        Some(Type::Option(Box::new(Type::Ref { lifetime: None, mutable, inner: Box::new(t) })))
+    }
+
     fn infer(&self, e: &Expr, through_try: bool) -> Option<Type> {
         use ExprKind::*;
         // `r?.m()` on a `Result` is Rust's `?` then the call
@@ -332,6 +358,8 @@ impl<'a> Lowerer<'a> {
                     "len" | "count" | "capacity" => Some(ty("usize")),
                     "group_by" | "associate_by" => Some(generic("HashMap", 2)),
                     "to_list" => Some(generic("Vec", 1)),
+                    // `opt.replace(v)` and `opt.take()` give the old value, a `T?`
+                    "replace" | "take" if args.len() <= 1 && self.infer_type(recv).is_some_and(|t| matches!(t, Type::Option(_)) || t.single_name() == Some("Option")) => self.infer_type(recv),
                     "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "join" | "concat" | "replace" | "trim_string" => Some(ty("String")),
                     // a part of text
                     "trim" | "trim_start" | "trim_end" | "as_str" if args.is_empty() => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(ty("str")) }),
@@ -385,7 +413,7 @@ impl<'a> Lowerer<'a> {
                     // what an iterator gives, if anything
                     "next" | "next_back" | "max" | "min" | "last" | "nth" if args.is_empty() || name == "nth" => match self.infer_type(recv) {
                         Some(t) if list_elem(&t).is_some() && name == "last" => list_elem(&t).filter(|t| *t != Type::Infer).map(|t| Type::Option(Box::new(Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) }))),
-                        _ if is_iterator_chain(recv) => Some(Type::Option(Box::new(Type::Infer))),
+                        _ if is_iterator_chain(recv) => Some(Type::Option(Box::new(text_item(recv).unwrap_or(Type::Infer)))),
                         _ => None,
                     },
                     // an element of a list, if there is one
@@ -395,6 +423,8 @@ impl<'a> Lowerer<'a> {
                         .and_then(list_elem)
                         .filter(|t| *t != Type::Infer)
                         .map(|t| Type::Option(Box::new(Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) }))),
+                    "first_mut" | "last_mut" if args.is_empty() => self.list_elem_ref(recv, true),
+                    "get_mut" if args.len() == 1 && !self.infer_type(recv).is_some_and(|t| map_value(&t).is_some()) => self.list_elem_ref(recv, true),
                     "clone" | "abs" | "sqrt" | "sin" | "cos" | "tan" | "powi" | "powf" | "floor" | "ceil" | "round" | "min" | "max" | "exp" | "ln"
                     | "log10" | "signum" | "pow" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "saturating_sub" | "saturating_add" | "clamp" => {
                         self.infer_type(recv).filter(|t| !matches!(t, Type::Ref { .. }))
@@ -427,6 +457,9 @@ impl<'a> Lowerer<'a> {
                 let c = self.class_info(&tn)?;
                 c.fields.iter().find(|f| f.name == *name).map(|f| f.ty.clone())
             }
+            // branches giving tuples with `null` in a part (`(k, null)`, `(k, v)`): that part
+            // is optional
+            If { else_: Some(_), .. } | When { .. } if self.tuple_with_null_parts(e).is_some() => self.tuple_with_null_parts(e),
             // a `null` branch makes the value optional (`if (c) 30 else null`)
             If { then, else_: Some(other), .. } if is_null_tail(other) => Some(optional(self.infer_block(then))),
             If { then, else_, .. } if block_null_tail(then) => Some(optional(else_.as_ref().and_then(|e| self.infer_type(e)))),
@@ -507,6 +540,14 @@ impl<'a> Lowerer<'a> {
     /// optional; `T?` when the link's own type isn't known.
     fn safe_link_type(&self, e: &Expr, through_try: bool) -> Type {
         let (ExprKind::MethodCall { recv, .. } | ExprKind::Field { recv, .. }) = &e.kind else { return Type::Option(Box::new(Type::Infer)) };
+        // `s?.chars()?.next()`: what an iterator over the text gives
+        if let (ExprKind::MethodCall { name, .. }, Some(item)) = (&e.kind, text_item(recv)) {
+            match name.as_str() {
+                "next" | "next_back" | "last" | "nth" | "max" | "min" => return Type::Option(Box::new(item)),
+                "count" => return Type::Option(Box::new(ty("usize"))),
+                _ => {}
+            }
+        }
         let inner = match self.infer_type(recv) {
             Some(Type::Option(t)) => Some(*t),
             Some(Type::Ref { inner, .. }) => match *inner {
@@ -665,6 +706,19 @@ fn map_value(t: &Type) -> Option<Type> {
 
 /// Is `e` an iterator made by a method that starts one (`xs.iter()`, `s.chars()`), maybe
 /// followed by adapters (`.map { }`, `.filter { }`)?
+/// What an iterator over text gives, for `chars()`, `bytes()` and the like right before the call
+/// (`s.chars().next()` is a `char?`).
+fn text_item(e: &Expr) -> Option<Type> {
+    let ExprKind::MethodCall { name, args, .. } = &e.kind else { return None };
+    match name.as_str() {
+        "chars" if args.is_empty() => Some(ty("char")),
+        "bytes" if args.is_empty() => Some(ty("u8")),
+        "char_indices" if args.is_empty() => Some(Type::Tuple(vec![ty("usize"), ty("char")])),
+        "lines" | "split_whitespace" if args.is_empty() => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(ty("str")) }),
+        _ => None,
+    }
+}
+
 fn is_iterator_chain(e: &Expr) -> bool {
     const STARTS: &[&str] = &["iter", "iter_mut", "into_iter", "chars", "char_indices", "bytes", "lines", "split", "split_whitespace", "keys", "values", "drain"];
     const ADAPTERS: &[&str] = &["map", "filter", "filter_map", "rev", "skip", "take", "step_by", "enumerate", "zip", "cloned", "copied", "flat_map", "take_while", "skip_while", "peekable", "chain"];

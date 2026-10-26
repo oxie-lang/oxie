@@ -246,6 +246,11 @@ pub(crate) struct FnCtx {
     pub(crate) unboxed_ret: bool,
 }
 
+/// Does the type write its own `toString` (its `Display`)?
+fn own_display(t: &TypeDecl) -> bool {
+    t.members.iter().any(|m| matches!(&m.kind, ItemKind::Fun(f) if (f.name == "to_string" || f.name == "toString") && f.mods.is_override))
+}
+
 /// The label of the block that computes the text of a `toString` with a block body.
 pub(crate) const TEXT_LABEL: &str = "__oxie_text";
 
@@ -362,6 +367,8 @@ pub struct Lowerer<'a> {
     /// The variables of an `if (x == null) return` statement that the rest of its block doesn't
     /// use, so the check stays a check (`narrowing_exit`).
     pub(crate) unused_after_check: Vec<String>,
+    /// Names the rest of the block changes after `if (x == null) return`.
+    pub(crate) changed_after_check: Vec<String>,
     /// The type of the value the pattern being lowered matches, when known: its bare variant
     /// names are that enum's first.
     pub(crate) pat_ty: Option<Type>,
@@ -655,6 +662,7 @@ impl<'a> Lowerer<'a> {
             reused_iters: HashMap::new(),
             narrowed_types: Vec::new(),
             unused_after_check: Vec::new(),
+            changed_after_check: Vec::new(),
             pat_ty: None,
             trait_impl: false,
             needs_this: HashSet::new(),
@@ -3374,6 +3382,13 @@ impl<'a> Lowerer<'a> {
     }
 
     fn error_class_impls(&mut self, t: &TypeDecl, g: &str, self_ty: &str, wc: &str) {
+        // a class that writes its own `toString` has its `Display` from it
+        if own_display(t) {
+            self.e.nl();
+            self.e.w(&format!("impl{} {} for {}{} {{}}", g, self.std_name("std::error::Error"), self_ty, wc));
+            self.e.nl();
+            return;
+        }
         self.e.nl();
         self.e.w(&format!("impl{} {} for {}{} {{", g, self.std_name("std::fmt::Display"), self_ty, wc));
         self.e.indent();
@@ -3552,96 +3567,98 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        // Display
-        self.e.nl();
-        self.e.w(&format!("impl{} {} for {}{} {{", g, self.std_name("std::fmt::Display"), self_ty, wc));
-        self.e.indent();
-        self.e.nl();
-        self.e.w(&format!("fn fmt(&self, f: &mut {}<'_>) -> {} {{", self.std_name("std::fmt::Formatter"), self.std_name("std::fmt::Result")));
-        self.e.indent();
-        self.e.nl();
-        self.e.w("match self {");
-        self.e.indent();
-        for v in &t.variants {
+        // Display, unless the enum writes its own `toString`
+        if !own_display(t) {
             self.e.nl();
-            self.e.mark(v.span);
-            let mut used = Vec::new();
-            if let Some(m) = &v.message {
-                visit::idents_in(m, &mut used);
-            }
-            self.push_scope();
-            let pat = match &v.fields {
-                VariantFields::Unit => format!("Self::{}", v.name),
-                VariantFields::Tuple(ts) => {
-                    let parts: Vec<String> = (0..ts.len())
-                        .map(|i| {
-                            let n = format!("__{}", i);
-                            if used.contains(&n) || v.message.is_none() {
-                                self.bind_name(&n, None);
-                                n
-                            } else {
-                                "_".into()
-                            }
-                        })
-                        .collect();
-                    format!("Self::{}({})", v.name, parts.join(", "))
+            self.e.w(&format!("impl{} {} for {}{} {{", g, self.std_name("std::fmt::Display"), self_ty, wc));
+            self.e.indent();
+            self.e.nl();
+            self.e.w(&format!("fn fmt(&self, f: &mut {}<'_>) -> {} {{", self.std_name("std::fmt::Formatter"), self.std_name("std::fmt::Result")));
+            self.e.indent();
+            self.e.nl();
+            self.e.w("match self {");
+            self.e.indent();
+            for v in &t.variants {
+                self.e.nl();
+                self.e.mark(v.span);
+                let mut used = Vec::new();
+                if let Some(m) = &v.message {
+                    visit::idents_in(m, &mut used);
                 }
-                VariantFields::Named(fs) => {
-                    let mut parts: Vec<String> = Vec::new();
-                    for f in fs {
-                        if used.contains(&f.name) || v.message.is_none() {
-                            // a field named `f` is bound as `__f`, so it doesn't hide the formatter
-                            let name = if f.name == "f" { "__f" } else { &f.name };
-                            self.bind_name(name, None);
-                            parts.push(if name == f.name { esc(name) } else { format!("{}: {}", f.name, name) });
-                        }
-                    }
-                    if parts.len() < fs.len() {
-                        parts.push("..".into());
-                    }
-                    format!("Self::{} {{ {} }}", v.name, parts.join(", "))
-                }
-            };
-            self.e.w(&format!("{} => ", pat));
-            match &v.message {
-                Some(m) => {
-                    let mut m2 = rewrite_positional(m);
-                    if matches!(&v.fields, VariantFields::Named(fs) if fs.iter().any(|f| f.name == "f")) {
-                        rename_ident(&mut m2, "f", "__f");
-                    }
-                    self.fns.push(FnCtx { throws: false, ret: None, is_lambda: false, tries: Vec::new(), text_break: None, unboxed_ret: false });
-                    self.write_message(&m2);
-                    self.fns.pop();
-                }
-                None => match &v.fields {
-                    VariantFields::Tuple(ts) if ts.len() == 1 => self.e.w(&format!("{}::fmt(__0, f)", self.std_name("std::fmt::Display"))),
-                    // the values of the fields follow the case's name: "too many (count: 5, max: 3)"
+                self.push_scope();
+                let pat = match &v.fields {
+                    VariantFields::Unit => format!("Self::{}", v.name),
                     VariantFields::Tuple(ts) => {
-                        let specs: Vec<&str> = ts.iter().map(field_spec).collect();
-                        let args: Vec<String> = (0..ts.len()).map(|i| format!("__{}", i)).collect();
-                        self.e.w(&format!("write!(f, \"{} ({})\", {})", humanize(&v.name), specs.join(", "), args.join(", ")));
+                        let parts: Vec<String> = (0..ts.len())
+                            .map(|i| {
+                                let n = format!("__{}", i);
+                                if used.contains(&n) || v.message.is_none() {
+                                    self.bind_name(&n, None);
+                                    n
+                                } else {
+                                    "_".into()
+                                }
+                            })
+                            .collect();
+                        format!("Self::{}({})", v.name, parts.join(", "))
                     }
-                    VariantFields::Named(fs) if !fs.is_empty() => {
-                        let specs: Vec<String> = fs.iter().map(|x| format!("{}: {}", x.name, field_spec(&x.ty))).collect();
-                        let args: Vec<String> = fs.iter().map(|x| if x.name == "f" { "__f".to_string() } else { esc(&x.name) }).collect();
-                        self.e.w(&format!("write!(f, \"{} ({})\", {})", humanize(&v.name), specs.join(", "), args.join(", ")));
+                    VariantFields::Named(fs) => {
+                        let mut parts: Vec<String> = Vec::new();
+                        for f in fs {
+                            if used.contains(&f.name) || v.message.is_none() {
+                                // a field named `f` is bound as `__f`, so it doesn't hide the formatter
+                                let name = if f.name == "f" { "__f" } else { &f.name };
+                                self.bind_name(name, None);
+                                parts.push(if name == f.name { esc(name) } else { format!("{}: {}", f.name, name) });
+                            }
+                        }
+                        if parts.len() < fs.len() {
+                            parts.push("..".into());
+                        }
+                        format!("Self::{} {{ {} }}", v.name, parts.join(", "))
                     }
-                    _ => self.e.w(&format!("f.write_str(\"{}\")", humanize(&v.name))),
-                },
+                };
+                self.e.w(&format!("{} => ", pat));
+                match &v.message {
+                    Some(m) => {
+                        let mut m2 = rewrite_positional(m);
+                        if matches!(&v.fields, VariantFields::Named(fs) if fs.iter().any(|f| f.name == "f")) {
+                            rename_ident(&mut m2, "f", "__f");
+                        }
+                        self.fns.push(FnCtx { throws: false, ret: None, is_lambda: false, tries: Vec::new(), text_break: None, unboxed_ret: false });
+                        self.write_message(&m2);
+                        self.fns.pop();
+                    }
+                    None => match &v.fields {
+                        VariantFields::Tuple(ts) if ts.len() == 1 => self.e.w(&format!("{}::fmt(__0, f)", self.std_name("std::fmt::Display"))),
+                        // the values of the fields follow the case's name: "too many (count: 5, max: 3)"
+                        VariantFields::Tuple(ts) => {
+                            let specs: Vec<&str> = ts.iter().map(field_spec).collect();
+                            let args: Vec<String> = (0..ts.len()).map(|i| format!("__{}", i)).collect();
+                            self.e.w(&format!("write!(f, \"{} ({})\", {})", humanize(&v.name), specs.join(", "), args.join(", ")));
+                        }
+                        VariantFields::Named(fs) if !fs.is_empty() => {
+                            let specs: Vec<String> = fs.iter().map(|x| format!("{}: {}", x.name, field_spec(&x.ty))).collect();
+                            let args: Vec<String> = fs.iter().map(|x| if x.name == "f" { "__f".to_string() } else { esc(&x.name) }).collect();
+                            self.e.w(&format!("write!(f, \"{} ({})\", {})", humanize(&v.name), specs.join(", "), args.join(", ")));
+                        }
+                        _ => self.e.w(&format!("f.write_str(\"{}\")", humanize(&v.name))),
+                    },
+                }
+                self.e.w(",");
+                self.pop_scope();
             }
-            self.e.w(",");
-            self.pop_scope();
+            self.e.dedent();
+            self.e.nl();
+            self.e.w("}");
+            self.e.dedent();
+            self.e.nl();
+            self.e.w("}");
+            self.e.dedent();
+            self.e.nl();
+            self.e.w("}");
+            self.e.nl();
         }
-        self.e.dedent();
-        self.e.nl();
-        self.e.w("}");
-        self.e.dedent();
-        self.e.nl();
-        self.e.w("}");
-        self.e.dedent();
-        self.e.nl();
-        self.e.w("}");
-        self.e.nl();
         // Error + source
         let sources: Vec<(String, String)> = t
             .variants

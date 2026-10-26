@@ -80,6 +80,19 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
         }
         "E0599" | "E0624" if is_optional_receiver(d) => optional_receiver(d, &lines, &first),
         "E0599" => no_method(d, sources, &lines, &first),
+        // `Box(x)`: std's wrappers are made with `new`
+        "E0423" if d.message.contains("tuple struct which contains private fields") || d.notes.iter().any(|n| n.contains("a struct named") && n.contains("exists in another namespace")) => {
+            let line = lines.get(d.line as usize).copied().unwrap_or("");
+            let name: String = line.chars().skip(d.col as usize).take_while(|c| is_ident_char(*c)).collect();
+            if !name.is_empty() && line.chars().nth(d.col as usize + name.chars().count()) == Some('(') {
+                rewrite(d, format!("`{}(...)` doesn't make a `{}`: it is a type, not a function", name, name));
+                d.notes.retain(|n| !n.contains("another namespace") && !n.contains("not visible here") && !n.contains("associated function") && !n.contains("`Default` trait") && !n.contains("`new` associated function"));
+                d.suggestions.clear();
+                d.notes.push(help(&format!("Rust types outside your crate are made with their own functions, usually `new`: `{}.new(...)`. Only a call without arguments (`HashMap()`) becomes `new()` by itself.", name)));
+                let end = d.col + name.chars().count() as u32;
+                d.fixes.push(Fix { title: format!("use `{}.new(...)`", name), edits: vec![edit(d.line, end, end, ".new")] });
+            }
+        }
         "E0433" | "E0412" | "E0425" | "E0422" | "E0423" | "E0531" | "E0532" => {
             if d.message.contains("undeclared") || d.message.starts_with("cannot find") {
                 rewrite(d, format!("`{}` isn't defined or imported here", last_segment(&first)));
@@ -1313,6 +1326,10 @@ fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str
 /// A method of `T` called on a `T?` (rustc: "no method named `trim` found for enum `Option<T>`",
 /// or "method `len` is private", which `Option` has too).
 fn is_optional_receiver(d: &MappedDiag) -> bool {
+    // `Option<T>` has `clone()` when `T` has: a missing bound, not a missing unwrap
+    if d.message.contains("trait bounds were not satisfied") {
+        return false;
+    }
     d.message.contains("`Option<") || d.notes.iter().any(|n| n.contains("Option::expect") || n.contains("propagating an `Option::None`"))
 }
 
@@ -1712,10 +1729,31 @@ fn trait_missing(d: &mut MappedDiag, sources: &Sources, lines: &[&str], names: &
         let line = lines.get(d.line as usize).copied().unwrap_or("");
         let before: String = line.chars().take(d.col as usize).collect();
         let in_template = placeholder_len(line, d.col).is_some() || before.ends_with("${");
-        rewrite(d, if in_template { format!("`{}` has no text form for `$` templates", ty) } else { format!("`{}` has no text form to print", ty) });
+        // `throws` functions' errors are `AnyError`s
+        let shown = ty.replace("Box<dyn std::error::Error + Send + Sync>", "AnyError");
+        rewrite(d, if in_template { format!("`{}` has no text form for `$` templates", shown) } else { format!("`{}` has no text form to print", shown) });
+        d.label = d.label.as_ref().map(|l| l.replace("Box<dyn std::error::Error + Send + Sync>", "AnyError"));
+        // a throwing call printed: its `Result`, unless `?` passes the error on
+        if base == "Result" {
+            let chars: Vec<char> = line.chars().collect();
+            let (s, e) = (d.col as usize, d.end_col as usize);
+            if d.end_line == d.line && s < e && e <= chars.len() {
+                let expr: String = chars[s..e].iter().collect();
+                let expr = expr.trim_start_matches("${").trim_start_matches('$').trim_end_matches('}').to_string();
+                d.notes.push(help(&format!("`{}` can fail, so its value is a `Result`: `{}?` passes the error on (in a function that `throws` or inside `try`), and `${{{}:?}}` prints `Ok(..)` or `Err(..)`.", expr, expr, expr)));
+                let fun = enclosing_fun(lines, d.line);
+                let in_try = fun.is_some_and(|(l, _)| (l..=d.line).any(|i| lines.get(i as usize).is_some_and(|t| t.contains("try {") || t.trim_end().ends_with("try"))));
+                if fun.is_some_and(|(_, t)| t.contains("throws")) || in_try {
+                    let end = if line.chars().nth(e.saturating_sub(1)) == Some('}') { e - 1 } else { e } as u32;
+                    d.fixes.push(Fix { title: "pass the error on (`?`)".into(), edits: vec![edit(d.line, end, end, "?")] });
+                }
+            }
+        }
         let printable_debug = is_std_collection || matches!(user_kind, Some("data class") | Some("enum"));
         if printable_debug {
-            d.notes.push(help(&format!("print its debug form with a `:?` spec: `${{value:?}}`.{}", if user_kind.is_some() { format!(" To choose the text yourself, add `override fun toString() = \"...\"` to `{}`.", base) } else { String::new() })));
+            if base != "Result" {
+                d.notes.push(help(&format!("print its debug form with a `:?` spec: `${{value:?}}`.{}", if user_kind.is_some() { format!(" To choose the text yourself, add `override fun toString() = \"...\"` to `{}`.", base) } else { String::new() })));
+            }
             if let Some(f) = debug_spec_fix(d, lines) {
                 d.fixes.push(f);
             }

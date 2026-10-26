@@ -1,0 +1,149 @@
+// Optional values through lookups, null checks, parameters, `?.` chains and branches.
+
+import std.collections.HashMap
+
+data class Point(var x: i32, var y: i32)
+data class Named(var name: String)
+
+fun fallback(k: &str): i32 = k.len() as i32 * 100
+
+// a null check that leaves, then changes to the value: in place for a `Copy` value
+fun shift(start: Point?): Point? {
+    var p = start
+    if (p == null) return null
+    p.x += 10
+    return p
+}
+
+fun rename(start: Named?): Named? {
+    val n = start
+    if (n == null) return null
+    n.name = n.name + "!"
+    return n
+}
+
+// `replace` and `take` of a `T?` field give the old value; `clone()` and `$v` add bounds
+class Slot<T>(var value: T? = null) {
+    fun put(v: T): T? = value.replace(v)
+    fun take(): T? = value.take()
+    fun get_or(d: T): T = value.clone() ?: d
+    fun describe(): String = if (val v = &value) "set to $v" else "empty"
+}
+
+enum V { Int(n: i64), Str(s: String) }
+
+fun twice(n: i32): i32 = n * 2
+
+data class Item(id: u32, name: String, parent: u32?)
+
+fun find(items: &[Item], id: u32): Item? = items.iter().find { it.id == id }.cloned()
+
+fun show(name: &String?): String = name?.to_uppercase() ?: "none"
+
+fun double(x: &mut i32?) {
+    if (val v = x) *v *= 2
+}
+
+fun parse_flag(arg: &str): (String, String?)? {
+    if (!arg.starts_with("--")) return null
+    val body = &arg[2..]
+    val (k, v) = when (val p = body.split_once('=')) {
+        null -> (body.to_string(), null)
+        else -> (p!!.0.to_string(), p!!.1.to_string())
+    }
+    (k, v)
+}
+
+error class Timeout(ms: u64) {
+    override fun toString() = "timed out after ${ms}ms"
+}
+
+error enum Net {
+    Down
+    Slow(ms: u64)
+    override fun toString(): String = when (this) {
+        Down -> "network down"
+        Slow(ms) -> "slow: $ms"
+    }
+}
+
+fun fetch(n: i32): i32 throws Net {
+    if (n == 0) throw Net.Down
+    if (n == 1) throw Net.Slow(300)
+    n
+}
+
+fun first_char(word: String?) = word?.chars()?.next()
+
+fun nick_len(u: &Named?) = u?.name?.len()
+
+fun main() {
+    // `?:` after a lookup of a number gives the number
+    var m: [String: i32] = [:]
+    m["a"] = 1
+    val a = m.get("a") ?: fallback("a")
+    val b = m.get("bb") ?: fallback("bb")
+    println("$a $b ${m.get("c") ?: (1 + 2)}")
+    // `?:` between two results
+    println("x".parse<i32>() ?: "7".parse<i32>() ?: 0)
+
+    // a `Copy` value changed after a null check is changed, not a copy of it
+    var p: Point? = Point(1, 2)
+    if (p != null) p.x = 100
+    var q: Point? = Point(3, 4)
+    if (q == null) println("none") else q.y = 40
+    var r: Point? = Point(0, 0)
+    for (i in 0..3) {
+        if (r == null) break
+        r.x += i
+    }
+    println("${p:?} ${q:?} ${r:?}")
+    println("${shift(Point(1, 2)):?} ${shift(null):?} ${rename(Named("ada".to_string())):?}")
+
+    var s = Slot<i32>()
+    println("${s.describe()} ${s.get_or(7)} ${s.put(3)} ${s.put(4)} ${s.describe()} ${s.take()} ${s.take()}")
+    var names = Slot<String>()
+    names.put("ada".to_string())
+    println(names.describe())
+
+    // a case pattern on an optional element
+    var xs: [V] = [V.Int(5), V.Str("s".to_string())]
+    if (val V.Int(n) = xs.first_mut()) *n *= 2
+    if (val V.Int(n) = xs.first()) println(n)
+    // an array's own `map` passes the elements
+    println("${[1, -2, 3].map { twice(it) }:?}")
+
+    // `?.` on a call's result takes the field
+    val items = [Item(1, "root", null), Item(2, "usr", 1)]
+    println("${find(&items, 2)?.parent} ${find(&items, 1)?.parent} ${find(&items, 5)?.parent}")
+
+    // a `T?` lent to a `&T?` parameter
+    val name: String? = "ada"
+    val none: String? = null
+    println("${show(name)} ${show(&none)} ${show(name.as_ref())} $name")
+    var n: i32? = 21
+    double(n)
+    println(n)
+
+    for (arg in ["--name=ada", "--verbose", "plain"]) {
+        when (val f = parse_flag(arg)) {
+            null -> println("$arg: not a flag")
+            else -> {
+                val (k, v) = f!!
+                println("$arg: $k=${v ?: "<none>"}")
+            }
+        }
+    }
+
+    println(Timeout(5000))
+    for (i in 0..3) {
+        try {
+            println(fetch(i)?)
+        } catch (e: Net) {
+            println("failed: $e")
+        }
+    }
+
+    println("${first_char("hey".to_string())} ${first_char(null)}")
+    println("${nick_len(&Named("bob".to_string()))} ${nick_len(null)}")
+}
