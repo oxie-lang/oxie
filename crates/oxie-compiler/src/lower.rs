@@ -145,6 +145,19 @@ fn operator_trait(name: &str) -> Option<(&'static str, &'static str, bool, bool)
     })
 }
 
+/// A path into std (`std::fmt::Display`) as `core` or `alloc` has it, if one does.
+fn without_std(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("std::")?;
+    let module = rest.split("::").next()?;
+    let krate = match module {
+        "fmt" | "result" | "option" | "default" | "convert" | "cmp" | "hash" | "clone" | "marker" | "ops" | "iter" | "cell" | "any" | "mem" | "ptr" | "error" | "str" | "char" | "num" => "core",
+        "rc" | "boxed" | "string" | "vec" | "borrow" => "alloc",
+        "sync" if rest == "sync::Arc" => "alloc",
+        _ => return None,
+    };
+    Some(format!("{}::{}", krate, rest))
+}
+
 pub(crate) fn kotlin_alias(name: &str) -> Option<&'static str> {
     Some(match name {
         "Int" => "i32",
@@ -274,10 +287,21 @@ pub struct Lowerer<'a> {
     pub(crate) in_signature: std::cell::Cell<bool>,
     /// Directory of the source file (for `mod name` declarations of hand-written Rust files).
     pub src_dir: Option<std::path::PathBuf>,
+    /// The generated file of each .oxi module of the crate: a `mod name` line declares its module
+    /// where it stands, so the macros of a module before it reach it, as in Rust.
+    pub module_files: HashMap<Vec<String>, String>,
     /// Scripts put crate attributes in their generated main.rs; projects can't (it's the user's file).
     pub crate_attrs_allowed: bool,
     /// Lint attributes from `#![...]` in the crate root, applied to every item and module.
     pub root_lints: Vec<String>,
+    /// The crate or this module asks for docs on public items (`#![deny(missing_docs)]`), which
+    /// the items Oxie generates (a class's `new`) don't have.
+    pub docs_linted: bool,
+    /// The crate may be built without std (`#![no_std]`): generated paths name `core` and `alloc`.
+    pub no_std: bool,
+    /// The type parameters of the functions being lowered, innermost last: a value of type `S`
+    /// with `S: Sink` has `Sink`'s methods.
+    pub(crate) fn_generics: Vec<Generics>,
     /// Lambda parameters without a known type: (scope depth, name). Rust passes collection
     /// elements by reference, so comparisons of these with literals read the value first.
     pub(crate) lambda_params: Vec<(usize, String)>,
@@ -472,8 +496,12 @@ impl<'a> Lowerer<'a> {
             members_pub: false,
             in_signature: std::cell::Cell::new(false),
             src_dir: None,
+            module_files: HashMap::new(),
             crate_attrs_allowed: false,
             root_lints: Vec::new(),
+            docs_linted: false,
+            no_std: false,
+            fn_generics: Vec::new(),
             lambda_params: Vec::new(),
             untyped_params: Vec::new(),
             typed_by_body: false,
@@ -514,6 +542,9 @@ impl<'a> Lowerer<'a> {
     /// they are, `fmt` and `process` items through their module (`fmt::Display`), and others
     /// imported by a `use` at the top of the file. Elsewhere, by the full path.
     pub(crate) fn std_name(&self, path: &str) -> String {
+        // without std, what `core` and `alloc` have (`core::fmt::Display`, `alloc::rc::Rc`)
+        let mapped = self.no_std.then(|| without_std(path)).flatten();
+        let path = mapped.as_deref().unwrap_or(path);
         let full = format!("::{}", path);
         let Some(words) = &self.source_words else { return full };
         let segs: Vec<&str> = path.split("::").collect();
@@ -646,6 +677,7 @@ impl<'a> Lowerer<'a> {
             let a = a.trim_start();
             ["allow", "warn", "deny", "forbid", "expect"].iter().any(|l| a.strip_prefix(l).is_some_and(|r| r.trim_start().starts_with('(')))
         };
+        self.docs_linted |= file.inner_attrs.iter().any(|a| is_lint(a) && a.contains("missing_docs"));
         for a in &file.inner_attrs {
             if !self.is_root {
                 self.e.w(&format!("#![{}]", a));
@@ -1563,7 +1595,9 @@ impl<'a> Lowerer<'a> {
             return self.join_path(&segs[1..]);
         }
         let mut s = String::new();
-        if segs.len() > 1 && self.k.root_module(&segs[0], &self.module) && !self.is_local(&segs[0]) {
+        // `fmt::format(args)` after `import alloc::fmt` is that `fmt`, not the crate's module
+        let imported = self.k.imports.contains_key(&(self.module.clone(), segs[0].clone())) || self.local_imports.iter().any(|(n, _)| *n == segs[0]);
+        if segs.len() > 1 && self.k.root_module(&segs[0], &self.module) && !self.is_local(&segs[0]) && !imported {
             if self.k.has_lib && self.is_root && self.module.is_empty() && self.is_main_file() {
                 s.push_str(&self.k.crate_name.replace('-', "_"));
                 s.push_str("::");
@@ -1736,7 +1770,23 @@ impl<'a> Lowerer<'a> {
                     path.push(name.to_string());
                     path
                 });
-                if declared.is_some_and(|path| self.k.module_paths.contains(&path)) {
+                if let Some(path) = declared.filter(|path| self.k.module_paths.contains(path)) {
+                    if let (Some(file), Some(name)) = (self.module_files.get(&path).cloned(), path.last()) {
+                        self.docs(&it.docs);
+                        // `@cfg(unix) mod unix`, `@macro_use mod macros`; Oxie gives the `#[path]`
+                        for a in crate::parser::attr_texts(&it.attrs).into_iter().filter(|a| !a.starts_with("path")) {
+                            self.e.w(&format!("#[{}]", a));
+                            self.e.nl();
+                        }
+                        for lint in self.root_lints.clone() {
+                            self.e.w(&format!("#[{}]", lint));
+                            self.e.nl();
+                        }
+                        self.e.w(&format!("#[path = \"{}\"]", file));
+                        self.e.nl();
+                        self.e.w(&format!("pub mod {};", esc(name)));
+                        self.e.nl();
+                    }
                     return;
                 }
                 let text = match (s.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')), &self.src_dir) {
@@ -2041,6 +2091,7 @@ impl<'a> Lowerer<'a> {
         let ret = f.ret.clone().filter(|t| !t.is_unit());
         let unboxed_ret = !throws && self.iface_ret(f).is_some_and(|boxed| !boxed);
         self.fns.push(FnCtx { throws, ret: ret.clone(), is_lambda: false, tries: Vec::new(), text_break: None, unboxed_ret });
+        self.fn_generics.push(f.generics.clone());
         let by_value = std::mem::replace(&mut self.self_by_value, matches!(f.self_param, Some(SelfParam::Value { .. })));
         let lent_here = f.params.iter().enumerate().filter(|(i, _)| self.param_notes.get(&(f.name_span, *i)).is_some_and(|n| n.borrowed)).filter_map(|(_, p)| p.name().map(str::to_string)).collect();
         let lent = std::mem::replace(&mut self.lent, lent_here);
@@ -2061,6 +2112,7 @@ impl<'a> Lowerer<'a> {
         }
         self.self_by_value = by_value;
         self.lent = lent;
+        self.fn_generics.pop();
         self.fns.pop();
     }
 
@@ -2651,8 +2703,11 @@ impl<'a> Lowerer<'a> {
             .collect();
         let vis = if self.members_pub { "pub " } else { "pub(crate) " };
         // generated, so an unused constructor is not the user's problem (a shared class's handle
-        // calls its data's)
-        let allow = if t.shared { String::new() } else { self.unused_allowed(&format!("{}::new", t.name)) };
+        // calls its data's), nor one without docs
+        let mut allow = if t.shared { String::new() } else { self.unused_allowed(&format!("{}::new", t.name)) };
+        if self.members_pub && self.docs_linted {
+            allow.push_str("#[allow(missing_docs)]\n");
+        }
         self.e.w(&format!("{}{}fn new({}) -> Self {{", allow, vis, params.join(", ")));
         self.e.indent();
         self.e.nl();

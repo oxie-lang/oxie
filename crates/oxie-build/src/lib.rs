@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use oxie_compiler::{compile::extern_crates_from_manifest, compile::write_output, diag, Options, Severity};
+use oxie_compiler::{compile::extern_crates_from_manifest, compile::inner_attrs_of, compile::write_output, diag, Options, Severity};
 
 /// Compiles every `.oxi` file under `src/`.
 pub fn compile() {
@@ -61,11 +61,14 @@ pub fn compile_script(path: &str) {
 
 fn run(inputs: Vec<oxie_compiler::Input>, manifest_dir: &Path, out_dir: &Path, script: bool) {
     let manifest = std::fs::read_to_string(manifest_dir.join("Cargo.toml")).unwrap_or_default();
+    // `#![no_std]` in the Rust root that includes the generated code
+    let root_attrs = ["src/lib.rs", "src/main.rs"].iter().filter_map(|f| std::fs::read_to_string(manifest_dir.join(f)).ok()).flat_map(|t| inner_attrs_of(&t)).collect();
     let opts = Options {
         crate_name: std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "main".into()),
         extern_crates: extern_crates_from_manifest(&manifest),
         out_dir: out_dir.to_path_buf(),
         script,
+        root_attrs,
     };
     let output = oxie_compiler::compile(inputs, &opts);
     let mut failed = false;

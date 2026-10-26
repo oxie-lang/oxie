@@ -74,7 +74,7 @@ impl Sources {
     pub fn decisions(&self) -> &[(PathBuf, Vec<Decision>)] {
         self.decisions.get_or_init(|| {
             let inputs = self.files.iter().map(|f| Input { rel_path: f.rel.clone(), abs_path: f.path.clone(), text: f.text.clone() }).collect();
-            let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: self.script };
+            let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: self.script, root_attrs: Vec::new() };
             let out = oxie_compiler::compile(inputs, &opts);
             self.files.iter().zip(out.files).map(|(f, g)| (f.path.clone(), g.decisions)).collect()
         })

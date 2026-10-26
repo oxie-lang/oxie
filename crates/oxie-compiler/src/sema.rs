@@ -187,6 +187,8 @@ pub struct Crate {
     pub extern_crates: HashSet<String>,
     /// (module path, trait name) for every extension-function trait.
     pub ext_traits: Vec<(Vec<String>, String)>,
+    /// The extension functions declared `throws` (`fun Config.check() throws`).
+    pub ext_throws: HashSet<String>,
     /// Type names modules declare in Rust, which Oxie can't see into: in `rust { }` blocks
     /// (`struct Newline;`) and item macros (`actions!(editor, [Newline])`).
     pub rust_types: HashSet<(Vec<String>, String)>,
@@ -1448,6 +1450,9 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
             }
             ItemKind::Fun(f) => {
                 k.ext_traits.push((module.to_vec(), ext_trait_name(module, &f.name)));
+                if !matches!(f.throws, Throws::No) {
+                    k.ext_throws.insert(f.name.clone());
+                }
             }
             ItemKind::Type(t) => match t.kind {
                 TypeKind::Class | TypeKind::Data | TypeKind::TupleStruct | TypeKind::Union => {

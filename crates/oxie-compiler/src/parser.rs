@@ -1445,6 +1445,15 @@ impl<'a> Parser<'a> {
                     self.bump();
                     args.push(GenericArg::Const(n));
                 }
+                // `process_one::<F, T, CAP, false>`, `Bits<'x'>`
+                Tok::Ident(b) if b == "true" || b == "false" => {
+                    self.bump();
+                    args.push(GenericArg::Const(b));
+                }
+                Tok::Char(c) => {
+                    self.bump();
+                    args.push(GenericArg::Const(c));
+                }
                 Tok::Punct("{") => {
                     let g = self.raw_group()?;
                     args.push(GenericArg::Const(g));
@@ -2881,11 +2890,12 @@ impl<'a> Parser<'a> {
     fn cond(&mut self) -> PResult<Cond> {
         if !self.chain_ahead() {
             if self.is_let_start() {
+                let rust_let = self.is_kw("let");
                 self.bump();
                 let pat = self.pattern()?;
                 self.expect_punct("=")?;
                 let expr = self.expr()?;
-                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. } | Pat::Tuple(_));
+                let implicit_some = !rust_let && binds_only(&pat);
                 return Ok(Cond::Let { pat, expr, implicit_some });
             }
             return Ok(Cond::Expr(self.expr()?));
@@ -2894,11 +2904,12 @@ impl<'a> Parser<'a> {
         let mut parts = Vec::new();
         loop {
             if self.is_let_start() {
+                let rust_let = self.is_kw("let");
                 self.bump();
                 let pat = self.pattern()?;
                 self.expect_punct("=")?;
                 let expr = self.cmp_expr()?;
-                let implicit_some = matches!(&pat, Pat::Ident { sub: None, .. } | Pat::Tuple(_));
+                let implicit_some = !rust_let && binds_only(&pat);
                 parts.push(Cond::Let { pat, expr, implicit_some });
             } else {
                 parts.push(Cond::Expr(self.cmp_expr()?));
@@ -4415,6 +4426,16 @@ fn dot_path(e: &Expr) -> Option<Vec<String>> {
             Some(v)
         }
         _ => None,
+    }
+}
+
+/// `if (val x = e)` and `if (val (a, b) = e)` unwrap an optional `e`: patterns that only bind
+/// names. `if (val (Kind.A, x) = pair)` matches `pair` itself.
+fn binds_only(p: &Pat) -> bool {
+    match p {
+        Pat::Ident { sub: None, .. } | Pat::Wild | Pat::Rest => true,
+        Pat::Tuple(ps) => ps.iter().all(binds_only),
+        _ => false,
     }
 }
 

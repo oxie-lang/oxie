@@ -353,7 +353,7 @@ fn compile(text: &str, stub: &str) -> (String, Option<oxie_compiler::SourceMap>,
         let path = std::path::PathBuf::from("__contexts.oxi");
         inputs.push(oxie_compiler::Input { rel_path: path.clone(), abs_path: path, text: stub.to_string() });
     }
-    let opts = oxie_compiler::Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: "/oxie".into(), script: true };
+    let opts = oxie_compiler::Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: "/oxie".into(), script: true, root_attrs: Vec::new() };
     let out = oxie_compiler::compile(inputs, &opts);
     let diags = out.diags.into_iter().find(|d| d.0 == main).map(|d| d.2).unwrap_or_default();
     match out.files.into_iter().find(|f| f.rel_path.file_stem() == main.file_stem()) {

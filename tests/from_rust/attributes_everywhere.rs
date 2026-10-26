@@ -1,4 +1,4 @@
-// Attributes on parameters, arguments, elements, closures and `match` bodies.
+// Attributes on parameters, arguments, elements, closures, `match` bodies and arms.
 fn scale(n: i32, #[cfg(debug_assertions)] factor: i32, offset: i32) -> i32 {
     #[cfg(debug_assertions)]
     return n * factor + offset;
@@ -12,6 +12,7 @@ fn kind(x: Option<i32>) -> &'static str {
     match x {
         #![allow(unused_variables)]
         Some(v) => "some",
+        #[allow(unreachable_patterns)]
         None => "none",
     }
 }

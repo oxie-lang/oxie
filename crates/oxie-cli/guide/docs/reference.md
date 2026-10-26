@@ -634,8 +634,10 @@ the declared type of a variable, field, parameter or return value:
 * `x!!` — unwrap. On a variable or field followed by a method call (`name!!.len()`) it unwraps
   a reference (`name.as_ref().unwrap()`), so `name` stays usable.
 * `if (val v = opt) { }` / `while (val v = opt)` — `if let Some(v)` / `while let Some(v)`;
-  with a pattern (`if (val Ok(v) = r)`) the pattern is used as written, except a tuple, which
-  unwraps an optional pair (`if (val (k, v) = split(s))`).
+  with a pattern (`if (val Ok(v) = r)`) the pattern is used as written, except a tuple of names,
+  which unwraps an optional pair (`if (val (k, v) = split(s))`); a tuple with a case or a literal
+  in it matches a tuple (`if (val (Some(a), Some(b)) = (x, y))`). Rust's `if let` keeps Rust's
+  meaning.
 * A null check unwraps a local variable or parameter whose type Oxie knows to be `T?`, when the
   branch doesn't assign it: in `if (x != null) { }` (also as a part of an `&&` chain) and in the
   `else` of `if (x == null)`, `x` is the value, `if let Some(x) = &x` (a reference; a `Copy`

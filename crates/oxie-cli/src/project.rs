@@ -43,7 +43,7 @@ impl Project {
     }
 
     pub fn options(&self, out_dir: PathBuf) -> Options {
-        Options { crate_name: self.name.clone(), extern_crates: extern_crates_from_manifest(&self.manifest), out_dir, script: false }
+        Options { crate_name: self.name.clone(), extern_crates: extern_crates_from_manifest(&self.manifest), out_dir, script: false, root_attrs: Vec::new() }
     }
 
     /// Compiles all sources in memory (to report Oxie errors before invoking cargo).
@@ -296,7 +296,7 @@ pub fn script_options(name: &str, deps: &[String]) -> Options {
     let manifest = format!("[dependencies]\n{}\n", deps.join("\n"));
     let mut ex: HashSet<String> = extern_crates_from_manifest(&manifest);
     ex.remove("");
-    Options { crate_name: name.to_string(), extern_crates: ex, out_dir: PathBuf::from("/tmp/oxie-check"), script: true }
+    Options { crate_name: name.to_string(), extern_crates: ex, out_dir: PathBuf::from("/tmp/oxie-check"), script: true, root_attrs: Vec::new() }
 }
 
 #[cfg(test)]

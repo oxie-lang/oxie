@@ -1,0 +1,66 @@
+import std.path.Path
+import std.ffi.OsString
+import std.borrow.Cow
+
+rust {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Px(pub f32);
+}
+
+enum Spec {
+    Attach(pid: u32)
+    Launch
+}
+
+// a tuple pattern with a case or a literal in it matches the tuple itself, not an optional
+fun port(spec: Spec, adapter: &str): u32? {
+    if (val (Spec.Attach { pid }, "pwa-node") = (&spec, adapter)) {
+        return Some(*pid)
+    }
+    null
+}
+
+fun names(a: &str?, b: &str?): String {
+    if (val (Some(x), Some(y)) = (a, b) && x != y) {
+        return "$x+$y"
+    }
+    "-"
+}
+
+// names only: the optional's value
+fun swap(pair: (i32, i32)?): (i32, i32)? {
+    if (val (a, b) = pair) {
+        return Some((b, a))
+    }
+    null
+}
+
+// `var (row, at)` changed by a destructuring assignment
+fun walk(first: (usize, usize)): usize {
+    var (row, at) = first
+    var steps = 0
+    while (row < 5 && at < 10) {
+        (row, at) = (row + 1, at + 2)
+        steps += 1
+    }
+    steps
+}
+
+class Cursor(goal: Px?, count: i32) {
+    fun measure(): Px = Px(count as f32)
+
+    // `g` is read by value beside an arm that gives a value
+    fun goal_or_measure(): Px = when (self.goal) {
+        Some(g) if count == 1 -> g
+        else -> self.measure()
+    }
+}
+
+fun main() {
+    println("${port(Spec.Attach(7), "pwa-node")} ${port(Spec.Launch, "x")} ${names(Some("a"), Some("b"))} ${names(Some("a"), null)}")
+    println("${swap(Some((1, 2)))} ${walk((1, 2))} ${Cursor(Some(Px(2.5)), 1).goal_or_measure():?} ${Cursor(null, 3).goal_or_measure():?}")
+    // text that isn't a `String` compares with literals too
+    val files: [OsString] = vec[OsString.from("a.rs")]
+    val texts: [Cow<str>] = vec[Cow.Borrowed("x"), Cow.Owned("y".to_string())]
+    println("${Path.new("/tmp/b.json").extension().is_some_and { it == "json" }} ${files.iter().any { it == "a.rs" }} ${texts.iter().filter { it == "y" }.count()}")
+}

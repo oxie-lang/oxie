@@ -380,12 +380,20 @@ fn unchanged_parts(s: &Stmt, rest: &[Stmt]) -> Option<Stmt> {
             _ => e.ident(),
         }
     }
+    // `(row, at) = (row + 1, end)` assigns each part
+    fn targets<'e>(e: &'e Expr, out: &mut Vec<Option<&'e str>>) {
+        match &e.kind {
+            ExprKind::Tuple(v) | ExprKind::Array(v) => v.iter().for_each(|x| targets(x, out)),
+            _ => out.push(root(e)),
+        }
+    }
     let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
     for s in rest {
         visit::walk_stmt(s, &mut |e| {
             let mut roots = Vec::new();
             match &e.kind {
-                ExprKind::Assign(_, lhs, _) | ExprKind::Unary(UnOp::RefMut, lhs) => roots.push(root(lhs)),
+                ExprKind::Assign(_, lhs, _) => targets(lhs, &mut roots),
+                ExprKind::Unary(UnOp::RefMut, lhs) => roots.push(root(lhs)),
                 ExprKind::MethodCall { recv, args, .. } => roots.extend(std::iter::once(root(recv)).chain(args.iter().map(|a| root(&a.value)))),
                 ExprKind::Call { args, .. } => roots.extend(args.iter().map(|a| root(&a.value))),
                 ExprKind::For { iter, .. } => roots.push(root(iter)),
@@ -1067,6 +1075,14 @@ impl<'a> Lowerer<'a> {
     /// moved out first (`move_args_changing_this`). Returns true if it is block-like (no `;`
     /// needed).
     fn stmt_expr(&mut self, e: &Expr) -> bool {
+        // a throwing call passes its error on, as it does as a statement of a block
+        // (`x?.let { check(it) }`, `repeat(n) { step() }`)
+        if self.passes_errors_on() && (self.is_throwing_call(e) || self.is_rust_result_call(e)) {
+            self.e.mark(e.span);
+            self.propagate(e);
+            self.e.w(";");
+            return true;
+        }
         let moved = self.move_args_changing_this(e, &[]);
         let block_like = self.stmt_expr_here(moved.as_ref().map_or(e, |(m, _)| m));
         if let Some((_, bound)) = moved {
@@ -1694,7 +1710,16 @@ impl<'a> Lowerer<'a> {
                     return self.fun_at(&p).is_some_and(|f| f.throws);
                 }
                 let owner = self.infer_type(recv).and_then(|t| self.type_owner(&t));
-                owner.and_then(|o| self.class_at(&o).and_then(|c| c.methods.get(name)).cloned()).is_some_and(|m| m.throws)
+                let own = owner.and_then(|o| self.class_at(&o).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(&o).and_then(|e| e.methods.get(name))).cloned());
+                if let Some(m) = own {
+                    return m.throws;
+                }
+                // an interface's method (on an interface value, a type parameter bound by one, or a
+                // class that inherits its default), or an extension function
+                match self.iface_method(recv, name) {
+                    Some(m) => m.throws,
+                    None => self.k.ext_throws.contains(name),
+                }
             }
             ExprKind::Await(x) => self.is_throwing_call(x),
             _ => false,
@@ -1802,6 +1827,27 @@ impl<'a> Lowerer<'a> {
 
     /// The interface method `name` of a value: of its interface (`Shape`, `&Shape`, `Box<Shape>`)
     /// or of one its class or enum implements.
+    /// The interfaces type parameter `n` of the functions being lowered is bound by.
+    fn param_bounds(&self, n: &str) -> Option<Vec<String>> {
+        let g = self.fn_generics.iter().rev().find(|g| g.params.iter().any(|p| matches!(p, GenericParam::Type { name, .. } if name == n)))?;
+        let mut out = Vec::new();
+        for p in &g.params {
+            if let GenericParam::Type { name, bounds, .. } = p {
+                if name == n {
+                    out.extend(bounds.iter().filter_map(|b| b.last_name().map(str::to_string)));
+                }
+            }
+        }
+        for w in &g.where_clause {
+            if let WherePred::Type { ty, bounds, .. } = w {
+                if ty.single_name() == Some(n) {
+                    out.extend(bounds.iter().filter_map(|b| b.last_name().map(str::to_string)));
+                }
+            }
+        }
+        Some(out)
+    }
+
     fn iface_method(&self, recv: &Expr, name: &str) -> Option<crate::sema::MethodInfo> {
         let mut t = self.infer_type(recv)?;
         loop {
@@ -1814,8 +1860,12 @@ impl<'a> Lowerer<'a> {
                 _ => break,
             };
         }
-        let mut ifaces: Vec<String> = match t.single_name() {
-            Some(n) if self.is_oxie_iface(&t) => vec![n.to_string()],
+        let mut ifaces: Vec<String> = match (&t, t.single_name()) {
+            (_, Some(n)) if self.is_oxie_iface(&t) => vec![n.to_string()],
+            // `dyn Sink`, `impl Sink`
+            (Type::Dyn(bounds) | Type::Impl(bounds), _) => bounds.iter().filter_map(|b| b.last_name().map(str::to_string)).collect(),
+            // a type parameter `S: Sink` (or `where S: Sink`)
+            (_, Some(n)) if self.param_bounds(n).is_some() => self.param_bounds(n)?,
             _ => {
                 let owner = self.type_owner(&t)?;
                 self.class_at(&owner).map(|c| c.interfaces.clone()).or_else(|| self.enum_at(&owner).map(|e| e.interfaces.clone()))?
@@ -5527,8 +5577,27 @@ impl<'a> Lowerer<'a> {
             }
             None => {
                 self.e.nl();
-                self.e.w(&var);
-                self.segment_links(seg);
+                // `conn?.send(msg)` with a throwing `send` passes its error on
+                let throwing = match (&seg[..], prefix.is_empty()) {
+                    ([Expr { kind: ExprKind::MethodCall { name, generics, args, .. }, span }], true) => {
+                        let inner = match self.infer_type(base) {
+                            Some(Type::Option(t)) => Some(*t),
+                            _ => None,
+                        };
+                        self.bind_name(&var, inner);
+                        let recv = Expr::new(ExprKind::Path { segs: vec![var.clone()], generics: None, global: false }, *span);
+                        let call = Expr::new(ExprKind::MethodCall { recv: Box::new(recv), name: name.clone(), generics: generics.clone(), args: args.clone(), safe: false }, *span);
+                        (self.passes_errors_on() && self.is_throwing_call(&call)).then_some(call)
+                    }
+                    _ => None,
+                };
+                match throwing {
+                    Some(call) => self.propagate(&call),
+                    None => {
+                        self.e.w(&var);
+                        self.segment_links(seg);
+                    }
+                }
                 self.e.w(";");
             }
         }
@@ -6086,7 +6155,10 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     self.e.w(" => ");
-                    self.arm_body(&arm.body, mode);
+                    match self.copied_binding(arm, arms, subject, field_by_ref) {
+                        Some(read) => self.arm_body(&read, mode),
+                        None => self.arm_body(&arm.body, mode),
+                    }
                     self.pop_scope();
                 }
                 if mode.is_none() && !rust_match && has_literal && !has_catch_all {
@@ -6160,6 +6232,46 @@ impl<'a> Lowerer<'a> {
                 }
                 let _ = span;
             }
+        }
+    }
+
+    /// An arm whose value is a name its pattern binds, in a `when` that borrows the field it
+    /// matches, beside arms that give values (`Some(g) -> g` beside `else -> self.measure()`): the
+    /// value behind the name, `*g`, as Rust's match by value gives it for a `Copy` type.
+    fn copied_binding(&self, arm: &WhenArm, arms: &[WhenArm], subject: Option<&Expr>, field_by_ref: bool) -> Option<Expr> {
+        let name = arm.body.ident().filter(|_| field_by_ref)?;
+        // `Some(g)` on a `T?` field binds a `T`; a case of the crate's enums, its field's type
+        let ty = match arm.conds.as_slice() {
+            [WhenCond::Pat(Pat::TupleStruct { path, elems, .. })] if path.last().is_some_and(|p| p == "Some") && matches!(elems.as_slice(), [Pat::Ident { name: n, sub: None, .. }] if n == name) => {
+                match subject.and_then(|s| self.infer_type(s)) {
+                    Some(Type::Option(inner)) => Some(*inner),
+                    _ => None,
+                }
+            }
+            _ => match self.local(name).cloned().flatten() {
+                Some(Type::Ref { inner, .. }) => Some(*inner),
+                _ => None,
+            },
+        }?;
+        if self.known_not_copy(&ty) {
+            return None;
+        }
+        let gives_value = arms.iter().filter(|a| !std::ptr::eq(*a, arm)).any(|a| self.infer_type(&a.body).is_some_and(|t| !matches!(t, Type::Ref { .. } | Type::Infer | Type::Never)));
+        gives_value.then(|| Expr::new(ExprKind::Unary(UnOp::Deref, Box::new(arm.body.clone())), arm.body.span))
+    }
+
+    /// A type that is surely not `Copy`: text, collections, boxes, and the crate's types that
+    /// don't derive it.
+    fn known_not_copy(&self, t: &Type) -> bool {
+        match t {
+            Type::Path { segs, .. } => {
+                let n = segs.last().map(|s| s.name.as_str()).unwrap_or_default();
+                matches!(n, "String" | "Vec" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "Box" | "Rc" | "Arc" | "RefCell" | "Mutex")
+                    || (self.k.is_user_type(n) && !self.k.derives.get(n).is_some_and(|d| d.iter().any(|x| x == "Copy")))
+            }
+            Type::Option(inner) => self.known_not_copy(inner),
+            Type::Tuple(ts) => ts.iter().any(|t| self.known_not_copy(t)),
+            _ => false,
         }
     }
 

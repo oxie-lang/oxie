@@ -9,7 +9,7 @@ use crate::diag::{Diag, LineIndex, Severity, Span};
 use crate::emit::{Decision, Mark};
 use crate::lower::Lowerer;
 use crate::parser;
-use crate::runtime::RUNTIME_RS;
+use crate::runtime;
 use crate::sema::{self, SourceUnit};
 
 /// One input file, with its path relative to the source root (e.g. `net/http.oxi`).
@@ -20,7 +20,7 @@ pub struct Input {
     pub text: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Options {
     pub crate_name: String,
     pub extern_crates: HashSet<String>,
@@ -28,6 +28,8 @@ pub struct Options {
     pub out_dir: PathBuf,
     /// A single-file script: its generated `main.rs` carries the crate attributes (`#![...]`).
     pub script: bool,
+    /// The `#![...]` attributes of the crate's Rust root (`src/lib.rs`), such as `no_std`.
+    pub root_attrs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -205,6 +207,22 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         }
     }
     let abs = |rel: &Path| opts.out_dir.join(rel).to_string_lossy().replace('\\', "/");
+    // modules a `mod name` line of their parent declares there (`Lowerer::module_files`); the
+    // others are declared after the parent's code
+    let mut placed: HashSet<Vec<String>> = HashSet::new();
+    for p in &parsed {
+        for it in &p.file.items {
+            let crate::ast::ItemKind::Raw(s) = &it.kind else { continue };
+            let Some(name) = s.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')) else { continue };
+            let path = [p.module.as_slice(), &[name.to_string()]].concat();
+            if module_files.contains_key(&path) {
+                placed.insert(path);
+            }
+        }
+    }
+    let generated: std::collections::HashMap<Vec<String>, String> = module_files.iter().map(|(m, rel)| (m.clone(), abs(rel))).collect();
+    let no_std = std_cfg(opts.root_attrs.iter().chain(parsed.iter().filter(|p| p.is_root).flat_map(|p| &p.file.inner_attrs))).is_some();
+    let docs_linted = opts.root_attrs.iter().chain(parsed.iter().filter(|p| p.is_root).flat_map(|p| &p.file.inner_attrs)).any(|a| a.contains("missing_docs") && !a.trim_start().starts_with("allow"));
 
     // with an Oxie root, generated accessors nobody calls are left out: the lowering runs again
     // in the rare case that it calls one the dry run didn't
@@ -215,6 +233,9 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
             let mut l = Lowerer::new(&k, p.module.clone(), p.is_root);
             l.param_notes = param_notes.iter().filter(|n| n.file == i).map(|n| ((n.fun_span, n.index), n.clone())).collect();
             l.src_dir = p.input.abs_path.parent().map(|d| d.to_path_buf());
+            l.module_files = generated.clone();
+            l.docs_linted = docs_linted;
+            l.no_std = no_std;
             l.crate_attrs_allowed = opts.script;
             l.source_words = Some(words[i].clone());
             l.crate_calls = has_root.then_some(&calls);
@@ -242,23 +263,24 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
                 "#[path = \"{}\"]\n#[doc(hidden)]\n#[allow(dead_code, unused_imports)]\npub(crate) mod __oxie;\n",
                 abs(Path::new("__oxie.rs"))
             ));
-            // crate-level lint attributes (`#![allow(...)]` in the root file) also cover every module
-            let decls = module_decls(&module_files, &[], &abs);
+            // after the root's code, so the macros it declares reach every module; crate-level lint
+            // attributes (`#![allow(...)]` in the root file) also cover every module
+            let decls = module_decls(&module_files, &placed, &[], &abs);
             if root_lints.is_empty() {
-                header.push_str(&decls);
+                footer.push_str(&decls);
             } else {
                 for line in decls.lines() {
                     if line.starts_with("#[path") || (line.starts_with("pub mod") && line.ends_with('{')) {
                         for lint in &root_lints {
-                            header.push_str(&format!("#[{}]\n", lint));
+                            footer.push_str(&format!("#[{}]\n", lint));
                         }
                     }
-                    header.push_str(line);
-                    header.push('\n');
+                    footer.push_str(line);
+                    footer.push('\n');
                 }
             }
         } else {
-            footer.push_str(&module_decls(&module_files, &p.module, &abs));
+            footer.push_str(&module_decls(&module_files, &placed, &p.module, &abs));
         }
         let header_lines = header.matches('\n').count() as u32;
         let mut text = header;
@@ -281,16 +303,82 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         out.diags.push((p.input.abs_path.clone(), p.input.text.clone(), diags));
     }
     // runtime + plain module include for mixed Rust projects
-    out.files.push(GenFile { rel_path: PathBuf::from("__oxie.rs"), text: RUNTIME_RS.to_string(), map: None, decisions: Vec::new() });
+    let root_attrs = opts.root_attrs.iter().chain(parsed.iter().filter(|p| p.is_root).flat_map(|p| &p.file.inner_attrs));
+    let runtime = runtime::runtime(std_cfg(root_attrs).as_deref());
+    out.files.push(GenFile { rel_path: PathBuf::from("__oxie.rs"), text: runtime, map: None, decisions: Vec::new() });
     let mut modrs = String::from("// Generated by Oxie. Include with include!(concat!(env!(\"OUT_DIR\"), \"/oxie/mod.rs\"));\n");
     modrs.push_str(&format!("#[path = \"{}\"]\n#[doc(hidden)]\n#[allow(dead_code, unused_imports)]\npub(crate) mod __oxie;\n", abs(Path::new("__oxie.rs"))));
-    modrs.push_str(&module_decls(&module_files, &[], &abs));
+    modrs.push_str(&module_decls(&module_files, &placed, &[], &abs));
     out.files.push(GenFile { rel_path: PathBuf::from("mod.rs"), text: modrs, map: None, decisions: Vec::new() });
     out
 }
 
-/// `#[path = ".."] pub mod x;` for the direct children of `parent`, with inline modules for directories.
-fn module_decls(files: &BTreeMap<Vec<String>, PathBuf>, parent: &[String], abs: &dyn Fn(&Path) -> String) -> String {
+/// The `cfg` under which a crate with these root attributes has `std`: `None` when it always
+/// has it, `any()` (never) for `no_std`, `not(P)` for `cfg_attr(P, no_std)`.
+fn std_cfg<'s>(attrs: impl Iterator<Item = &'s String>) -> Option<String> {
+    for a in attrs {
+        let a = a.trim();
+        if a == "no_std" {
+            return Some("any()".into());
+        }
+        let Some(inner) = a.strip_prefix("cfg_attr(").and_then(|r| r.strip_suffix(')')) else { continue };
+        let parts = split_top_level(inner);
+        if parts.len() > 1 && parts[1..].iter().any(|p| p.trim() == "no_std") {
+            return Some(format!("not({})", parts[0].trim()));
+        }
+    }
+    None
+}
+
+/// `a, f(b, c), "d,e"` split at its top-level commas.
+fn split_top_level(s: &str) -> Vec<&str> {
+    let (mut parts, mut depth, mut start, mut text) = (Vec::new(), 0i32, 0, false);
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => text = !text,
+            '(' | '[' if !text => depth += 1,
+            ')' | ']' if !text => depth -= 1,
+            ',' if !text && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// The `#![...]` attributes of a Rust file (`src/lib.rs`), as the text inside the brackets.
+pub fn inner_attrs_of(rust: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = rust;
+    while let Some(i) = rest.find("#![") {
+        let body = &rest[i + 3..];
+        let mut depth = 1;
+        let Some(end) = body.char_indices().find_map(|(j, c)| {
+            match c {
+                '[' => depth += 1,
+                ']' => depth -= 1,
+                _ => {}
+            }
+            (depth == 0).then_some(j)
+        }) else {
+            break;
+        };
+        // not in a line comment
+        let line_start = rest[..i].rfind('\n').map_or(0, |p| p + 1);
+        if !rest[line_start..i].contains("//") {
+            out.push(body[..end].to_string());
+        }
+        rest = &body[end..];
+    }
+    out
+}
+
+/// `#[path = ".."] pub mod x;` for the direct children of `parent`, with inline modules for
+/// directories, except those a `mod x` line of the parent declares (`placed`).
+fn module_decls(files: &BTreeMap<Vec<String>, PathBuf>, placed: &HashSet<Vec<String>>, parent: &[String], abs: &dyn Fn(&Path) -> String) -> String {
     let mut children: Vec<String> = Vec::new();
     for m in files.keys() {
         if m.len() > parent.len() && m[..parent.len()] == *parent {
@@ -304,13 +392,16 @@ fn module_decls(files: &BTreeMap<Vec<String>, PathBuf>, parent: &[String], abs: 
     for c in children {
         let mut path = parent.to_vec();
         path.push(c.clone());
+        if placed.contains(&path) {
+            continue;
+        }
         match files.get(&path) {
             Some(rel) => {
                 s.push_str(&format!("#[path = \"{}\"]\npub mod {};\n", abs(rel), c));
             }
             None => {
                 s.push_str(&format!("pub mod {} {{\n", c));
-                for line in module_decls(files, &path, abs).lines() {
+                for line in module_decls(files, placed, &path, abs).lines() {
                     s.push_str("    ");
                     s.push_str(line);
                     s.push('\n');
@@ -374,7 +465,7 @@ fn source_words(text: &str) -> HashSet<String> {
 /// Lowers a single file in isolation (for `oxie emit`, tests and tooling).
 pub fn compile_one(text: &str) -> (String, Vec<Diag>) {
     let input = Input { rel_path: PathBuf::from("main.oxi"), abs_path: PathBuf::from("main.oxi"), text: text.to_string() };
-    let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: true };
+    let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: true, root_attrs: Vec::new() };
     let out = compile(vec![input], &opts);
     let diags = out.diags.into_iter().next().map(|d| d.2).unwrap_or_default();
     let text = out.files.into_iter().next().map(|f| f.text).unwrap_or_default();
@@ -474,6 +565,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn no_std_roots_get_a_support_module_without_std() {
+        let attrs = inner_attrs_of("//! Docs.\n#![cfg_attr(not(feature = \"std\"), no_std)]\n// #![no_std]\n#![allow(dead_code)]\nmod a;\n");
+        assert_eq!(attrs, ["cfg_attr(not(feature = \"std\"), no_std)", "allow(dead_code)"]);
+        assert_eq!(std_cfg(attrs.iter()).as_deref(), Some("not(not(feature = \"std\"))"));
+        assert_eq!(std_cfg(["no_std".to_string()].iter()).as_deref(), Some("any()"));
+        assert_eq!(std_cfg(["allow(dead_code)".to_string(), "cfg_attr(test, allow(unused))".to_string()].iter()), None);
+        let support = runtime::runtime(Some("any()"));
+        assert!(support.contains("#[cfg(any())] pub trait SharedLock") && !support.contains("/*std*/"));
+        assert!(!runtime::runtime(None).contains("#[cfg("));
+    }
+
+    #[test]
     fn verbatim_prefix_is_removed() {
         assert_eq!(without_verbatim_prefix(r"\\?\D:\a\oxie"), Some(r"D:\a\oxie".to_string()));
         assert_eq!(without_verbatim_prefix(r"\\?\UNC\server\share\x"), Some(r"\\server\share\x".to_string()));
@@ -484,7 +587,7 @@ mod tests {
     /// The decisions of a one-file program: (the source they are about, what was chosen, why).
     fn decisions(src: &str) -> Vec<(String, String, String)> {
         let input = Input { rel_path: PathBuf::from("main.oxi"), abs_path: PathBuf::from("main.oxi"), text: src.to_string() };
-        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: true };
+        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: true, root_attrs: Vec::new() };
         let out = compile(vec![input], &opts);
         assert!(!out.has_errors(), "{:?}", out.diags);
         out.files[0].decisions.iter().map(|d| (src[d.span.start as usize..d.span.end as usize].to_string(), d.chosen.clone(), d.why.clone())).collect()
@@ -509,7 +612,7 @@ mod tests {
 fun main() = println(tools.one())
 "), file("tools.oxi", "fun one(): i32 = 1
 ")];
-        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false };
+        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false, root_attrs: Vec::new() };
         let out = compile(inputs, &opts);
         assert!(!out.has_errors(), "{:?}", out.diags);
         let main = &out.files.iter().find(|f| f.rel_path == Path::new("main.rs")).unwrap().text;
@@ -525,7 +628,7 @@ fun main() = println(tools.one())
             file("lint/mod.oxi", "fun check(): i32 = js.count() + js.Dialect.Tsx.size()\n"),
             file("lint/js.oxi", "fun count(): i32 = 3\nenum Dialect { Tsx }\nimpl Dialect {\n    fun size(): i32 = 1\n}\n"),
         ];
-        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false };
+        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false, root_attrs: Vec::new() };
         let out = compile(inputs, &opts);
         assert!(!out.has_errors(), "{:?}", out.diags);
         let lint = &out.files.iter().find(|f| f.rel_path == Path::new("lint.rs")).unwrap().text;
@@ -542,7 +645,7 @@ fun main() = println(tools.one())
             file("editor/mod.oxi", "import lsp::Event\n\nfun which(): String = lsp.name() + \"${Event.Message:?}\"\nfun first(e: lsp.Event): bool = e == Event.Message\n"),
             file("editor/lsp.oxi", "fun name(): String = \"child\"\nenum Event { Message }\n"),
         ];
-        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false };
+        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false, root_attrs: Vec::new() };
         let out = compile(inputs, &opts);
         assert!(!out.has_errors(), "{:?}", out.diags);
         let editor = &out.files.iter().find(|f| f.rel_path == Path::new("editor.rs")).unwrap().text;

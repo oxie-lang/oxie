@@ -103,7 +103,8 @@ fn module_dir(file: &Path) -> PathBuf {
 }
 
 /// The translation without the `mod name` lines (and their TODO) of the modules translated in
-/// the same run.
+/// the same run. A line with attributes (`@cfg(unix) mod unix`, `@macro_use mod macros`) stays,
+/// without its TODO: Oxie declares the module with them.
 fn without_translated_mods(oxie: &str, dir: &Path, translated: &[&PathBuf]) -> String {
     let lines: Vec<&str> = oxie.lines().collect();
     let mut out: Vec<&str> = Vec::new();
@@ -113,6 +114,14 @@ fn without_translated_mods(oxie: &str, dir: &Path, translated: &[&PathBuf]) -> S
         if let Some(m) = module {
             let next = lines.get(i + 1).map(|l| l.trim().trim_start_matches("pub(crate) ").trim_start_matches("pub "));
             let done = [dir.join(format!("{}.rs", m)), dir.join(m).join("mod.rs")].iter().any(|p| translated.iter().any(|t| *t == p));
+            let attributed = out.last().is_some_and(|l| {
+                let l = l.trim_start();
+                l.starts_with('@') || l.starts_with("#[") || l.starts_with("///")
+            });
+            if done && attributed {
+                i += 1;
+                continue;
+            }
             if done && next == Some(format!("mod {}", m).as_str()) {
                 i += 2;
                 // and a blank line after them, unless it separates what is before them
@@ -187,6 +196,10 @@ mod tests {
         let util = PathBuf::from("src/util.rs");
         let out = without_translated_mods(&oxie, &module_dir(Path::new("src/main.rs")), &[&util]);
         assert_eq!(out, format!("{}pub mod other\n\nfun main() {{}}\n", todo("other")));
+        // attributes stay with their module, which Oxie declares with them
+        let oxie = format!("@cfg(unix)\n{}mod util\n\nfun main() {{}}\n", todo("util"));
+        let out = without_translated_mods(&oxie, &module_dir(Path::new("src/main.rs")), &[&util]);
+        assert_eq!(out, "@cfg(unix)\nmod util\n\nfun main() {}\n");
         // `src/a.rs` declares the modules in `src/a/`
         assert_eq!(module_dir(Path::new("src/a.rs")), Path::new("src/a"));
     }

@@ -790,9 +790,10 @@ impl Printer<'_> {
                 return format!("{}?", self.ex(&syn::Expr::MethodCall(m2), &Ctx::value()));
             }
         }
-        // a `loop` without `break` never ends: it returns from inside, and has no value to unwrap
+        // a `loop` nothing breaks out of never ends: it returns from inside, and has no value to
+        // unwrap
         if let syn::Expr::Loop(l) = e {
-            if !tok(&l.body).contains("break") {
+            if !breaks_out(l) {
                 return self.ex(e, &Ctx::value());
             }
         }
@@ -2050,16 +2051,52 @@ impl Printer<'_> {
 fn for_arm_attrs(p: &Printer, attrs: &[syn::Attribute]) -> String {
     let mut s = String::new();
     for a in attrs {
-        // lint attributes only affect warnings; Oxie has no attributes on `when` arms
-        if ["allow", "warn", "expect", "deny"].iter().any(|n| a.path().is_ident(n)) {
-            continue;
-        }
         for l in p.attr(a) {
             s.push_str(&l);
             s.push(' ');
         }
     }
     s
+}
+
+/// Does a `break` leave this `loop` (not just a loop inside it)?
+fn breaks_out(l: &syn::ExprLoop) -> bool {
+    use syn::visit::Visit;
+    struct V<'a> {
+        label: Option<&'a syn::Lifetime>,
+        depth: usize,
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr_break(&mut self, b: &'ast syn::ExprBreak) {
+            match &b.label {
+                Some(l) => self.found |= self.label.is_some_and(|own| own.ident == l.ident),
+                None => self.found |= self.depth == 0,
+            }
+            syn::visit::visit_expr_break(self, b);
+        }
+        fn visit_expr_loop(&mut self, e: &'ast syn::ExprLoop) {
+            self.depth += 1;
+            syn::visit::visit_expr_loop(self, e);
+            self.depth -= 1;
+        }
+        fn visit_expr_while(&mut self, e: &'ast syn::ExprWhile) {
+            self.depth += 1;
+            syn::visit::visit_expr_while(self, e);
+            self.depth -= 1;
+        }
+        fn visit_expr_for_loop(&mut self, e: &'ast syn::ExprForLoop) {
+            self.depth += 1;
+            syn::visit::visit_expr_for_loop(self, e);
+            self.depth -= 1;
+        }
+        // a closure's or an item's `break` is its own
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut v = V { label: l.label.as_ref().map(|l| &l.name), depth: 0, found: false };
+    v.visit_block(&l.body);
+    v.found
 }
 
 /// `[a, b]`, one element per line when long.

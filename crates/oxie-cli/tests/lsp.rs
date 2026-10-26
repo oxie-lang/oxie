@@ -673,7 +673,7 @@ fn oxie_errors(dir: &Path, project: bool) -> Option<String> {
         let file = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "oxi")).unwrap();
         vec![oxie_compiler::Input { rel_path: PathBuf::from("main.oxi"), text: std::fs::read_to_string(&file).unwrap(), abs_path: file }]
     };
-    let opts = oxie_compiler::Options { crate_name: "main".into(), extern_crates: Default::default(), out_dir: PathBuf::from("/oxie"), script: !project };
+    let opts = oxie_compiler::Options { crate_name: "main".into(), extern_crates: Default::default(), out_dir: PathBuf::from("/oxie"), script: !project, root_attrs: Vec::new() };
     let out = oxie_compiler::compile(inputs, &opts);
     let errors: Vec<String> = out.diags.iter().flat_map(|(_, _, ds)| ds).filter(|d| d.severity == oxie_compiler::Severity::Error).map(|d| d.message.clone()).collect();
     (!errors.is_empty()).then(|| errors.join("; "))

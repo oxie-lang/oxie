@@ -6,7 +6,8 @@
 789,000 lines (serde, syn, clap, futures, rand, regex-syntax, the Kuana editor, Oxie's own
 compiler, ...) it keeps no item or expression in a `rust { }` block, where 0.4.1 kept 1,510 of
 them (58,700 lines). Oxie gained the Rust forms that needed, and fixes for what translating that
-code turned up.
+code turned up. Translated whole, the Kuana editor (137 files) builds and passes 436 of its 437
+tests, as before, now without any Rust left in it.
 
 ### Changes
 
@@ -45,13 +46,22 @@ code turned up.
   not a class of the crate with that name. A type or function imported into a module from
   elsewhere in the crate is the one a call there means, also when another module declares the
   same name.
+* `if (val (Some(a), Some(b)) = (x, y))` and the like matched an optional instead of the tuple:
+  only a tuple of names unwraps an optional pair, and Rust's `if let` keeps Rust's meaning.
+* `var (row, at) = first` lost its `mut` when only a destructuring assignment
+  (`(row, at) = (row + 1, 0)`) changed it.
+* A lambda parameter that is an `OsStr`, `OsString` or `Cow<str>` compares with a text literal
+  (`path.extension().is_some_and { it == "rs" }`).
+* `when (self.goal) { Some(g) -> g; else -> self.measure() }` reads `g` by value when the field
+  is borrowed for the match and its type may be `Copy`, as Rust's match by value does.
 * `Name { 1 }` is a lambda, not a struct literal; a type parameter's default (`T = i32`) no longer
   goes into the class's `impl`; `name! { .. }` macros print with a space, and an item-declaring
   one (`thread_local!`) without a `;`.
 * `oxie from-rust`: calls of macros whose name a method or function takes (`write!` in a type
   with a `write` method) keep their `!`; a module function called from a method of the same
   name is called as `self::name(..)`; a closure that captures a variable named `it` stays
-  `|| ..`; a `#![..]` inside a `match` becomes an attribute of the statement; inner docs of an
+  `|| ..`; a `#![..]` inside a `match` becomes an attribute of the statement, and lint
+  attributes on `match` arms are kept; inner docs of an
   inline module become its doc comment; `matches!(..)` before a method call gets parentheses;
   types with an interface's `new` stay structs; one TODO line per reason above methods kept as
   Rust; it no longer crashes on items `prettyplease` can't print (`safe fn` in an `unsafe extern`
