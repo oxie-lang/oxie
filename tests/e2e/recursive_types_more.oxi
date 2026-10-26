@@ -1,0 +1,45 @@
+// Recursive types: generic ones are boxed too, methods are called through the boxes, `when
+// (this)` binds the fields of the case (by reference in a method that borrows its object), and
+// an optional recursive field is read as an optional.
+
+enum List<T> {
+    Nil
+    Cons(T, List<T>)
+}
+
+enum Tree {
+    Leaf(i32)
+    Node(Tree, Tree)
+
+    fun sum(scale: &[i32]): i32 = when (this) {
+        Leaf(n) -> n * scale[0]
+        Node(l, r) -> {
+            val s = vec[scale[0]]
+            l.sum(s) + r.sum(scale)
+        }
+    }
+}
+
+enum Expr {
+    Num(f64)
+    Neg(Expr)
+    Add(Expr, Expr)
+
+    fun eval(): f64 = when (this) {
+        Num(n) -> n
+        Neg(e) -> -e.eval()
+        Add(a, b) -> a.eval() + b.eval()
+    }
+}
+
+class Node(value: i32, next: Node? = null)
+
+fun length(n: Node?): i32 = if (val node = n) node.value / node.value + length(node.next) else 0
+
+fun main() {
+    val l = List.Cons(1, List.Cons(2, List.Nil))
+    println("${l:?}")
+    println(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)).sum([10]))
+    println(Expr.Add(Expr.Num(1.5), Expr.Neg(Expr.Num(4.0))).eval())
+    println(length(Node(1, Node(2, Node(3))).next))
+}

@@ -449,6 +449,88 @@ pub fn esc(name: &str) -> String {
     }
 }
 
+/// Does a lambda the function returns (as its value or with `return`) change a variable it
+/// captures?
+fn returns_changing_lambda(f: &FunDecl) -> bool {
+    fn changes(lambda: &Expr) -> bool {
+        let ExprKind::Lambda { params, body, .. } = &lambda.kind else { return false };
+        let mut own = Vec::new();
+        for p in params {
+            p.pat.bindings(&mut own);
+        }
+        own.push("it".to_string());
+        if let ExprKind::Block(b) = &body.kind {
+            for st in &b.stmts {
+                if let Stmt::Let { pat, .. } = st {
+                    pat.bindings(&mut own);
+                }
+            }
+        }
+        let root = |mut e: &Expr| {
+            while let ExprKind::Field { recv, .. } | ExprKind::Index(recv, _) | ExprKind::Paren(recv) | ExprKind::Unary(UnOp::Deref, recv) = &e.kind {
+                e = recv;
+            }
+            e.ident().map(String::from)
+        };
+        let mut found = false;
+        visit::walk_expr(body, &mut |x| {
+            match &x.kind {
+                ExprKind::Assign(_, target, _) => found |= root(target).is_some_and(|n| !own.contains(&n)),
+                ExprKind::MethodCall { recv, name, .. } => found |= sema::MUTATING_METHODS.contains(&name.as_str()) && root(recv).is_some_and(|n| !own.contains(&n)),
+                _ => {}
+            }
+            !found
+        });
+        found
+    }
+    let mut out = false;
+    match &f.body {
+        Some(FunBody::Expr(e)) => out |= changes(e),
+        Some(FunBody::Block(b)) => {
+            if let Some(Stmt::Expr { expr, semi: false }) = b.stmts.last() {
+                out |= changes(expr);
+            }
+            visit::walk_block(b, &mut |x| {
+                if let ExprKind::Return(Some(v)) = &x.kind {
+                    out |= changes(v);
+                }
+                !matches!(x.kind, ExprKind::Lambda { .. })
+            });
+        }
+        None => {}
+    }
+    out
+}
+
+/// Parameters as a declaration without a body writes them: `mut x: T` is `x: T`.
+fn decl_params(params: &str) -> String {
+    let mut parts = Vec::new();
+    let (mut depth, mut start, mut prev) = (0i32, 0, ' ');
+    for (i, c) in params.char_indices() {
+        match c {
+            '(' | '[' | '<' | '{' => depth += 1,
+            // not the `>` of `->`
+            '>' if prev == '-' => {}
+            ')' | ']' | '>' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&params[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        prev = c;
+    }
+    parts.push(&params[start..]);
+    parts
+        .iter()
+        .map(|p| {
+            let t = p.trim_start();
+            t.strip_prefix("mut ").unwrap_or(t).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// `"NotFound"` -> `"not found"`
 /// Where a returned reference points (see `with_field_ret_lifetime`).
 #[derive(Clone, Debug, PartialEq)]
@@ -1142,7 +1224,9 @@ impl<'a> Lowerer<'a> {
             Type::Option(inner) => format!("Option<{}>", self.ty(inner, TyPos::Generic)),
             Type::Fn { params, ret } => {
                 let ps = params.iter().map(|t| self.ty(t, TyPos::Generic)).collect::<Vec<_>>().join(", ");
-                let r = if ret.is_unit() { String::new() } else { format!(" -> {}", self.ty(ret, TyPos::Ret)) };
+                // a function a function gives is boxed: `impl Fn(i32) -> impl Fn(i32)` isn't Rust
+                let ret_pos = if matches!(**ret, Type::Fn { .. }) { TyPos::Generic } else { TyPos::Ret };
+                let r = if ret.is_unit() { String::new() } else { format!(" -> {}", self.ty(ret, ret_pos)) };
                 let base = match pos {
                     TyPos::Param => "FnMut",
                     _ => "Fn",
@@ -1910,6 +1994,11 @@ impl<'a> Lowerer<'a> {
 
     fn ret_type_inner(&self, f: &FunDecl, pos: TyPos) -> Option<String> {
         let value = f.ret.as_ref().filter(|t| !t.is_unit());
+        // a lambda it returns that changes what it captures (`{ count += 1; count }`) is `FnMut`
+        if let (Throws::No, TyPos::Ret, Some(t @ Type::Fn { .. })) = (&f.throws, pos, value) {
+            let text = self.ty(t, TyPos::Ret);
+            return Some(if returns_changing_lambda(f) { text.replacen("impl Fn(", "impl FnMut(", 1) } else { text });
+        }
         match &f.throws {
             // an interface returned from several branches as different classes is boxed
             Throws::No if pos == TyPos::Ret && self.iface_ret(f) == Some(true) => value.map(|t| self.ty(t, TyPos::Field)),
@@ -2234,7 +2323,9 @@ impl<'a> Lowerer<'a> {
         );
         let vis = self.vis(&it.vis, ctx);
         self.docs(&it.docs);
-        self.e.w(&format!("#[allow(non_camel_case_types)]\n{}trait {}{}{} {{\n    {};\n}}", vis, tname, g, wc, sig));
+        // a declaration without a body has no patterns: `mut f: T` is `f: T` there
+        let decl = format!("{}fn {}({}){}", header, esc(&f.name), decl_params(&params), ret.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default());
+        self.e.w(&format!("#[allow(non_camel_case_types)]\n{}trait {}{}{} {{\n    {};\n}}", vis, tname, g, wc, decl));
         self.e.nl();
         self.e.nl();
         // on an interface: every type that implements it (`impl<T: Shape + ?Sized> Ext for T`)

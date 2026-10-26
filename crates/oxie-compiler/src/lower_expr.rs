@@ -1333,8 +1333,10 @@ impl<'a> Lowerer<'a> {
                 if let Some(w) = &wrap {
                     self.e.w(&format!("{}(", w));
                 }
-                // a lambda the function returns outlives it: `move`
-                if t.fn_result && matches!(e.kind, ExprKind::Lambda { .. }) && self.fns.last().is_some_and(|f| !f.is_lambda) && t.ty.as_ref().is_some_and(|ty| self.is_fn_type(ty)) {
+                // a lambda the function (or a lambda) returns outlives it: `move`
+                let returned_fn = matches!(e.kind, ExprKind::Lambda { .. }) && t.ty.as_ref().is_some_and(|ty| self.is_fn_type(ty));
+                let in_lambda = self.fns.last().is_some_and(|f| f.is_lambda);
+                if returned_fn && (t.fn_result && !in_lambda || in_lambda) {
                     self.next_lambda_moves = true;
                 }
                 if auto_try {
@@ -1342,6 +1344,8 @@ impl<'a> Lowerer<'a> {
                 } else {
                     match &t.ty {
                         Some(_) if t.fn_result && self.returns_unboxed() => self.expr(e, P_LOWEST),
+                        // the function's result type is `impl Fn(..)`: the lambda itself, unboxed
+                        Some(ty @ Type::Fn { .. }) if t.fn_result && !in_lambda => self.coerce(e, ty, TyPos::Ret),
                         Some(ty) => self.coerce(e, ty, TyPos::Local),
                         None => self.expr(e, P_LOWEST),
                     }
@@ -1481,10 +1485,19 @@ impl<'a> Lowerer<'a> {
                     self.coerce(e, inner, TyPos::Generic);
                     self.e.w(")");
                 }
-                _ if self.is_place(e) && !self.place_is_option(e) => {
+                // a recursive field (`next: Node?` is an `Option<Box<Node>>`): the value out of
+                // its box
+                ExprKind::Field { .. } if inner.auto_boxed().is_none() && matches!(self.infer_type(e), Some(Type::Option(t)) if t.auto_boxed().is_some()) => {
                     self.expr(e, P_POSTFIX);
-                    self.e.w(".into()");
+                    self.e.w(".map(|b| *b)");
                 }
+                _ if self.is_place(e) && !self.place_is_option(e) => match self.infer_type(e) {
+                    Some(Type::Option(_)) => self.expr(e, P_LOWEST),
+                    _ => {
+                        self.expr(e, P_POSTFIX);
+                        self.e.w(".into()");
+                    }
+                },
                 // a call whose type Oxie knows (and that isn't `T?`)
                 ExprKind::Call { .. } | ExprKind::MethodCall { .. }
                     if !has_safe_link(e) && !self.is_option_expr(e) && self.infer_type(e).is_some_and(|t| !matches!(t, Type::Infer)) =>
@@ -5245,7 +5258,9 @@ impl<'a> Lowerer<'a> {
     fn case_bindings(&mut self, p: &Pat, subject: Option<&Expr>, field_by_ref: bool) -> Vec<(String, Type)> {
         let Some(s) = subject else { return Vec::new() };
         let Some(subject_ty) = self.infer_type(s) else { return Vec::new() };
-        let by_ref = matches!(subject_ty, Type::Ref { .. }) || field_by_ref;
+        // `when (this)` in a method that borrows its object binds references
+        let borrowed_this = matches!(strip_paren(s).kind, ExprKind::SelfValue) && !self.self_by_value;
+        let by_ref = matches!(subject_ty, Type::Ref { .. }) || field_by_ref || borrowed_this;
         let (path, elems): (&[String], Vec<(Option<&str>, &Pat)>) = match p {
             Pat::TupleStruct { path, elems, .. } => (path, elems.iter().map(|e| (None, e)).collect()),
             Pat::Struct { path, fields, .. } => (path, fields.iter().filter_map(|(n, p)| p.as_ref().map(|p| (Some(n.as_str()), p))).collect()),
@@ -5265,9 +5280,11 @@ impl<'a> Lowerer<'a> {
                 _ => None,
             };
         }
+        let own = self.class.as_ref().map(|c| c.name.clone());
         let en = match path {
+            [.., e, _] if e == "Self" => own.as_deref().and_then(|n| self.enum_info(n)),
             [.., e, _] => self.enum_info(e),
-            _ => owner.and_then(|t| t.last_name()).and_then(|n| self.enum_info(n)),
+            _ => owner.and_then(|t| t.last_name()).and_then(|n| if n == "Self" { own.as_deref() } else { Some(n) }).and_then(|n| self.enum_info(n)),
         };
         let Some(shape) = en.and_then(|e| e.variant(case)) else { return Vec::new() };
         let types: Vec<(Option<&str>, &Type)> = match shape {

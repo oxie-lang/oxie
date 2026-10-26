@@ -1,0 +1,25 @@
+// A lambda a function returns is returned as it is (`impl Fn`), as `impl FnMut` when it changes
+// what it captures, and one a returned lambda returns is boxed; an extension function can take
+// a lambda.
+
+fun make_counter(): () -> i32 {
+    var count = 0
+    return { count += 1; count }
+}
+
+fun adder(a: i32): (i32) -> (i32) -> i32 = { b -> { c -> a + b + c } }
+
+fun scaler(k: i32): (i32) -> i32 = { it * k }
+
+fun String.each_word(f: (&str) -> Unit) {
+    for (w in this.split_whitespace()) f(w)
+}
+
+fun main() {
+    var next = make_counter()
+    next()
+    println(next())
+    println(adder(1)(2)(3))
+    println(scaler(3)(14))
+    "hello big world".to_string().each_word { println(it) }
+}

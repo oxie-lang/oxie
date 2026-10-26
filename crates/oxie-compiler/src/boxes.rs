@@ -75,7 +75,8 @@ fn by_value(t: &Type, names: &HashSet<String>, out: &mut HashSet<String>) {
             let Some(last) = segs.last() else { return };
             match last.generics.as_deref() {
                 Some([GenericArg::Type(inner)]) if last.name == "Option" => by_value(inner, names, out),
-                None if names.contains(&last.name) => {
+                // also a generic one (`List<T>` in `Cons(T, List<T>)`)
+                _ if names.contains(&last.name) => {
                     out.insert(last.name.clone());
                 }
                 _ => {}

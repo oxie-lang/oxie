@@ -1,0 +1,44 @@
+// Calls of extension functions, of interface methods on interface values, and of methods on a
+// lambda's element or after `?.` know their parameters: defaults are filled in, named
+// arguments work, text is converted and references are lent.
+
+interface Logger {
+    fun log(msg: &str)
+    fun level(): i32 = 1
+    fun tagged(msg: &str, tag: &str = "info"): String = "[$tag] $msg"
+}
+
+class Console(var lines: [String] = []) : Logger {
+    override fun log(msg: &str) = lines.push(msg.to_string())
+}
+
+class Item(price: f64) {
+    fun discounted(pct: f64 = 10.0): f64 = price * (100.0 - pct) / 100.0
+}
+
+class User(name: String, age: u32)
+
+fun i32.add_to(n: i32 = 10): i32 = this + n
+fun i32.label(prefix: String): String = "$prefix$this"
+fun User.older_than(o: &User): bool = age > o.age
+
+fun report(l: &mut Logger, x: i32): String {
+    l.log("x=$x")
+    l.tagged("done")
+}
+
+fun main() {
+    println("${5.add_to()} ${5.add_to(n = 2)} ${5.label("#")}")
+    val a = User("ada", 36)
+    val b = User("bob", 20)
+    println("${a.name} ${a.older_than(b)}")
+
+    var c = Console()
+    println(report(c, 3))
+    println("${c.lines} ${c.level()}")
+
+    val items: [Item] = [Item(2.0), Item(4.0)]
+    println(items.map { it.discounted() })
+    println(items.first()?.discounted())
+    println(items.iter().map { x -> x.discounted(50.0) }.sum::<f64>())
+}

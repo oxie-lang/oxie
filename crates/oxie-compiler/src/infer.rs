@@ -73,6 +73,11 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn type_owner(&self, t: &Type) -> Option<Vec<String>> {
         match t {
             Type::Ref { inner, .. } => self.type_owner(inner),
+            // through a box (a recursive field), as Rust's method calls go
+            Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "Box" && !self.k.is_user_type("Box") => match segs[0].generics.as_deref() {
+                Some([GenericArg::Type(inner)]) => self.type_owner(inner),
+                _ => None,
+            },
             Type::Path { segs, .. } if segs.len() == 1 => Some(vec![segs[0].name.clone()]),
             Type::Path { segs, .. } if segs.last().is_some_and(|s| self.k.same_named.contains(&s.name)) => Some(segs.iter().map(|s| s.name.clone()).collect()),
             _ => None,
