@@ -828,7 +828,7 @@ impl<'a> Lowerer<'a> {
                 );
             }
         }
-        self.e.w("#[allow(unused_imports)]\nuse crate::__oxie::prelude::*;");
+        self.e.w(&format!("#[allow(unused_imports)]\nuse crate::__oxie::{}::*;", self.prelude_name()));
         self.e.nl();
         self.ext_imports();
         let uses_at = self.e.line();
@@ -1062,6 +1062,17 @@ impl<'a> Lowerer<'a> {
     /// whole project, but not exported from a library unless marked `pub`. Members of a `pub`
     /// class or enum default to `pub`. Keeping items unexported lets the optimizer inline them
     /// exactly like private Rust functions.
+    /// The support module's prelude for this module: without Oxie's `Context` where the module
+    /// imports another (`anyhow.Context`), whose `context` would be ambiguous beside it.
+    fn prelude_name(&self) -> &'static str {
+        let own = self.k.imports.get(&(self.module.clone(), "Context".to_string())).is_some_and(|p| p.first().is_some_and(|f| f != "crate" && !self.k.modules.contains(f)));
+        if own {
+            "prelude_own_context"
+        } else {
+            "prelude"
+        }
+    }
+
     pub(crate) fn vis(&self, v: &Vis, ctx: ItemCtx) -> String {
         self.vis_of(v, ctx, None)
     }
@@ -1875,9 +1886,9 @@ impl<'a> Lowerer<'a> {
                 self.e.w(&format!("{}mod {} {{", vis, name));
                 self.e.indent();
                 self.e.nl();
-                self.e.w("#[allow(unused_imports)]\nuse crate::__oxie::prelude::*;");
-                self.e.nl();
                 self.module.push(name.clone());
+                self.e.w(&format!("#[allow(unused_imports)]\nuse crate::__oxie::{}::*;", self.prelude_name()));
+                self.e.nl();
                 self.inline_depth += 1;
                 // its `test` blocks are tested inside it, where its own names are in scope
                 let outer_tests = std::mem::take(&mut self.tests);
@@ -3863,6 +3874,15 @@ impl<'a> Lowerer<'a> {
                         .map(|m| m.recv)
                         .unwrap_or_else(|| self.recv_of(&owner, f));
                     self.pending_trait_ret = imp.trait_.as_ref().and_then(|tr| trait_ret(tr, tinfo.as_ref(), &f.name));
+                    // `-> Self::Out` with `type Out = ()` here: the method gives nothing, so its
+                    // last expression is a statement
+                    let unit_assoc = |t: &Type| match t {
+                        Type::Path { segs, .. } if segs.len() == 2 && segs[0].name == "Self" => imp.members.iter().any(|m| matches!(&m.kind, ItemKind::TypeAlias { name, ty, .. } if *name == segs[1].name && ty.is_unit())),
+                        _ => false,
+                    };
+                    if self.pending_trait_ret.as_ref().is_some_and(unit_assoc) {
+                        self.pending_trait_ret = None;
+                    }
                     self.method(m, f, recv, imp.trait_.is_none(), None);
                 }
                 _ => self.assoc_item(m, imp.trait_.is_none()),

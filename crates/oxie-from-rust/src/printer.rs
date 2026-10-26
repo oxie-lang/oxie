@@ -504,6 +504,39 @@ impl<'a> Printer<'a> {
                 _ => {}
             }
         }
+        // a class body can't hold two methods of one name (`name` of `A` and of `B`): the trait
+        // implementations that would bring a second one stay `impl` blocks
+        let fn_names = |i: usize| -> Vec<String> {
+            match &items[i] {
+                syn::Item::Impl(imp) => imp.items.iter().filter_map(|x| if let syn::ImplItem::Fn(f) = x { Some(f.sig.ident.to_string()) } else { None }).collect(),
+                _ => Vec::new(),
+            }
+        };
+        for members in plan.members.values_mut() {
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut apart = HashSet::new();
+            // the class's own methods first, then each trait's in order
+            let order: Vec<(usize, bool)> = members
+                .iter()
+                .filter_map(|m| match m {
+                    Member::Inherent(i) => Some((*i, false)),
+                    Member::Trait(i, _) => Some((*i, true)),
+                    _ => None,
+                })
+                .collect();
+            for (i, is_trait) in order.iter().filter(|(_, t)| !t).chain(order.iter().filter(|(_, t)| *t)) {
+                let names = fn_names(*i);
+                if *is_trait && names.iter().any(|n| seen.contains(n)) {
+                    apart.insert(*i);
+                } else {
+                    seen.extend(names);
+                }
+            }
+            members.retain(|m| !matches!(m, Member::Trait(i, _) if apart.contains(i)));
+            for i in apart {
+                plan.merged.remove(&i);
+            }
+        }
         plan
     }
 

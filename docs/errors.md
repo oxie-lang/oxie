@@ -210,4 +210,6 @@ message names the `.oxi` line (`panicked at src/main.oxi:12:5`).
 
 Everything interoperates with the Rust ecosystem: `thiserror` and `anyhow` work as usual
 (`@derive(thiserror::Error)`, `throws anyhow::Error`), and an Oxie `error enum` is a normal Rust
-error type that Rust code can match on and convert.
+error type that Rust code can match on and convert. With `anyhow`, import `anyhow.Context` for
+its `context` and `with_context`: a file that imports a `Context` uses that one, while Oxie's
+own makes an `AnyError`, which `anyhow::Error` can't take.

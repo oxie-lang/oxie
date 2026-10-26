@@ -28,6 +28,17 @@ pub mod prelude {
     /*nostd*/ pub use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
 }
 
+/// The prelude without `Context`, for a file that imports another one (`anyhow.Context`), whose
+/// `context` would clash with it.
+pub mod prelude_own_context {
+    pub use super::AnyError;
+    pub use super::IterOps as _;
+    pub use super::ListOps as _;
+    pub use super::SharedCell as _;
+    /*std*/ pub use super::SharedLock as _;
+    /*nostd*/ pub use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+}
+
 /// Access to the object behind a `shared class` handle: `handle.0.read()` / `.write()`.
 /// A conflicting use (a method of the object reaching the same object again while it changes
 /// it) panics with an explanation, at the line that made it.

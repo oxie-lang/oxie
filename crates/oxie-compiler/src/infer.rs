@@ -394,12 +394,21 @@ impl<'a> Lowerer<'a> {
                 if binds(cond) {
                     return other().or_else(|| self.infer_block(then));
                 }
+                // an untyped number (`if (n == 0) 1 else n`) takes the other branch's type
+                if block_tail(then).is_some_and(untyped_number) {
+                    if let Some(t) = other() {
+                        return Some(t);
+                    }
+                }
                 match self.infer_block(then) {
                     Some(Type::Option(_)) => other().filter(|t| !matches!(t, Type::Option(_))).or_else(|| self.infer_block(then)),
                     t => t.or_else(other),
                 }
             }
-            When { arms, .. } => arms.iter().find_map(|a| if a.body.diverges() { None } else { self.infer_type(&a.body) }),
+            When { arms, .. } => {
+                let typed = |a: &&WhenArm| !a.body.diverges() && !untyped_number(&a.body);
+                arms.iter().filter(typed).find_map(|a| self.infer_type(&a.body)).or_else(|| arms.iter().find_map(|a| if a.body.diverges() { None } else { self.infer_type(&a.body) }))
+            }
             Block(b) => self.infer_block(b),
             StructLit { path, generics: None, .. } => {
                 let n = path.last()?;
@@ -574,5 +583,23 @@ pub(crate) fn subst(t: &Type, names: &[String], args: &[Type]) -> Type {
         Type::Tuple(v) => Type::Tuple(v.iter().map(|x| subst(x, names, args)).collect()),
         Type::Fn { params, ret } => Type::Fn { params: params.iter().map(|x| subst(x, names, args)).collect(), ret: Box::new(subst(ret, names, args)) },
         t => t.clone(),
+    }
+}
+
+/// A number literal without a suffix (`1`, `2.5`), whose type the code around it decides.
+fn untyped_number(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(s) => int_suffix(s).is_none(),
+        ExprKind::Float(s) => !s.ends_with("f32") && !s.ends_with("f64"),
+        ExprKind::Unary(UnOp::Neg, x) | ExprKind::Paren(x) => untyped_number(x),
+        ExprKind::Block(b) => block_tail(b).is_some_and(untyped_number),
+        _ => false,
+    }
+}
+
+fn block_tail(b: &Block) -> Option<&Expr> {
+    match b.stmts.last()? {
+        Stmt::Expr { expr, semi: false } => Some(expr),
+        _ => None,
     }
 }

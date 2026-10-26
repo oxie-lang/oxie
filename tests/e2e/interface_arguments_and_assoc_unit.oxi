@@ -1,0 +1,56 @@
+// An interface value from a list or a reference field is passed to an `&Shape` parameter as it
+// is; a method whose interface result is an associated type set to `()` gives nothing; a
+// trailing lambda with typed parameters follows a class name; a result type is the branch's
+// that has one, not an untyped number's.
+
+interface Shape {
+    fun area(): f64
+    fun grow(&mut self)
+}
+
+class Sq(var s: f64) : Shape {
+    override fun grow() {
+        s += 1.0
+    }
+    override fun area(): f64 = s * s
+}
+
+class View<'a>(shape: &'a Shape)
+
+interface Visitor {
+    type Out
+    fun visit(&mut self): Self::Out
+}
+
+class Collect(var items: [i32])
+
+impl Visitor for Collect {
+    type Out = ()
+    fun visit() {
+        self.items.push(1)
+        self.items.pop()
+    }
+}
+
+class Step(run: (i32) -> i32)
+
+fun area_of(s: &Shape): f64 = s.area()
+
+fun pick(n: u64) = if (n == 0) 1 else n
+
+fun main() {
+    var shapes: [Shape] = [Sq(1.0), Sq(2.0)]
+    shapes[0].grow()
+    val total = shapes.map { area_of(it) }.sum()
+    val big = shapes.iter().filter { area_of(it) > 2.0 }.count()
+    println("$total $big")
+    val sq = Sq(3.0)
+    val v = View(&sq)
+    println(area_of(v.shape))
+    var c = Collect(vec[5])
+    c.visit()
+    println(c.items)
+    val s = Step { n: i32 -> n * 2 }
+    println((s.run)(21))
+    println("${pick(0)} ${pick(7)}")
+}

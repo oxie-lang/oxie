@@ -1391,7 +1391,7 @@ impl<'a> Lowerer<'a> {
             if pos == TyPos::Param && inner.single_name().is_some_and(|n| self.is_trait_name(n)) {
                 if let Some(stars) = self.box_derefs(e) {
                     self.e.w(if *mutable { "&mut " } else { "&" });
-                    self.e.w(stars);
+                    self.e.w(&stars);
                     self.expr(e, P_UNARY);
                     return;
                 }
@@ -1700,7 +1700,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
             _ if mutable => self.is_place(e),
-            ExprKind::Field { .. } | ExprKind::Index(..) => true,
+            // a field or element that already is a reference (`v.shape: &Shape`) is passed as it is
+            ExprKind::Field { .. } | ExprKind::Index(..) => !matches!(self.infer_type(e), Some(Type::Ref { .. } | Type::Ptr { .. })),
             ExprKind::Call { .. }
             | ExprKind::StructLit { .. }
             | ExprKind::VecLit(_)
@@ -4171,20 +4172,27 @@ impl<'a> Lowerer<'a> {
 
     /// The `*`s that reach the interface value inside a box, for an argument of an `&Shape`
     /// parameter: Rust doesn't turn `&Box<dyn Shape>` into `&dyn Shape` by itself.
-    fn box_derefs(&self, e: &Expr) -> Option<&'static str> {
+    fn box_derefs(&self, e: &Expr) -> Option<String> {
         match &e.kind {
             ExprKind::Paren(x) => self.box_derefs(x),
             _ if e.ident().is_some() => {
                 let n = e.ident().unwrap();
                 match self.local(n) {
-                    Some(Some(Type::Ref { inner, .. })) => self.boxed_iface(inner).filter(|_| inner.single_name() == Some("Box")).map(|_| "**"),
-                    Some(Some(t)) => self.boxed_iface(t).filter(|_| t.single_name() == Some("Box")).map(|_| "*"),
+                    // through the references to the box (`&&Box<dyn Shape>` in `iter().filter { }`)
+                    Some(Some(t)) => {
+                        let (mut t, mut stars) = (t, 1);
+                        while let Type::Ref { inner, .. } = t {
+                            t = inner;
+                            stars += 1;
+                        }
+                        self.boxed_iface(t).filter(|_| t.single_name() == Some("Box")).map(|_| "*".repeat(stars))
+                    }
                     Some(None) => None,
                     // a field of this class: an interface value is boxed there
-                    None => self.class.as_ref().and_then(|c| c.fields.get(n)).and_then(|t| self.boxed_iface(t)).map(|_| "*"),
+                    None => self.class.as_ref().and_then(|c| c.fields.get(n)).and_then(|t| self.boxed_iface(t)).map(|_| "*".to_string()),
                 }
             }
-            ExprKind::Index(..) | ExprKind::Field { .. } => self.infer_type(e).and_then(|t| self.boxed_iface(&t)).map(|_| "*"),
+            ExprKind::Index(..) | ExprKind::Field { .. } => self.infer_type(e).and_then(|t| self.boxed_iface(&t)).map(|_| "*".to_string()),
             _ => None,
         }
     }
@@ -5649,6 +5657,8 @@ impl<'a> Lowerer<'a> {
             _ => (recv, false),
         };
         let elem = self.elem_type(coll).filter(|t| *t != Type::Infer)?;
+        // a list of interface values holds boxes
+        let elem = self.boxed_iface(&elem).unwrap_or(elem);
         let by_ref = |t: Type| Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) };
         // an iterator's predicates get a reference to its item, itself a reference
         let pred = through_iter && matches!(name, "filter" | "find" | "take_while" | "skip_while" | "inspect");

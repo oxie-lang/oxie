@@ -3465,8 +3465,8 @@ impl<'a> Parser<'a> {
             self.no_struct = saved;
             return Ok(Expr::new(ExprKind::VecLit(elems), sp.to(self.prev_span())));
         }
-        // struct literal
-        if self.is_punct("{") && !self.no_struct && (self.type_like(segs.last().unwrap()) || self.is_capitalized_struct_lit(segs.last().unwrap())) && self.looks_like_struct_lit() {
+        // struct literal (not a trailing lambda with typed parameters: `Step { n: i32 -> n * 2 }`)
+        if self.is_punct("{") && !self.no_struct && (self.type_like(segs.last().unwrap()) || self.is_capitalized_struct_lit(segs.last().unwrap())) && self.looks_like_struct_lit() && !self.braces_have_arrow() {
             return self.struct_lit(segs, generics, sp);
         }
         Ok(Expr::new(ExprKind::Path { segs, generics, global }, sp))
