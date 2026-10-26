@@ -1,12 +1,16 @@
 // `Some("text")` arms on a `String?` Oxie couldn't type: the fix is `.as_deref()`, not `.as_str()`.
-import std.collections.HashMap
+
+rust {
+    fn lookup() -> Option<String> {
+        None
+    }
+}
 
 fun main() {
-    val m: HashMap<i32, String> = HashMap()
-    when (m.get(&1).cloned()) {
+    when (lookup()) {
         Some("hi") -> println("hi")
-        // error: 7: compare the text inside with `.as_deref()`
-        // error: 7: fix: use `.as_deref()`: `when (m.get(&1).cloned().as_deref()) {`
+        // error: 11: compare the text inside with `.as_deref()`
+        // error: 11: fix: use `.as_deref()`: `when (lookup().as_deref()) {`
         else -> println("?")
     }
 }

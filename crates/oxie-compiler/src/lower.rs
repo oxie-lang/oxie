@@ -335,6 +335,9 @@ pub struct Lowerer<'a> {
     /// The type of the next lambda's first parameter, known from the collection operation it
     /// goes to (`&Item` in `items.map { it.price }`): calls on it are resolved, nothing written.
     pub(crate) next_lambda_elem: Option<Type>,
+    /// The result form of the next lambda, known from the operation it goes to (`filter_map`'s
+    /// gives an optional, so `if (c) x else null` is `Some(x)` or `None`).
+    pub(crate) next_lambda_ret: Option<Type>,
     /// The error type of each `try` block (by label) whose body ends in `return` or `throw`, so
     /// never gives `Ok::<_, E>`: the errors that leave it name the type instead.
     pub(crate) try_errs: HashMap<String, String>,
@@ -642,6 +645,7 @@ impl<'a> Lowerer<'a> {
             writes: Vec::new(),
             text_reassigned: Vec::new(),
             next_lambda_elem: None,
+            next_lambda_ret: None,
             try_errs: HashMap::new(),
             lambda_params: Vec::new(),
             untyped_params: Vec::new(),

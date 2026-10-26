@@ -108,6 +108,19 @@ impl<'a> Lowerer<'a> {
     /// `through_try`: the expression is the operand of `?`, so a throwing call yields its value type.
     fn infer(&self, e: &Expr, through_try: bool) -> Option<Type> {
         use ExprKind::*;
+        // `r?.m()` on a `Result` is Rust's `?` then the call
+        if let MethodCall { recv, name, generics, args, safe: true } = &e.kind {
+            if self.is_result_expr(recv) {
+                let tried = Expr::new(Try(recv.clone()), recv.span);
+                return self.infer(&Expr::new(MethodCall { recv: Box::new(tried), name: name.clone(), generics: generics.clone(), args: args.clone(), safe: false }, e.span), through_try);
+            }
+        }
+        if let Field { recv, name, safe: true } = &e.kind {
+            if self.is_result_expr(recv) {
+                let tried = Expr::new(Try(recv.clone()), recv.span);
+                return self.infer(&Expr::new(Field { recv: Box::new(tried), name: name.clone(), safe: false }, e.span), through_try);
+            }
+        }
         // `a?.b` and the links after it in the chain: optional
         if let MethodCall { recv, safe, .. } | Field { recv, safe, .. } = &e.kind {
             if (*safe || crate::lower_expr::has_safe_link(recv)) && !self.is_result_expr(recv) {
@@ -255,7 +268,7 @@ impl<'a> Lowerer<'a> {
                 [GenericArg::Type(t)] if !has_infer(t) => Some(t.clone()),
                 _ => None,
             },
-            MethodCall { recv, name, .. } => {
+            MethodCall { recv, name, args, .. } => {
                 if matches!(recv.kind, SelfValue) {
                     if let Some(m) = self.class.as_ref().and_then(|c| c.methods.get(name)) {
                         return if m.throws && !through_try { None } else { m.ret.clone() };
@@ -320,6 +333,8 @@ impl<'a> Lowerer<'a> {
                     "group_by" | "associate_by" => Some(generic("HashMap", 2)),
                     "to_list" => Some(generic("Vec", 1)),
                     "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "join" | "concat" | "replace" | "trim_string" => Some(ty("String")),
+                    // a part of text
+                    "trim" | "trim_start" | "trim_end" | "as_str" if args.is_empty() => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(ty("str")) }),
                     "is_empty" | "contains" | "contains_key" | "starts_with" | "ends_with" | "is_some" | "is_none" | "is_ok" | "is_err" | "any" | "all"
                     | "is_alphabetic" | "is_numeric" | "is_alphanumeric" | "is_whitespace" | "is_digit" | "eq" | "ne" | "is_nan" => Some(ty("bool")),
                     // Oxie's list operations on a list give a new list; those that keep the
@@ -339,6 +354,38 @@ impl<'a> Lowerer<'a> {
                             Type::Ref { inner, .. } => Some(Type::Option(inner)),
                             _ => None,
                         },
+                        _ => None,
+                    },
+                    // `m.entry(k).or_default()`: the map's value, to change
+                    "or_default" | "or_insert" | "or_insert_with" => match &recv.kind {
+                        MethodCall { recv: map, name: entry, .. } if entry == "entry" => map_value(&self.infer_type(map)?).map(|v| Type::Ref { lifetime: None, mutable: true, inner: Box::new(v) }),
+                        _ => None,
+                    },
+                    // a map's value, if there is one
+                    "get" | "get_mut" | "remove" if map_value(&self.infer_type(recv)?).is_some() => {
+                        let v = map_value(&self.infer_type(recv)?)?;
+                        Some(Type::Option(Box::new(match name.as_str() {
+                            "remove" => v,
+                            "get_mut" => Type::Ref { lifetime: None, mutable: true, inner: Box::new(v) },
+                            _ => Type::Ref { lifetime: None, mutable: false, inner: Box::new(v) },
+                        })))
+                    }
+                    // the element taken off a list
+                    "pop" | "pop_front" | "pop_back" if args.is_empty() => {
+                        let t = self.infer_type(recv)?;
+                        let elem = list_elem(&t).or_else(|| match &t {
+                            Type::Path { segs, .. } if segs.len() == 1 && segs[0].name == "VecDeque" => match segs[0].generics.as_deref() {
+                                Some([GenericArg::Type(inner)]) => Some(inner.clone()),
+                                _ => None,
+                            },
+                            _ => None,
+                        })?;
+                        Some(Type::Option(Box::new(elem)))
+                    }
+                    // what an iterator gives, if anything
+                    "next" | "next_back" | "max" | "min" | "last" | "nth" if args.is_empty() || name == "nth" => match self.infer_type(recv) {
+                        Some(t) if list_elem(&t).is_some() && name == "last" => list_elem(&t).filter(|t| *t != Type::Infer).map(|t| Type::Option(Box::new(Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) }))),
+                        _ if is_iterator_chain(recv) => Some(Type::Option(Box::new(Type::Infer))),
                         _ => None,
                     },
                     // an element of a list, if there is one
@@ -601,5 +648,28 @@ fn block_tail(b: &Block) -> Option<&Expr> {
     match b.stmts.last()? {
         Stmt::Expr { expr, semi: false } => Some(expr),
         _ => None,
+    }
+}
+
+/// The value type of a map type (`V` of `HashMap<K, V>`), through references.
+fn map_value(t: &Type) -> Option<Type> {
+    match t {
+        Type::Ref { inner, .. } => map_value(inner),
+        Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "HashMap" | "BTreeMap") => match segs[0].generics.as_deref() {
+            Some([_, GenericArg::Type(v)]) if *v != Type::Infer => Some(v.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Is `e` an iterator made by a method that starts one (`xs.iter()`, `s.chars()`), maybe
+/// followed by adapters (`.map { }`, `.filter { }`)?
+fn is_iterator_chain(e: &Expr) -> bool {
+    const STARTS: &[&str] = &["iter", "iter_mut", "into_iter", "chars", "char_indices", "bytes", "lines", "split", "split_whitespace", "keys", "values", "drain"];
+    const ADAPTERS: &[&str] = &["map", "filter", "filter_map", "rev", "skip", "take", "step_by", "enumerate", "zip", "cloned", "copied", "flat_map", "take_while", "skip_while", "peekable", "chain"];
+    match &e.kind {
+        ExprKind::MethodCall { recv, name, .. } => STARTS.contains(&name.as_str()) || ADAPTERS.contains(&name.as_str()) && is_iterator_chain(recv),
+        _ => false,
     }
 }

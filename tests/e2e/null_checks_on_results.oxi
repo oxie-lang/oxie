@@ -1,0 +1,36 @@
+// A null check unwraps a variable that holds what a std method gives, if anything: a map's
+// `get` and `remove`, `pop` and `pop_front`, an iterator's `next`, `max` and `position`.
+
+import std.collections.VecDeque
+
+fun first_char(s: &str): char {
+    val c = s.chars().next()
+    if (c == null) return '-'
+    c
+}
+
+fun biggest(xs: &[i32]): i32 {
+    val m = xs.iter().max()
+    if (m == null) return 0
+    *m
+}
+
+fun main() {
+    var stack = vec[1, 2, 3]
+    val top = stack.pop()
+    if (top == null) return
+    println(top + 1)
+    var m: [String: i32] = ["a": 1]
+    val old = m.remove("a")
+    if (old == null) return
+    println(old * 10)
+    var q: VecDeque<i32> = VecDeque.new()
+    q.push_back(4)
+    val f = q.pop_front()
+    if (f == null) return
+    println(f)
+    println("${first_char("hi")} ${first_char("")} ${biggest(&[3, 9, 2])} ${biggest(&[])}")
+    val pos = [5, 6, 7].iter().position { it == 6 }
+    if (pos == null) return
+    println(pos)
+}

@@ -1479,7 +1479,8 @@ impl<'a> Lowerer<'a> {
                     self.expr(x, P_UNARY);
                 }
             }
-            Type::Ref { mutable, inner, .. } if pos == TyPos::Param && (self.auto_borrow(e, *mutable) || !mutable && self.lend_to_slice(e, inner)) => {
+            // also a constructor's (`View(nums)` with `class View(data: &[i32])`)
+            Type::Ref { mutable, inner, .. } if matches!(pos, TyPos::Param | TyPos::Field) && (self.auto_borrow(e, *mutable) || !mutable && self.lend_to_slice(e, inner)) => {
                 self.e.mark(e.span);
                 self.e.w(if *mutable { "&mut " } else { "&" });
                 if !(is_collection_lit(e) && self.borrowed_lit(e, inner)) {
@@ -1761,6 +1762,14 @@ impl<'a> Lowerer<'a> {
     /// Values that can never be an `Option` themselves (safe to wrap in `Some`).
     /// Is this a call to an Oxie function or method declared with `throws`?
     pub(crate) fn is_throwing_call(&self, e: &Expr) -> bool {
+        // `connect()?.read()` on a `Result` is Rust's `?` then the call
+        if let ExprKind::MethodCall { recv, name, generics, args, safe: true } = &e.kind {
+            if self.is_result_expr(recv) {
+                let tried = Expr::new(ExprKind::Try(recv.clone()), recv.span);
+                let call = Expr::new(ExprKind::MethodCall { recv: Box::new(tried), name: name.clone(), generics: generics.clone(), args: args.clone(), safe: false }, e.span);
+                return self.is_throwing_call(&call);
+            }
+        }
         match &e.kind {
             ExprKind::Call { callee, .. } => {
                 if let Some(n) = callee.ident() {
@@ -2857,6 +2866,8 @@ impl<'a> Lowerer<'a> {
                             Some(Type::Ref { mutable, .. }) => self.elem_type(iter).map(|t| Type::Ref { lifetime: None, mutable, inner: Box::new(t) }),
                             _ => self.elem_type(iter),
                         },
+                        // the pieces of `s.split(',')`
+                        MethodCall { .. } => self.elem_type(iter),
                         _ => None,
                     },
                     _ => None,
@@ -3088,8 +3099,9 @@ impl<'a> Lowerer<'a> {
             ("HashMap" | "BTreeMap", "insert", [k, v], 2) => vec![Some(k.clone()), Some(v.clone())],
             _ => return None,
         };
+        let str_ref = |me: &Self, e: &Expr| me.infer_type(e).is_some_and(|t| matches!(&t, Type::Ref { mutable: false, inner, .. } if inner.single_name() == Some("str")));
         let converts = |me: &Self, a: &Arg, t: &Option<Type>| {
-            t.as_ref().is_some_and(|t| t.is_string()) && (matches!(a.value.kind, ExprKind::Str(_) | ExprKind::RawStr(_)) || me.is_str_var(&a.value))
+            t.as_ref().is_some_and(|t| t.is_string()) && (matches!(a.value.kind, ExprKind::Str(_) | ExprKind::RawStr(_)) || me.is_str_var(&a.value) || str_ref(me, &a.value))
         };
         args.iter().zip(&types).any(|(a, t)| converts(self, a, t)).then_some(types)
     }
@@ -3614,21 +3626,7 @@ impl<'a> Lowerer<'a> {
                     self.e.nl();
                     // `else if (x == null) return`: a `let Some(x) = x else` here would end with
                     // the arm, after moving `x`
-                    let names: Vec<String> = match &el.kind {
-                        ExprKind::If { cond, .. } => match &**cond {
-                            Cond::Expr(c) => {
-                                let mut checks = Vec::new();
-                                or_operands(c, &mut checks);
-                                checks.iter().filter_map(|p| self.null_check(p, BinOp::Eq).map(str::to_string)).collect()
-                            }
-                            _ => Vec::new(),
-                        },
-                        _ => Vec::new(),
-                    };
-                    let before = self.unused_after_check.len();
-                    self.unused_after_check.extend(names);
-                    let bl = self.stmt_expr(el);
-                    self.unused_after_check.truncate(before);
+                    let bl = self.stmt_without_narrowing(el);
                     if !bl {
                         self.e.w(";");
                     }
@@ -4170,6 +4168,12 @@ impl<'a> Lowerer<'a> {
     }
 
     fn elem_type(&self, coll: &Expr) -> Option<Type> {
+        // the pieces of text (`s.split(',')`, `s.lines()`) are `&str`
+        if let ExprKind::MethodCall { name, .. } = &strip_paren(coll).kind {
+            if matches!(name.as_str(), "split" | "split_whitespace" | "split_terminator" | "rsplit" | "splitn" | "rsplitn" | "lines" | "split_ascii_whitespace") {
+                return Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(Type::simple("str")) });
+            }
+        }
         let mut t = self.infer_type(coll)?;
         while let Type::Ref { inner, .. } = t {
             t = *inner;
@@ -4730,11 +4734,12 @@ impl<'a> Lowerer<'a> {
         // a lambda can't be annotated with the callee's type parameters: Rust infers those
         // (`|it: _|`), and a stored one is still boxed
         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
-            if matches!(pos, TyPos::Field) && matches!(p.ty, Type::Fn { .. }) {
-                let ty = crate::infer::subst(&p.ty, &p.generics, &[]);
-                self.coerce(a, &ty, pos);
-            } else {
-                self.expr(a, P_LOWEST);
+            let ty = crate::infer::subst(&p.ty, &p.generics, &[]);
+            match &ty {
+                Type::Fn { .. } if matches!(pos, TyPos::Field) => self.coerce(a, &ty, pos),
+                // the result's form is still known (`T?`: a `null` branch makes the other `Some`)
+                Type::Fn { ret, .. } if !matches!(**ret, Type::Infer) => self.lambda(a, None, Some(ret)),
+                _ => self.expr(a, P_LOWEST),
             }
         } else if p.lent && !is_collection_lit(a) && self.lends_value(a) {
             // its callers passed the owned value before Oxie lent the parameter
@@ -5666,9 +5671,14 @@ impl<'a> Lowerer<'a> {
         }
         if args.len() == 1 && matches!(args[0].value.kind, ExprKind::Lambda { .. }) {
             self.next_lambda_elem = elem;
+            // these take a lambda that gives an optional
+            if matches!(name, "filter_map" | "find_map" | "map_while") {
+                self.next_lambda_ret = Some(Type::Option(Box::new(Type::Infer)));
+            }
         }
         self.arg_list(&args, None, TyPos::Param, span);
         self.next_lambda_elem = None;
+        self.next_lambda_ret = None;
     }
 
     /// The element a collection operation passes its lambda (`&Item` in `items.map { .. }` with
@@ -7109,6 +7119,27 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `stmt_expr` of `if (x == null) return` (or any statement) where the code after it isn't
+    /// in the same block, so a `let Some(x) = x else` there would narrow nothing.
+    fn stmt_without_narrowing(&mut self, e: &Expr) -> bool {
+        let names: Vec<String> = match &e.kind {
+            ExprKind::If { cond, .. } => match &**cond {
+                Cond::Expr(c) => {
+                    let mut checks = Vec::new();
+                    or_operands(c, &mut checks);
+                    checks.iter().filter_map(|p| self.null_check(p, BinOp::Eq).map(str::to_string)).collect()
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let before = self.unused_after_check.len();
+        self.unused_after_check.extend(names);
+        let bl = self.stmt_expr(e);
+        self.unused_after_check.truncate(before);
+        bl
+    }
+
     fn arm_body(&mut self, body: &Expr, mode: Option<&Target>) {
         match (&body.kind, mode) {
             (ExprKind::Block(b), Some(t)) => self.block_value(b, t),
@@ -7127,7 +7158,8 @@ impl<'a> Lowerer<'a> {
                     self.expr(body, P_LOWEST);
                     self.e.w(",");
                 } else if body.is_block_like() {
-                    self.stmt_expr(body);
+                    // an arm is an expression, where `let Some(x) = x else` can't go
+                    self.stmt_without_narrowing(body);
                     self.e.w(",");
                 } else {
                     self.e.w("{");
@@ -7322,6 +7354,8 @@ impl<'a> Lowerer<'a> {
         // predicates of `filter`, `find`, ... receive references to the elements
         let ref_params = std::mem::take(&mut self.next_lambda_refs);
         let elem = std::mem::take(&mut self.next_lambda_elem);
+        let ret_hint = std::mem::take(&mut self.next_lambda_ret);
+        let ret_ty = ret_ty.or(ret_hint.as_ref());
         self.push_scope();
         let depth = self.scopes.len() - 1;
         let mut ps = Vec::new();

@@ -1,0 +1,24 @@
+// A constructor's reference parameters are lent like a function's, and pieces of text (from
+// `split`, `trim`) put into a list or set of `String`s are converted.
+
+import std.collections.HashSet
+
+class View(data: &[i32]) {
+    fun sum(): i32 = data.iter().sum()
+}
+
+class Named(name: &str) {
+    fun shout(): String = name.to_uppercase()
+}
+
+fun main() {
+    val nums = vec[1, 2, 3]
+    println("${View(nums).sum()} ${nums.len()}")
+    val s = String.from("ann")
+    println("${Named(s).shout()} $s")
+    var names: [String] = []
+    for (part in " a, b ,c ".split(',')) names.push(part.trim())
+    var seen: HashSet<String> = HashSet()
+    for (w in "x y x".split(' ')) seen.insert(w)
+    println("$names ${seen.len()}")
+}
