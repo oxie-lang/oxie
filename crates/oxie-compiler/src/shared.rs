@@ -312,7 +312,8 @@ impl<'a> Lowerer<'a> {
                 return false; // the getter already returns a copy of the handle
             }
         }
-        self.is_place(e) && !matches!(e.kind, ExprKind::SelfValue) && self.shared_class_of(e).is_some()
+        let optional_handle = || matches!(self.infer_type(e), Some(Type::Option(t)) if t.single_name().and_then(|n| self.class_info(n)).is_some_and(|c| c.is_shared));
+        self.is_place(e) && !matches!(e.kind, ExprKind::SelfValue) && (self.shared_class_of(e).is_some() || optional_handle())
     }
 
     /// Emits a shared handle place with `.clone()` (a reference-count increment).

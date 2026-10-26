@@ -84,6 +84,8 @@ pub struct ClassInfo {
     pub consts: Vec<String>,
     /// Has `init` blocks.
     pub has_init: bool,
+    /// The names of its type parameters, in order.
+    pub type_names: Vec<String>,
 }
 
 impl ClassInfo {
@@ -159,6 +161,8 @@ pub struct FunInfo {
     /// The result type names a type parameter (`fun with<T>(..): T`), so a call's type depends
     /// on its arguments.
     pub generic_ret: bool,
+    /// The names of its type parameters.
+    pub type_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1432,14 +1436,15 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                     let names: Vec<&str> = text.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
                     f.generics.params.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if names.contains(&name.as_str())))
                 });
-                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), raw: false, generic_ret };
+                let type_names = type_param_names(&f.generics);
+                let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: f.ret.clone(), raw: false, generic_ret, type_names };
                 if let Some(key) = fun_key_for(k, &f.name, module) {
                     k.funs.insert(key, info);
                 }
             }
             ItemKind::Raw(text) => {
                 for name in raw_fn_names(text) {
-                    let info = FunInfo { module: module.to_vec(), params: Vec::new(), throws: false, ret: None, raw: true, generic_ret: false };
+                    let info = FunInfo { module: module.to_vec(), params: Vec::new(), throws: false, ret: None, raw: true, generic_ret: false, type_names: Vec::new() };
                     if let Some(key) = fun_key_for(k, &name, module) {
                         k.funs.insert(key, info);
                     }
@@ -1500,6 +1505,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         interfaces: t.supertypes.iter().filter_map(|s| s.last_name().map(String::from)).collect(),
                         consts: member_consts(&t.members),
                         has_init: t.init.is_some(),
+                        type_names: type_param_names(&t.generics),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, true) {
                         k.classes.insert(key, info);
@@ -1610,6 +1616,11 @@ fn collect_default_reads(k: &mut Crate, items: &[Item]) {
             _ => {}
         }
     }
+}
+
+/// The names of the type parameters among `g` (`T` and `U` of `<'a, T, U, const N: usize>`).
+pub fn type_param_names(g: &Generics) -> Vec<String> {
+    g.params.iter().filter_map(|p| if let GenericParam::Type { name, .. } = p { Some(name.clone()) } else { None }).collect()
 }
 
 fn member_consts(members: &[Item]) -> Vec<String> {
@@ -1838,20 +1849,10 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
             let m = &methods[i];
             let fields: HashSet<String> = k.classes.get(&m.owner).map(|c| c.fields.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
             let recvs = callable_recvs(&m.owner, &decided, &supers);
-            // the methods callable on fields whose type is an Oxie class (`c.add(1)` for `var c: Counter`);
-            // a shared class's are called through its handle, which `&self` reaches
-            let field_recvs: HashMap<String, HashMap<String, Recv>> = k
-                .classes
-                .get(&m.owner)
-                .into_iter()
-                .flat_map(|c| c.fields.iter().map(move |f| (c, f)))
-                .filter_map(|(c, f)| {
-                    let Type::Path { segs, .. } = &f.ty else { return None };
-                    let path: Vec<String> = segs.iter().map(|s| s.name.clone()).collect();
-                    let key = k.type_key_at(&path, &c.module).filter(|key| k.classes.get(key).is_some_and(|c| !c.is_shared))?;
-                    Some((f.name.clone(), callable_recvs(&key, &decided, &supers)))
-                })
-                .collect();
+            // the methods callable on what the fields reach whose type is an Oxie class or interface
+            // (`c.add(1)` for `var c: Counter`, `inner.counter.add(1)`, `list[0].add(1)`); a shared
+            // class's are called through its handle, which `&self` reaches
+            let field_recvs = reach_recvs(k, &m.owner, &decided, &supers);
             // the methods callable on the elements of fields that are collections of Oxie classes
             // or interfaces (`for (c in counters) c.bump()`)
             let elem_recvs: HashMap<String, HashMap<String, Recv>> = k
@@ -1890,7 +1891,8 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                     here
                 })
             };
-            let facts = analyze_fun_with(m.fun, &fields, &recvs, mut_params, &field_recvs, &elem_recvs);
+            let interior: HashSet<String> = k.classes.get(&m.owner).into_iter().flat_map(|c| c.fields.iter()).filter(|f| interior_mutable_field(f)).map(|f| f.name.clone()).collect();
+            let facts = analyze_fun_with(m.fun, &fields, &recvs, mut_params, &field_recvs, &elem_recvs, &interior);
             let name = m.owner.rsplit("::").next().unwrap_or(&m.owner);
             let returns_self = m.fun.ret.as_ref().is_some_and(|t| t.single_name() == Some("Self") || t.single_name() == Some(name));
             // implementations of an interface method that is `&mut self` stay `&mut self`
@@ -1956,6 +1958,94 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
     }
 }
 
+/// The methods callable on what the fields of `owner` reach, keyed by the path there (`inner`,
+/// `inner.counter`, `list[]` for an element, `pair.0`, `maybe!!` for an optional's value), for
+/// the Oxie classes and interfaces among their types. A property without a type that is made with
+/// a constructor (`var stats = Stats()`) has the class's.
+fn reach_recvs(k: &Crate, owner: &str, decided: &HashMap<(String, String), Recv>, supers: &HashMap<String, Vec<String>>) -> HashMap<String, HashMap<String, Recv>> {
+    fn reach(k: &Crate, module: &[String], path: String, t: &Type, decided: &HashMap<(String, String), Recv>, supers: &HashMap<String, Vec<String>>, out: &mut HashMap<String, HashMap<String, Recv>>, depth: usize) {
+        if depth > 3 || out.contains_key(&path) {
+            return;
+        }
+        match t {
+            Type::Option(inner) => reach(k, module, format!("{}!!", path), inner, decided, supers, out, depth + 1),
+            Type::Array(inner, _) | Type::Slice(inner) => reach(k, module, format!("{}[]", path), inner, decided, supers, out, depth + 1),
+            Type::Ref { inner, mutable: true, .. } => reach(k, module, path, inner, decided, supers, out, depth + 1),
+            Type::Tuple(ts) => {
+                for (i, t) in ts.iter().enumerate() {
+                    reach(k, module, format!("{}.{}", path, i), t, decided, supers, out, depth + 1);
+                }
+            }
+            Type::Path { segs, .. } => {
+                let last = segs.last().map(|s| s.name.as_str()).unwrap_or_default();
+                let args: Vec<&Type> = segs.last().and_then(|s| s.generics.as_deref()).unwrap_or_default().iter().filter_map(|g| if let GenericArg::Type(t) = g { Some(t) } else { None }).collect();
+                match (last, args.as_slice()) {
+                    ("Box", [inner]) => reach(k, module, path, inner, decided, supers, out, depth + 1),
+                    ("Option", [inner]) => reach(k, module, format!("{}!!", path), inner, decided, supers, out, depth + 1),
+                    ("Vec" | "VecDeque" | "LinkedList", [inner]) | ("HashMap" | "BTreeMap", [_, inner]) => reach(k, module, format!("{}[]", path), inner, decided, supers, out, depth + 1),
+                    _ => {
+                        let names: Vec<String> = segs.iter().map(|s| s.name.clone()).collect();
+                        if let Some(key) = k.type_key_at(&names, module).filter(|key| k.classes.get(key).is_some_and(|c| !c.is_shared)) {
+                            out.insert(path.clone(), callable_recvs(&key, decided, supers));
+                            let c = &k.classes[&key];
+                            for f in &c.fields {
+                                reach(k, &c.module, format!("{}.{}", path, f.name), &field_type(f), decided, supers, out, depth + 1);
+                            }
+                        } else if names.len() == 1 && k.traits.contains_key(&names[0]) {
+                            out.insert(path, callable_recvs(&names[0], decided, supers));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    /// A field's type; for one without a type that a constructor makes, the class.
+    fn field_type(f: &FieldInfo) -> Type {
+        match (&f.ty, &f.default) {
+            (Type::Infer, Some(Expr { kind: ExprKind::Call { callee, .. }, .. })) => match &callee.kind {
+                ExprKind::Path { segs, generics: None, .. } if segs.last().is_some_and(|n| is_type_like(n)) => Type::simple(segs.last().unwrap()),
+                _ => Type::Infer,
+            },
+            (t, _) => t.clone(),
+        }
+    }
+    let mut out = HashMap::new();
+    if let Some(c) = k.classes.get(owner) {
+        for f in &c.fields {
+            reach(k, &c.module, f.name.clone(), &field_type(f), decided, supers, &mut out, 0);
+        }
+    }
+    out
+}
+
+/// A field that changes through `&self`: of a type like `Cell`, `RefCell`, `Mutex` or an atomic,
+/// also behind `Rc`, `Arc` or `Box`, declared or made by its `new` (`val hits = Cell.new(0)`).
+fn interior_mutable_field(f: &FieldInfo) -> bool {
+    fn interior(t: &Type) -> bool {
+        let Type::Path { segs, .. } = t else { return false };
+        let Some(last) = segs.last() else { return false };
+        match last.name.as_str() {
+            "Rc" | "Arc" | "Box" => matches!(last.generics.as_deref(), Some([GenericArg::Type(inner)]) if interior(inner)),
+            n => is_interior_name(n),
+        }
+    }
+    fn is_interior_name(n: &str) -> bool {
+        matches!(n, "Cell" | "RefCell" | "Mutex" | "RwLock" | "OnceCell" | "OnceLock" | "LazyCell" | "LazyLock" | "UnsafeCell") || n.starts_with("Atomic")
+    }
+    match (&f.ty, &f.default) {
+        (Type::Infer, Some(d)) => {
+            let made_by = |segs: &[String]| segs.len() >= 2 && segs[segs.len() - 1] == "new" && is_interior_name(&segs[segs.len() - 2]);
+            match &d.kind {
+                ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Path { segs, .. } if made_by(segs)),
+                ExprKind::MethodCall { recv, name, .. } => name == "new" && recv.ident().is_some_and(is_interior_name),
+                _ => false,
+            }
+        }
+        (t, _) => interior(t),
+    }
+}
+
 /// The receivers of the methods `owner` can call on `this`: its own, then those of the interfaces
 /// it implements or extends (default methods are callable without `this.`).
 fn callable_recvs(owner: &str, decided: &HashMap<(String, String), Recv>, supers: &HashMap<String, Vec<String>>) -> HashMap<String, Recv> {
@@ -1974,7 +2064,7 @@ fn callable_recvs(owner: &str, decided: &HashMap<(String, String), Recv>, supers
 }
 
 pub fn analyze_fun(f: &FunDecl, fields: &HashSet<String>, methods: &HashMap<String, Recv>) -> BodyFacts {
-    analyze_fun_with(f, fields, methods, &HashMap::new(), &HashMap::new(), &HashMap::new())
+    analyze_fun_with(f, fields, methods, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashSet::new())
 }
 
 /// Like `analyze_fun`, also knowing which parameters of callable functions are `&mut`
@@ -1988,8 +2078,9 @@ pub fn analyze_fun_with(
     mut_params: &HashMap<String, Vec<usize>>,
     field_recvs: &HashMap<String, HashMap<String, Recv>>,
     elem_recvs: &HashMap<String, HashMap<String, Recv>>,
+    interior: &HashSet<String>,
 ) -> BodyFacts {
-    let mut w = Walker { fields, methods, mut_params, field_recvs, elem_recvs, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
+    let mut w = Walker { fields, methods, mut_params, field_recvs, elem_recvs, interior, scopes: vec![HashSet::new()], facts: BodyFacts::default() };
     for p in &f.params {
         w.bind(&p.pat);
     }
@@ -2003,7 +2094,7 @@ pub fn analyze_fun_with(
 
 pub fn analyze_block(b: &Block, fields: &HashSet<String>, methods: &HashMap<String, Recv>) -> BodyFacts {
     let none = HashMap::new();
-    let mut w = Walker { fields, methods, mut_params: &none, field_recvs: &HashMap::new(), elem_recvs: &HashMap::new(), scopes: vec![HashSet::new()], facts: BodyFacts::default() };
+    let mut w = Walker { fields, methods, mut_params: &none, field_recvs: &HashMap::new(), elem_recvs: &HashMap::new(), interior: &HashSet::new(), scopes: vec![HashSet::new()], facts: BodyFacts::default() };
     w.block(b);
     w.facts
 }
@@ -2017,6 +2108,8 @@ struct Walker<'a> {
     field_recvs: &'a HashMap<String, HashMap<String, Recv>>,
     /// Field name -> the receivers of the methods of the Oxie class or interface of its elements.
     elem_recvs: &'a HashMap<String, HashMap<String, Recv>>,
+    /// Fields that change through `&self` (`Cell`, `RefCell`, `Mutex`, ...).
+    interior: &'a HashSet<String>,
     scopes: Vec<HashSet<String>>,
     facts: BodyFacts,
 }
@@ -2078,11 +2171,27 @@ impl<'a> Walker<'a> {
     }
 
     /// The field `c` or `this.c` names, if it isn't shadowed by a local.
-    fn direct_field<'e>(&self, e: &'e Expr) -> Option<&'e str> {
+    /// The field of `this` that `e` reads from (`log` in `log.borrow_mut()`).
+    fn root_field<'e>(&self, e: &'e Expr) -> Option<&'e str> {
         match &e.kind {
             ExprKind::Path { .. } => e.ident().filter(|n| !self.is_local(n) && self.fields.contains(*n)),
             ExprKind::Field { recv, name, .. } if matches!(recv.kind, ExprKind::SelfValue) => Some(name),
-            ExprKind::Paren(x) => self.direct_field(x),
+            ExprKind::Field { recv, .. } | ExprKind::Index(recv, _) | ExprKind::Unwrap(recv) | ExprKind::Paren(recv) | ExprKind::MethodCall { recv, .. } => self.root_field(recv),
+            _ => None,
+        }
+    }
+
+    /// The path from `this` to what `e` reads, as `reach_recvs` keys it (`inner.counter`,
+    /// `list[]`, `maybe!!`), when it starts at a field.
+    fn reach_key(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Path { .. } => e.ident().filter(|n| !self.is_local(n) && self.fields.contains(*n)).map(String::from),
+            ExprKind::Field { recv, name, .. } if matches!(recv.kind, ExprKind::SelfValue) => Some(name.clone()),
+            ExprKind::Field { recv, name, safe: false } => Some(format!("{}.{}", self.reach_key(recv)?, name)),
+            ExprKind::Index(recv, _) => Some(format!("{}[]", self.reach_key(recv)?)),
+            ExprKind::Unwrap(recv) => Some(format!("{}!!", self.reach_key(recv)?)),
+            ExprKind::MethodCall { recv, name, args, safe: false, .. } if args.is_empty() && matches!(name.as_str(), "unwrap" | "as_mut") => Some(format!("{}!!", self.reach_key(recv)?)),
+            ExprKind::Paren(x) => self.reach_key(x),
             _ => None,
         }
     }
@@ -2207,16 +2316,19 @@ impl<'a> Walker<'a> {
                     self.expr(&a.value);
                 }
             }
-            MethodCall { recv, name, args, .. } => {
+            MethodCall { recv, name, args, safe, .. } => {
+                // `maybe?.inc()` calls the method on the optional's value
+                let key = self.reach_key(recv).map(|k| if *safe { format!("{}!!", k) } else { k });
                 if matches!(recv.kind, SelfValue) {
                     if let Some(Recv::RefMut) = self.methods.get(name) {
                         self.mutates(e.span, format!("it calls `{}()`, which changes `this`", name));
                     }
                     self.mut_args(name, args);
-                } else if let Some(field) = self.direct_field(recv).filter(|f| self.field_recvs.get(*f).and_then(|r| r.get(name)) == Some(&Recv::RefMut)) {
+                } else if key.is_some_and(|p| self.field_recvs.get(&p).and_then(|r| r.get(name)) == Some(&Recv::RefMut)) {
+                    let field = self.self_field(recv);
                     let why = format!("it calls `{}.{}()`, which changes `{}`", field, name, field);
                     self.mutates(e.span, why);
-                } else if MUTATING_METHODS.contains(&name.as_str()) && self.rooted_in_self(recv) {
+                } else if MUTATING_METHODS.contains(&name.as_str()) && self.rooted_in_self(recv) && !self.root_field(recv).is_some_and(|f| self.interior.contains(f)) {
                     let why = format!("it calls `{}.{}()`", self.self_field(recv), name);
                     self.mutates(e.span, why);
                 }
@@ -2280,11 +2392,15 @@ impl<'a> Walker<'a> {
                     }
                     .and_then(|f| self.elem_recvs.get(f));
                     let changes = |m: &str| elems.and_then(|r| r.get(m)) == Some(&Recv::RefMut);
-                    if let Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } = pat {
-                        if crate::visit::writes_through(body, name, &changes) {
-                            let why = format!("it changes the elements of `{}`", self.self_field(iter));
-                            self.mutates(iter.span, why);
-                        }
+                    // `x`, `var x` or a tuple of names (`(k, v)` of a map's entries)
+                    let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, sub: None, .. } | Pat::Wild);
+                    let mut names = Vec::new();
+                    if plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)) {
+                        pat.bindings(&mut names);
+                    }
+                    if names.iter().any(|n| crate::visit::writes_through(body, n, &changes)) {
+                        let why = format!("it changes the elements of `{}`", self.self_field(iter));
+                        self.mutates(iter.span, why);
                     }
                 }
                 self.expr(iter);

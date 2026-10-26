@@ -299,7 +299,7 @@ fn link_is_safe(l: &Expr) -> bool {
     matches!(l.kind, ExprKind::Field { safe: true, .. } | ExprKind::MethodCall { safe: true, .. })
 }
 
-fn has_safe_link(e: &Expr) -> bool {
+pub(crate) fn has_safe_link(e: &Expr) -> bool {
     let (_, links) = chain_links(e);
     links.iter().any(|l| link_is_safe(l))
 }
@@ -1336,8 +1336,9 @@ impl<'a> Lowerer<'a> {
             return;
         }
         if !matches!(ty, Type::Ref { .. }) && self.is_shared_place(e) {
+            let optional = matches!(self.infer_type(e), Some(Type::Option(_)));
             match ty {
-                Type::Option(_) => {
+                Type::Option(_) if !optional => {
                     self.e.w("Some(");
                     self.shared_copy(e);
                     self.e.w(")");
@@ -1751,6 +1752,55 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// The result type of the Oxie function or method `e` calls (inside, `None` when the
+    /// declaration leaves it to the body); `None` when `e` calls none.
+    fn declared_ret(&self, e: &Expr) -> Option<Option<Type>> {
+        match &e.kind {
+            ExprKind::Call { callee, .. } => {
+                if let Some(n) = callee.ident() {
+                    if self.is_local(n) {
+                        return None;
+                    }
+                    if let Some(m) = self.class.as_ref().and_then(|c| c.methods.get(n)) {
+                        return Some(m.ret.clone());
+                    }
+                    return self.fun_info(n).map(|f| f.ret.clone());
+                }
+                match &callee.kind {
+                    ExprKind::Path { segs, .. } if segs.len() > 1 => {
+                        let (name, owner) = segs.split_last()?;
+                        let method = self.class_at(owner).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(owner).and_then(|en| en.methods.get(name)));
+                        match method {
+                            Some(m) => Some(m.ret.clone()),
+                            None => self.fun_at(segs).map(|f| f.ret.clone()),
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            ExprKind::MethodCall { recv, name, safe: false, .. } => {
+                if matches!(recv.kind, ExprKind::SelfValue) {
+                    return self.class.as_ref().and_then(|c| c.methods.get(name)).map(|m| m.ret.clone());
+                }
+                if let Some((mut p, _)) = self.as_path(recv) {
+                    if p.last().is_some_and(|o| o == "Self") {
+                        p = vec![self.class.as_ref().map(|c| c.name.clone()).unwrap_or_default()];
+                    }
+                    if let Some(m) = self.class_at(&p).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(&p).and_then(|en| en.methods.get(name))) {
+                        return Some(m.ret.clone());
+                    }
+                    p.push(name.clone());
+                    return self.fun_at(&p).map(|f| f.ret.clone());
+                }
+                let owner = self.infer_type(recv).and_then(|t| self.type_owner(&t));
+                let own = owner.and_then(|o| self.class_at(&o).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(&o).and_then(|en| en.methods.get(name))).cloned());
+                own.or_else(|| self.iface_method(recv, name)).map(|m| m.ret)
+            }
+            ExprKind::Paren(x) => self.declared_ret(x),
+            _ => None,
+        }
+    }
+
     /// A call of Rust code that returns a `Result` (`fs.write(path, text)`, `out.flush()`): as a
     /// statement in a throwing function it passes its error on, as a throwing Oxie function does,
     /// instead of dropping it. Methods of Oxie classes say themselves whether they throw, and an
@@ -1873,7 +1923,7 @@ impl<'a> Lowerer<'a> {
         Some(out)
     }
 
-    fn iface_method(&self, recv: &Expr, name: &str) -> Option<crate::sema::MethodInfo> {
+    pub(crate) fn iface_method(&self, recv: &Expr, name: &str) -> Option<crate::sema::MethodInfo> {
         let mut t = self.infer_type(recv)?;
         loop {
             t = match &t {
@@ -3531,7 +3581,12 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("let {} = ", p));
                 }
                 self.let_subject(pat, expr, *implicit_some);
-                self.bind_pat(pat, None);
+                // `if (val n = head)` with `head: Node?`: `n` is a `Node`
+                let value = match (*implicit_some, self.infer_type(expr)) {
+                    (true, Some(Type::Option(t))) => Some(*t).filter(|t| *t != Type::Infer),
+                    _ => None,
+                };
+                self.bind_pat(pat, value);
                 let field_by_ref = self.match_field_by_ref(expr, &[pat]);
                 for (name, t) in self.case_bindings(pat, Some(expr), field_by_ref) {
                     self.bind_name(&name, Some(t));
@@ -3598,6 +3653,9 @@ impl<'a> Lowerer<'a> {
             self.e.w("&");
             self.expr(expr, P_UNARY);
             self.e.decide(expr.span, "&", "the pattern takes a value out of the field, which a method can only borrow", None);
+        } else if implicit_some && self.is_shared_place(expr) {
+            // a shared object's handle is copied, so the variable stays usable
+            self.shared_copy(expr);
         } else {
             self.expr(expr, P_LOWEST + 1);
         }
@@ -5458,9 +5516,18 @@ impl<'a> Lowerer<'a> {
         let (base, links) = chain_links(e);
         let (prefix, segs) = Self::split_segments(&links);
         let base_expr_borrowed = prefix.last().map_or_else(|| self.yields_borrowed_option(base), |l| self.yields_borrowed_option(l));
+        // `stack?.pop()` changes the value: borrowed mutably
+        let inner = match self.infer_type(base) {
+            Some(Type::Option(t)) if prefix.is_empty() => Some(*t),
+            _ => None,
+        };
+        let changes = segs.first().and_then(|s| s.first()).is_some_and(|l| match &l.kind {
+            ExprKind::MethodCall { name, .. } => crate::sema::MUTATING_METHODS.contains(&name.as_str()) || self.changing_methods(inner.as_ref()).contains(name),
+            _ => false,
+        });
         let place = self.emit_chain_base(base, &prefix);
         if place {
-            self.e.w(".as_ref()");
+            self.e.w(if changes { ".as_mut()" } else { ".as_ref()" });
         }
         let mut borrowed = place || base_expr_borrowed;
         let n = segs.len();
@@ -5741,7 +5808,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn is_result_expr(&self, e: &Expr) -> bool {
+    pub(crate) fn is_result_expr(&self, e: &Expr) -> bool {
         const RESULT_METHODS: &[&str] = &[
             "parse", "read_to_string", "read_line", "read_to_end", "read_exact", "write_all", "flush", "open", "create", "read_dir",
             "metadata", "canonicalize", "from_str", "from_utf8", "try_into", "try_from", "lock", "send", "recv", "accept", "connect",
@@ -5756,11 +5823,15 @@ impl<'a> Lowerer<'a> {
         if self.is_throwing_call(e) {
             return true;
         }
+        // a call of an Oxie function or method says itself what it gives, whatever std's methods
+        // of its name give (`fun open(name: &str): &Conn?`)
+        if let Some(ret) = self.declared_ret(e) {
+            return ret.or_else(|| self.infer_type(e)).is_some_and(|t| t.last_name() == Some("Result"));
+        }
         match &e.kind {
             ExprKind::Await(_) => true,
             ExprKind::MethodCall { recv, name, .. } => {
-                if let Some((p, _)) = self.as_path(recv) {
-                    let _ = p;
+                if self.as_path(recv).is_some() {
                     return RESULT_FNS.contains(&name.as_str()) || RESULT_METHODS.contains(&name.as_str());
                 }
                 RESULT_METHODS.contains(&name.as_str())
@@ -5780,7 +5851,9 @@ impl<'a> Lowerer<'a> {
             "min_by_key", "max_by", "min_by", "position", "rposition", "nth", "last_mut", "first_mut", "parent", "file_name",
             "extension", "file_stem", "checked_add", "checked_sub", "checked_mul", "checked_div", "strip_prefix", "strip_suffix",
             "split_once", "rsplit_once", "to_str", "ok", "err", "pop_front", "pop_back", "front", "back", "get_key_value", "char_indices_next",
-            "and_then", "filter", "or_else", "remove_entry", "find_char", "chars_next",
+            "and_then", "filter", "or_else", "remove_entry", "find_char", "chars_next", "rfind", "front_mut", "back_mut", "upgrade",
+            "split_first", "split_last", "checked_rem", "checked_pow", "checked_neg", "pop_first", "pop_last", "first_key_value",
+            "last_key_value", "reduce", "nth_back",
         ];
         if has_safe_link(e) || self.place_is_option(e) {
             return true;
@@ -5835,9 +5908,13 @@ impl<'a> Lowerer<'a> {
             any.unwrap_or_else(|| {
                 matches!(
                     name,
-                    "next" | "next_back" | "first" | "last" | "get" | "get_mut" | "pop" | "pop_front" | "pop_back" | "find" | "find_map"
-                        | "position" | "nth" | "peek" | "strip_prefix" | "strip_suffix" | "split_once" | "rsplit_once" | "ok" | "err"
-                        | "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "to_digit"
+                    "next" | "next_back" | "nth_back" | "first" | "last" | "get" | "get_mut" | "pop" | "pop_front" | "pop_back" | "find"
+                        | "rfind" | "find_map" | "position" | "rposition" | "nth" | "peek" | "strip_prefix" | "strip_suffix" | "split_once"
+                        | "rsplit_once" | "ok" | "err" | "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem"
+                        | "checked_pow" | "checked_neg" | "to_digit" | "max" | "min" | "max_by_key" | "min_by_key" | "max_by" | "min_by"
+                        | "reduce" | "first_mut" | "last_mut" | "front" | "back" | "front_mut" | "back_mut" | "split_first"
+                        | "split_last" | "pop_first" | "pop_last" | "first_key_value" | "last_key_value" | "get_key_value"
+                        | "remove_entry" | "parent" | "file_name" | "extension" | "file_stem" | "to_str" | "upgrade"
                 )
             })
         };
@@ -5845,12 +5922,13 @@ impl<'a> Lowerer<'a> {
         for (_i, l) in seg.iter().enumerate() {
             match &l.kind {
                 ExprKind::Field { name, .. } => opt = field_opt(name),
-                ExprKind::MethodCall { name, .. } => {
+                ExprKind::MethodCall { name, args, .. } => {
                     if opt {
                         // these keep an Option an Option
                         opt = matches!(name.as_str(), "clone" | "as_ref" | "as_deref" | "cloned" | "copied" | "as_mut" | "take" | "filter" | "or" | "xor");
                     } else {
-                        opt = method_opt(name);
+                        // `a.max(b)` of numbers is a number; an iterator's `max()` an Option
+                        opt = method_opt(name) && !(matches!(name.as_str(), "max" | "min") && !args.is_empty());
                     }
                 }
                 _ => opt = false,
@@ -5880,9 +5958,31 @@ impl<'a> Lowerer<'a> {
             None => self.fresh("v"),
         };
         let place = self.is_place(base) && prefix.iter().all(|l| matches!(l.kind, ExprKind::Field { .. } | ExprKind::Index(..)));
+        // `c?.inc()` with an `inc` that changes its object, `xs?.push(2)`, and `?.let` lambdas
+        // that change the value, borrow it mutably
+        let inner = match self.infer_type(base) {
+            Some(Type::Option(t)) if prefix.is_empty() => Some(*t),
+            _ => None,
+        };
+        let changing = self.changing_methods(inner.as_ref());
+        let changes = |m: &str| changing.contains(m) || crate::sema::MUTATING_METHODS.contains(&m);
+        let mutates = match (&seg[..], &lam) {
+            (_, Some(l)) => match &l.kind {
+                ExprKind::Lambda { body, .. } => {
+                    let b = match &body.kind {
+                        ExprKind::Block(b) => b.clone(),
+                        _ => Block { stmts: vec![Stmt::Expr { expr: (**body).clone(), semi: false }], span: body.span },
+                    };
+                    visit::writes_through(&b, &var, &changes)
+                }
+                _ => false,
+            },
+            ([Expr { kind: ExprKind::MethodCall { name, .. }, .. }, ..], None) => changes(name),
+            _ => false,
+        };
         self.e.w(&format!("if let Some({}) = ", var));
         if place {
-            self.e.w("&");
+            self.e.w(if mutates { "&mut " } else { "&" });
         }
         self.emit_chain_base(base, &prefix);
         self.e.w(" {");

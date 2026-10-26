@@ -1,0 +1,29 @@
+// `?.` calls that change the value borrow it mutably: a method that changes its object, a
+// list's `push` and `pop`, in statements, values and on fields.
+
+class Counter(var n: i32 = 0) {
+    fun inc() { n += 1 }
+}
+
+class Owner(var maybe: Counter? = Counter()) {
+    fun bump() {
+        maybe?.inc()
+    }
+}
+
+fun main() {
+    var o = Owner()
+    o.bump()
+    o.bump()
+    println("${o.maybe?.n}")
+    var c: Counter? = Counter()
+    c?.inc()
+    var xs: [i32]? = vec[1]
+    xs?.push(2)
+    println("${c?.n} ${xs:?}")
+    var stack: [i32]? = vec[1, 2, 3]
+    val top = stack?.pop()
+    var none: [i32]? = null
+    val nothing = none?.pop()
+    println("$top ${stack:?} $nothing")
+}

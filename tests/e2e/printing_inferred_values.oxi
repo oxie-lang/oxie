@@ -1,0 +1,55 @@
+// Templates and `println` print lists with `{:?}` and optionals as their value or `null`, also
+// when the value comes from a `?.` chain, an `if`/`when` with a `null` branch, a generic
+// function, a method of a generic class, an interface method or a list operation.
+
+interface Store {
+    fun find(key: &str): i32?
+}
+
+class Pairs(items: [(String, i32)]) : Store {
+    override fun find(key: &str): i32? = items.iter().find { it.0 == key }.map { it.1 }
+}
+
+class Stack<T> {
+    var items: [T] = []
+    fun push(x: T) = items.push(x)
+    fun pop(): T? = items.pop()
+}
+
+data class User(name: String)
+
+fun <T: Clone> twice(x: T): [T] = vec[x.clone(), x]
+
+fun <T> keep(x: T, ok: bool): T? = if (ok) x else null
+
+fun main() {
+    val u: User? = User("ann")
+    val n = u?.name?.len()
+    val word: String? = "Hello big world"
+    val upper = word?.to_uppercase()?.len()
+    println("$n $upper")
+
+    val level = 3
+    val a = if (level > 2) 30 else null
+    val b = when (level) {
+        3 -> 300
+        else -> null
+    }
+    val c = when {
+        level > 5 -> "big"
+        else -> null
+    }
+    println("$a $b $c")
+
+    println(twice(1))
+    println("${keep(5, true)} ${keep(5, false)}")
+    var s = Stack<String>()
+    s.push("x".to_string())
+    println("got ${s.pop()}, then ${s.pop()}")
+
+    val store: &Store = &Pairs(vec[("k".to_string(), 1)])
+    println("${store.find("k")} ${store.find("z")}")
+
+    val xs: [i32] = [3, 1, 2]
+    println("${xs.index_of_first { it == 2 }} ${xs.find_last { it > 1 }} ${xs.distinct_by { it % 2 }} ${xs.partition { it > 1 }}")
+}

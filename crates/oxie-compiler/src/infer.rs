@@ -94,7 +94,7 @@ impl<'a> Lowerer<'a> {
     /// constructed class (`a.Counter(1)`).
     fn path_call_type(&self, path: &[String], through_try: bool) -> Option<Type> {
         if let Some(f) = self.fun_at(path) {
-            return if f.throws && !through_try || f.generic_ret { None } else { f.ret.clone() };
+            return if f.throws && !through_try { None } else { generic_result(f) };
         }
         let c = self.k.classes.get(&self.k.type_key_at(path, &self.module)?)?;
         (!c.has_generics).then(|| self.named_ty(path))
@@ -103,8 +103,19 @@ impl<'a> Lowerer<'a> {
     /// `through_try`: the expression is the operand of `?`, so a throwing call yields its value type.
     fn infer(&self, e: &Expr, through_try: bool) -> Option<Type> {
         use ExprKind::*;
+        // `a?.b` and the links after it in the chain: optional
+        if let MethodCall { recv, safe, .. } | Field { recv, safe, .. } = &e.kind {
+            if (*safe || crate::lower_expr::has_safe_link(recv)) && !self.is_result_expr(recv) {
+                return Some(self.safe_link_type(e, through_try));
+            }
+        }
         match &e.kind {
             Try(x) => self.infer(x, true),
+            // `x!!`: the value
+            Unwrap(x) => match self.infer_type(x)? {
+                Type::Option(t) => Some(*t).filter(|t| *t != Type::Infer),
+                _ => None,
+            },
             Int(s) => Some(ty(int_suffix(s).unwrap_or("i32"))),
             Float(s) => Some(ty(if s.ends_with("f32") { "f32" } else { "f64" })),
             Bool(_) | Is { .. } | In { .. } => Some(ty("bool")),
@@ -208,7 +219,7 @@ impl<'a> Lowerer<'a> {
                     return if c.has_generics { None } else { Some(ty(n)) };
                 }
                 if let Some(f) = self.fun_info(n) {
-                    return if f.throws && !through_try || f.generic_ret { None } else { f.ret.clone() };
+                    return if f.throws && !through_try { None } else { generic_result(f) };
                 }
                 if let Some(en) = self.k.variant_enum_in(n, Some(&self.module)) {
                     return Some(ty(&en.name));
@@ -276,9 +287,11 @@ impl<'a> Lowerer<'a> {
                                 t => Some(t),
                             }
                         };
-                        if let Some(c) = self.class_at(&owner).filter(|c| !c.has_generics) {
+                        if let Some(c) = self.class_at(&owner) {
                             if let Some(m) = c.methods.get(name) {
-                                return own(m);
+                                // a generic class's type parameters are the receiver's arguments
+                                let args = type_args(&recv_ty);
+                                return own(m).map(|t| subst(&t, &c.type_names, &args)).filter(|t| *t != Type::Infer);
                             }
                         }
                         if let Some(en) = self.enum_at(&owner).filter(|e| !e.has_type_params) {
@@ -287,6 +300,10 @@ impl<'a> Lowerer<'a> {
                             }
                         }
                     }
+                }
+                // an interface's method, on an interface value or a type parameter bound by one
+                if let Some(m) = self.iface_method(recv, name) {
+                    return if m.throws && !through_try { None } else { m.ret.clone().filter(|t| t.single_name() != Some("Self")) };
                 }
                 match name.as_str() {
                     "len" | "count" | "capacity" => Some(ty("usize")),
@@ -297,9 +314,14 @@ impl<'a> Lowerer<'a> {
                     | "is_alphabetic" | "is_numeric" | "is_alphanumeric" | "is_whitespace" | "is_digit" | "eq" | "ne" | "is_nan" => Some(ty("bool")),
                     // Oxie's list operations on a list give a new list; those that keep the
                     // elements keep their type
-                    "filter" | "filter_not" | "sorted" | "sorted_descending" | "sorted_by" | "sorted_by_descending" | "reversed" | "distinct" => {
+                    "filter" | "filter_not" | "sorted" | "sorted_descending" | "sorted_by" | "sorted_by_descending" | "reversed" | "distinct" | "distinct_by" => {
                         self.infer_type(recv).as_ref().and_then(list_elem).map(|t| with_args("Vec", Some(&vec![GenericArg::Type(t)]), 1))
                     }
+                    "partition" => self.infer_type(recv).as_ref().and_then(list_elem).map(|t| {
+                        let list = with_args("Vec", Some(&vec![GenericArg::Type(t)]), 1);
+                        Type::Tuple(vec![list.clone(), list])
+                    }),
+                    "index_of_first" | "index_of_last" | "position" | "rposition" => Some(Type::Option(Box::new(ty("usize")))),
                     "map" | "map_indexed" | "flat_map" | "filter_map" | "chunked" => self.infer_type(recv).as_ref().and_then(list_elem).map(|_| generic("Vec", 1)),
                     // `opt.cloned()` of an optional reference: an optional value
                     "cloned" | "copied" => match self.infer_type(recv)? {
@@ -310,7 +332,7 @@ impl<'a> Lowerer<'a> {
                         _ => None,
                     },
                     // an element of a list, if there is one
-                    "find" | "first" | "last" | "get" | "max_by_key" | "min_by_key" => self
+                    "find" | "find_last" | "first" | "last" | "get" | "max_by_key" | "min_by_key" => self
                         .infer_type(recv)
                         .as_ref()
                         .and_then(list_elem)
@@ -347,6 +369,12 @@ impl<'a> Lowerer<'a> {
                 let tn = t.single_name()?.to_string();
                 let c = self.class_info(&tn)?;
                 c.fields.iter().find(|f| f.name == *name).map(|f| f.ty.clone())
+            }
+            // a `null` branch makes the value optional (`if (c) 30 else null`)
+            If { then, else_: Some(other), .. } if is_null_tail(other) => Some(optional(self.infer_block(then))),
+            If { then, else_, .. } if block_null_tail(then) => Some(optional(else_.as_ref().and_then(|e| self.infer_type(e)))),
+            When { arms, .. } if arms.iter().any(|a| is_null_tail(&a.body)) => {
+                Some(optional(arms.iter().find_map(|a| if a.body.diverges() || is_null_tail(&a.body) { None } else { self.infer_type(&a.body) })))
             }
             // the branch that `if (val x = opt)` or `if (x != null)` unwraps `x` in reads it as the
             // value, which this doesn't see: there the other branch tells the type
@@ -409,6 +437,38 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// The type of `a?.b` (or of a link after it, `a?.b.c`): the link on the value inside `a`,
+    /// optional; `T?` when the link's own type isn't known.
+    fn safe_link_type(&self, e: &Expr, through_try: bool) -> Type {
+        let (ExprKind::MethodCall { recv, .. } | ExprKind::Field { recv, .. }) = &e.kind else { return Type::Option(Box::new(Type::Infer)) };
+        let inner = match self.infer_type(recv) {
+            Some(Type::Option(t)) => Some(*t),
+            Some(Type::Ref { inner, .. }) => match *inner {
+                Type::Option(t) => Some(Type::Ref { lifetime: None, mutable: false, inner: t }),
+                _ => None,
+            },
+            _ => None,
+        };
+        // a field read through a borrowed value is borrowed (`&v.name`), as the lowering does
+        let borrowed = matches!(e.kind, ExprKind::Field { .. }) && (self.is_place(recv) || matches!(inner, Some(Type::Ref { .. })));
+        let link = inner.filter(|t| *t != Type::Infer).and_then(|inner| {
+            // the same link, plain, on a stand-in of the value's type
+            let stand_in = Expr::new(ExprKind::Cast(Box::new(Expr::new(ExprKind::Path { segs: vec!["__oxie_x".into()], generics: None, global: false }, e.span)), inner), e.span);
+            let mut plain = e.clone();
+            if let ExprKind::MethodCall { recv, safe, .. } | ExprKind::Field { recv, safe, .. } = &mut plain.kind {
+                **recv = stand_in;
+                *safe = false;
+            }
+            self.infer(&plain, through_try)
+        });
+        let by_ref = |t: Type| Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) };
+        match link {
+            Some(Type::Option(t)) if borrowed => Type::Option(Box::new(by_ref(*t))),
+            Some(t) if borrowed => Type::Option(Box::new(by_ref(t))),
+            t => optional(t),
+        }
+    }
+
     fn infer_block(&self, b: &Block) -> Option<Type> {
         match b.stmts.last()? {
             Stmt::Expr { expr, semi: false } => self.infer_type(expr),
@@ -436,5 +496,72 @@ impl<'a> Lowerer<'a> {
             self.pop_scope();
         }
         f2
+    }
+}
+
+/// `T?` of a type that may already be optional, or of one not known (`_?`).
+fn optional(t: Option<Type>) -> Type {
+    match t {
+        Some(t @ Type::Option(_)) => t,
+        Some(t) => Type::Option(Box::new(t)),
+        None => Type::Option(Box::new(Type::Infer)),
+    }
+}
+
+/// `null`, or a block ending in it.
+fn is_null_tail(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Null => true,
+        ExprKind::Block(b) => block_null_tail(b),
+        ExprKind::Paren(x) => is_null_tail(x),
+        _ => false,
+    }
+}
+
+fn block_null_tail(b: &Block) -> bool {
+    matches!(b.stmts.last(), Some(Stmt::Expr { expr, semi: false }) if is_null_tail(expr))
+}
+
+/// A function's result type, with its own type parameters left to Rust (`_`): their arguments
+/// aren't known here, though the result's form is (`[T]` is a list). `None` when only that is
+/// left.
+fn generic_result(f: &crate::sema::FunInfo) -> Option<Type> {
+    f.ret.as_ref().map(|t| subst(t, &f.type_names, &[])).filter(|t| *t != Type::Infer)
+}
+
+/// The type arguments of a type (`[String]` of `Stack<String>`), through references.
+fn type_args(t: &Type) -> Vec<Type> {
+    match t {
+        Type::Ref { inner, .. } => type_args(inner),
+        Type::Path { segs, .. } => segs.last().and_then(|s| s.generics.as_deref()).unwrap_or_default().iter().filter_map(|g| if let GenericArg::Type(t) = g { Some(t.clone()) } else { None }).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `t` with the type parameters `names` replaced by `args`, or by `_` past the end of `args`.
+fn subst(t: &Type, names: &[String], args: &[Type]) -> Type {
+    match t {
+        Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && names.contains(&segs[0].name) => {
+            let i = names.iter().position(|n| *n == segs[0].name).unwrap_or(usize::MAX);
+            args.get(i).cloned().unwrap_or(Type::Infer)
+        }
+        Type::Path { global, segs, span } => Type::Path {
+            global: *global,
+            span: *span,
+            segs: segs
+                .iter()
+                .map(|s| PathSeg {
+                    name: s.name.clone(),
+                    fn_sugar: s.fn_sugar.clone(),
+                    generics: s.generics.as_ref().map(|g| g.iter().map(|a| if let GenericArg::Type(t) = a { GenericArg::Type(subst(t, names, args)) } else { a.clone() }).collect()),
+                })
+                .collect(),
+        },
+        Type::Option(x) => Type::Option(Box::new(subst(x, names, args))),
+        Type::Ref { lifetime, mutable, inner } => Type::Ref { lifetime: lifetime.clone(), mutable: *mutable, inner: Box::new(subst(inner, names, args)) },
+        Type::Slice(x) => Type::Slice(Box::new(subst(x, names, args))),
+        Type::Array(x, n) => Type::Array(Box::new(subst(x, names, args)), n.clone()),
+        Type::Tuple(v) => Type::Tuple(v.iter().map(|x| subst(x, names, args)).collect()),
+        t => t.clone(),
     }
 }

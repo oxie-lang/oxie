@@ -1,0 +1,55 @@
+// A method that changes what its fields reach takes `&mut self`: through nested fields, list
+// elements, tuple parts, `!!`, a property made by a constructor, and the entries of a map it
+// loops over. Changing a `Cell`, `RefCell` or `Mutex` field doesn't need it, so such an object
+// can be shared through `Rc`.
+
+import std.cell.{Cell, RefCell}
+import std.rc.Rc
+
+class Counter(var n: i32 = 0) {
+    fun inc() { n += 1 }
+}
+
+class Inner(var counter: Counter = Counter())
+
+class Owner(var inner: Inner = Inner(), var list: [Counter] = [Counter()], var pair: (Counter, i32) = (Counter(), 0), var maybe: Counter? = Counter(), var scores: [String: i32] = [:]) {
+    var made = Counter()
+
+    fun nested() { inner.counter.inc() }
+    fun element() { list[0].inc() }
+    fun part() { pair.0.inc() }
+    fun forced() { maybe!!.inc() }
+    fun property() { made.inc() }
+    fun entries() {
+        for ((_, v) in scores) *v += 10
+    }
+    fun total(): i32 = inner.counter.n + list[0].n + pair.0.n + (maybe?.n ?: 0) + made.n
+}
+
+class Stats {
+    val hits: Cell<i32> = Cell.new(0)
+    val log: RefCell<[String]> = RefCell.new(vec[])
+
+    fun hit(who: &str) {
+        hits.set(hits.get() + 1)
+        log.borrow_mut().push(who.to_string())
+    }
+}
+
+fun main() {
+    var o = Owner()
+    o.scores["a"] = 1
+    o.nested()
+    o.element()
+    o.part()
+    o.forced()
+    o.property()
+    o.entries()
+    println("${o.total()} ${o.scores}")
+
+    val stats = Rc.new(Stats())
+    val other = stats.clone()
+    stats.hit("a")
+    other.hit("b")
+    println("${stats.hits.get()} ${stats.log.borrow():?}")
+}
