@@ -1,0 +1,21 @@
+// A lambda that Oxie makes `move` (stored in a field, returned, sent to a thread) gets copies of
+// the variables it uses: one the code changes after the lambda would keep its old value there,
+// where a Kotlin lambda sees the change.
+
+class Step(run: (i32) -> i32)
+
+fun main() {
+    var factor = 2
+    val step = Step { it * factor }
+    factor = 100
+    println((step.run)(3))
+    // error: 9: `factor` changes after this lambda, which keeps the value it has here
+    // error: 9: help: take the value on purpose with a capture list (`{ [factor] x -> ... }`)
+
+    // a capture list takes the value on purpose
+    var base = 1
+    val add = Step { [base] x -> x + base }
+    base = 10
+    println("${(add.run)(1)} $base")
+    // not: 17: changes after this lambda
+}

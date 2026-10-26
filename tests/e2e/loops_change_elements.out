@@ -1,0 +1,4 @@
+[Item { name: "pen", qty: 11 }, Item { name: "ink", qty: 12 }]
+[Point { x: 10, y: 0 }, Point { x: 15, y: 5 }]
+[Item { name: "pen", qty: 3 }, Item { name: "ink", qty: 6 }]
+[Item { name: "pen", qty: 4 }, Item { name: "ink", qty: 7 }] 11

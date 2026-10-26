@@ -82,6 +82,8 @@ pub struct ClassInfo {
     pub interfaces: Vec<String>,
     /// Associated constants (in the body, a companion object or an `impl` block).
     pub consts: Vec<String>,
+    /// Has `init` blocks.
+    pub has_init: bool,
 }
 
 impl ClassInfo {
@@ -1497,6 +1499,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                         contexts: t.contexts.iter().filter_map(|p| p.name().map(String::from)).collect(),
                         interfaces: t.supertypes.iter().filter_map(|s| s.last_name().map(String::from)).collect(),
                         consts: member_consts(&t.members),
+                        has_init: t.init.is_some(),
                     };
                     if let Some(key) = type_key_for(k, &t.name, module, true) {
                         k.classes.insert(key, info);

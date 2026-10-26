@@ -157,6 +157,23 @@ enum Rerun {
     Receiver,
 }
 
+/// `p` with every binding made immutable (`mut x` → `x`).
+fn set_all_immutable(p: &mut Pat) {
+    match p {
+        Pat::Ident { mutable, sub, .. } => {
+            *mutable = false;
+            if let Some(s) = sub {
+                set_all_immutable(s);
+            }
+        }
+        Pat::Tuple(v) | Pat::Slice(v) | Pat::Or(v) => v.iter_mut().for_each(set_all_immutable),
+        Pat::TupleStruct { elems, .. } => elems.iter_mut().for_each(set_all_immutable),
+        Pat::Struct { fields, .. } => fields.iter_mut().filter_map(|(_, p)| p.as_mut()).for_each(set_all_immutable),
+        Pat::Typed { pat, .. } | Pat::Ref { pat, .. } => set_all_immutable(pat),
+        _ => {}
+    }
+}
+
 fn is_plain_read(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Path { .. } | ExprKind::SelfValue => true,
@@ -985,7 +1002,7 @@ impl<'a> Lowerer<'a> {
             }
             _ => return None,
         };
-        if let Type::Slice(t) = &ty {
+        if let Type::Slice(t) | Type::Array(t, _) = &ty {
             return Some(self.copy_elem(t));
         }
         let Type::Path { segs, .. } = &ty else { return None };
@@ -2466,7 +2483,7 @@ impl<'a> Lowerer<'a> {
             Elvis(l, r) => self.elvis(l, r),
             In { item, coll, negated } if matches!(range_in(coll).kind, Range { .. }) => {
                 let Range { start, end, inclusive } = &range_in(coll).kind else { unreachable!() };
-                self.in_range(item, start.as_deref(), end.as_deref(), *inclusive, *negated);
+                self.in_range(item, start.as_deref(), end.as_deref(), *inclusive, *negated, is_down(coll));
             }
             In { item, coll, negated } => {
                 if *negated {
@@ -2594,20 +2611,34 @@ impl<'a> Lowerer<'a> {
                 if let Some(l) = label {
                     self.e.w(&format!("'{}: ", l));
                 }
-                let p = self.pat(pat);
-                let borrows = self.loop_borrow(iter);
+                let mut p = self.pat(pat);
                 // the body changes the elements: borrowed mutably (for a field, sema makes the
-                // method `&mut self` by the same rule)
+                // method `&mut self` by the same rule); `for (var x in xs)` too, when `xs` is used
+                // after the loop, which would otherwise see none of the changes
                 let changing = self.changing_methods(self.elem_type(iter).as_ref());
                 let changes = |m: &str| changing.contains(m);
-                let writes_elements = borrows.is_some() && {
-                    let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, mutable: false, sub: None, .. } | Pat::Wild);
+                let written = {
+                    let plain = |p: &Pat| matches!(p, Pat::Ident { by_ref: false, sub: None, .. } | Pat::Wild);
                     let mut names = Vec::new();
                     if plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)) {
                         pat.bindings(&mut names);
                     }
                     names.iter().any(|n| visit::writes_through(body, n, &changes))
                 };
+                // a list field of a shared object whose elements the body changes: changed in
+                // place, with the object locked while the loop runs (its getter gives a copy)
+                let locked = match &strip_paren(iter).kind {
+                    ExprKind::Field { recv, name, safe: false } if written && self.shared_field(recv, name).is_some() => Some(((**recv).clone(), name.clone())),
+                    _ => None,
+                };
+                let borrows = if locked.is_some() { Some(false) } else { self.loop_borrow(iter) };
+                let writes_elements = borrows.is_some() && written;
+                if writes_elements {
+                    // the variable is a `&mut` to the element, which needs no `mut`
+                    let mut unmut = pat.clone();
+                    set_all_immutable(&mut unmut);
+                    p = self.pat(&unmut);
+                }
                 // a `&mut` reference used again after the loop is reborrowed, not moved into it
                 let reborrow = iter.ident().is_some_and(|n| matches!(self.local(n), Some(Some(Type::Ref { mutable: true, .. }))));
                 // an element of a list of interface values is a box: `Box<dyn Shape>`, or a
@@ -2639,8 +2670,27 @@ impl<'a> Lowerer<'a> {
                         } else {
                             self.e.w(&format!("for {} in {}", p, shared));
                         }
-                        self.expr(iter, P_POSTFIX);
-                        self.loop_borrow_decision(iter);
+                        match &locked {
+                            Some((recv, name)) => {
+                                let root = field_root(recv).unwrap_or_default().to_string();
+                                if !root.is_empty() && visit::mentions_name(body, &root) {
+                                    self.error(
+                                        iter.span,
+                                        format!(
+                                            "the loop changes the elements of `{0}.{1}`, which locks `{0}` while it runs, and the body uses `{0}` too: copy the list out (`var {1} = {0}.{1}`), change it, and store it back (`{0}.{1} = {1}`)",
+                                            root, name
+                                        ),
+                                    );
+                                }
+                                let field = self.borrowed_field(recv, name, true);
+                                self.expr(&field, P_POSTFIX);
+                                self.e.decide(iter.span, "&mut", "the loop changes the elements in place, with the object locked while it runs", None);
+                            }
+                            None => {
+                                self.expr(iter, P_POSTFIX);
+                                self.loop_borrow_decision(iter);
+                            }
+                        }
                     }
                     // a `Vec` parameter that Oxie lends still gives its `Copy` elements by value
                     None if lent_copy => {
@@ -2651,6 +2701,7 @@ impl<'a> Lowerer<'a> {
                         // an element taken out of a local collection and changed is a `mut` variable
                         let owned = iter.ident().and_then(|n| self.local(n)).is_some_and(|t| {
                             matches!(t, Some(Type::Path { segs, .. }) if segs.len() == 1 && matches!(segs[0].name.as_str(), "Vec" | "VecDeque" | "LinkedList"))
+                                || matches!(t, Some(Type::Array(..)))
                         });
                         let changed = owned && matches!(pat, Pat::Ident { name, by_ref: false, mutable: false, sub: None, .. } if visit::writes_through(body, name, &changes));
                         self.e.w(&format!("for {}{} in ", if changed { "mut " } else { "" }, p));
@@ -2987,20 +3038,38 @@ impl<'a> Lowerer<'a> {
 
     /// `x in a..b` -> `a <= x && x < b` (x is evaluated once). In parentheses only after the `!`
     /// of `!in`: `prec_of` tells `expr` where it needs them.
-    fn in_range(&mut self, item: &Expr, start: Option<&Expr>, end: Option<&Expr>, inclusive: bool, negated: bool) {
+    /// `x in a..b` as comparisons (`a <= x && x < b`). Both bounds are computed, in the order
+    /// written (`top() downTo bottom()`, `down`, writes the end first), also when the first
+    /// comparison already decides: a bound that does something is computed into a variable first.
+    fn in_range(&mut self, item: &Expr, start: Option<&Expr>, end: Option<&Expr>, inclusive: bool, negated: bool, down: bool) {
         let simple = self.is_place(item) || is_literal(item);
         let var = if simple { None } else { Some(self.fresh("x")) };
-        let parens = negated && simple;
+        let bind = start.is_some() && end.is_some_and(|e| !is_plain_read(e));
+        let parens = negated && simple && !bind;
         if negated {
             self.e.w("!");
         }
         if parens {
             self.e.w("(");
         }
+        if var.is_some() || bind {
+            self.e.w("{ ");
+        }
         if let Some(v) = &var {
-            self.e.w(&format!("{{ let {} = ", v));
+            self.e.w(&format!("let {} = ", v));
             self.expr(item, P_LOWEST);
             self.e.w("; ");
+        }
+        let (mut lo, mut hi) = (None, None);
+        if let (true, Some(s), Some(x)) = (bind, start, end) {
+            let (l, h) = (self.fresh("lo"), self.fresh("hi"));
+            let order = if down { [(&h, x), (&l, s)] } else { [(&l, s), (&h, x)] };
+            for (n, b) in order {
+                self.e.w(&format!("let {} = ", n));
+                self.expr(b, P_LOWEST);
+                self.e.w("; ");
+            }
+            (lo, hi) = (Some(l), Some(h));
         }
         let emit_item = |l: &mut Self| match &var {
             Some(v) => l.e.w(v),
@@ -3008,7 +3077,10 @@ impl<'a> Lowerer<'a> {
         };
         let mut first = true;
         if let Some(s) = start {
-            self.expr(s, 6);
+            match &lo {
+                Some(n) => self.e.w(n),
+                None => self.expr(s, 6),
+            }
             self.e.w(" <= ");
             emit_item(self);
             first = false;
@@ -3019,13 +3091,16 @@ impl<'a> Lowerer<'a> {
             }
             emit_item(self);
             self.e.w(if inclusive { " <= " } else { " < " });
-            self.expr(x, 6);
+            match &hi {
+                Some(n) => self.e.w(n),
+                None => self.expr(x, 6),
+            }
             first = false;
         }
         if first {
             self.e.w("true");
         }
-        if var.is_some() {
+        if var.is_some() || bind {
             self.e.w(" }");
         }
         if parens {
@@ -5107,6 +5182,9 @@ impl<'a> Lowerer<'a> {
             }
         }
         // data class copy(field = value)
+        if name == "copy" && !args.is_empty() && args.iter().all(|a| a.name.is_some()) && self.copy_by_constructor(recv, args, span) {
+            return;
+        }
         if name == "copy" && !args.is_empty() && args.iter().all(|a| a.name.is_some()) {
             let v = self.fresh("copy");
             self.e.w(&format!("{{ let mut {} = ", v));
@@ -6332,7 +6410,7 @@ impl<'a> Lowerer<'a> {
                                         let item = Expr::new(ExprKind::Unary(UnOp::Deref, Box::new(Expr::new(ExprKind::Path { segs: vec![w.clone()], generics: None, global: false }, expr.span))), expr.span);
                                         self.push_scope();
                                         self.bind_name(&w, None);
-                                        self.in_range(&item, start.as_deref(), end.as_deref(), *inclusive, *negated);
+                                        self.in_range(&item, start.as_deref(), end.as_deref(), *inclusive, *negated, is_down(expr));
                                         self.pop_scope();
                                     } else {
                                         if *negated {
@@ -6693,6 +6771,67 @@ impl<'a> Lowerer<'a> {
         self.e.w(")");
     }
 
+    /// `x.copy(w = 10)` of a class with properties computed from the others (`val area = w * h`)
+    /// or `init` blocks: built again with the constructor, as Kotlin's `copy` does, so they are
+    /// computed for the new values (`{ let src = &r; Rect::new(10, src.h) }`). False for other
+    /// classes, which are cloned with the fields changed.
+    fn copy_by_constructor(&mut self, recv: &Expr, args: &[Arg], span: Span) -> bool {
+        let Some(c) = self.infer_type(recv).and_then(|t| self.type_owner(&t)).and_then(|o| self.class_at(&o)).cloned() else { return false };
+        let computed = c.fields.iter().any(|f| !f.in_ctor && f.default.is_some());
+        if c.user_new || c.has_generics || c.is_shared || !(computed || c.has_init) {
+            return false;
+        }
+        let src = self.fresh("src");
+        self.e.w(&format!("{{ let {} = &", src));
+        self.expr(recv, P_UNARY);
+        self.e.w("; ");
+        self.push_scope();
+        self.bind_name(&src, Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(Type::simple(&c.name)) }));
+        // the given values first, in the order written, then the others from the original
+        let mut ctor_args: Vec<Arg> = args.to_vec();
+        for f in c.fields.iter().filter(|f| f.in_ctor && !args.iter().any(|a| a.name.as_deref() == Some(f.name.as_str()))) {
+            let read = Expr::new(ExprKind::Field { recv: Box::new(Expr::new(ExprKind::Path { segs: vec![src.clone()], generics: None, global: false }, span)), name: f.name.clone(), safe: false }, span);
+            let copied = !self.copy_elem(&f.ty);
+            let value = if copied { Expr::new(ExprKind::MethodCall { recv: Box::new(read), name: "clone".into(), generics: None, args: Vec::new(), safe: false }, span) } else { read };
+            ctor_args.push(Arg { name: Some(f.name.clone()), value, trailing: false });
+        }
+        let callee = Expr::new(ExprKind::Path { segs: self.type_path_here(&c.module, &c.name), generics: None, global: false }, span);
+        self.expr(&Expr::new(ExprKind::Call { callee: Box::new(callee), args: ctor_args }, span), P_LOWEST);
+        self.pop_scope();
+        self.e.w(" }");
+        true
+    }
+
+    /// A lambda Oxie makes `move` (it is stored, returned or sent to a thread) gets copies of the
+    /// variables it uses: a variable the function changes after it would keep its old value in
+    /// the lambda, where Kotlin's lambda sees the change. That is an error, with a capture list
+    /// (which takes the value on purpose) or a shared cell as the way out.
+    fn stale_captures(&mut self, lambda: &Expr) {
+        let ExprKind::Lambda { params, body, .. } = &lambda.kind else { return };
+        let mut own: Vec<String> = Vec::new();
+        for p in params {
+            p.pat.bindings(&mut own);
+        }
+        let mut used: Vec<String> = Vec::new();
+        visit::walk_expr(body, &mut |x| {
+            if let Some(n) = x.ident() {
+                if !used.iter().any(|u| u == n) {
+                    used.push(n.to_string());
+                }
+            }
+            true
+        });
+        for n in used.iter().filter(|n| !own.contains(n) && *n != "it" && self.is_local(n)) {
+            if !self.writes.iter().any(|(w, at)| w == n && *at >= lambda.span.end) {
+                continue;
+            }
+            let d = Diag::error(lambda.span, format!("`{}` changes after this lambda, which keeps the value it has here: the lambda outlives this code, so it gets its own copy of what it uses (`move`)", n))
+                .with_help(format!("take the value on purpose with a capture list (`{{ [{}] x -> ... }}`), or keep it in a cell both share (`val {} = Rc.new(Cell.new(..))`)", n, n));
+            self.diags.push(d);
+            break;
+        }
+    }
+
     pub(crate) fn lambda(&mut self, e: &Expr, param_tys: Option<&[Type]>, ret_ty: Option<&Type>) {
         let ExprKind::Lambda { params, ret, body, is_move, is_async, implicit_it: braces, .. } = &e.kind else {
             self.expr(e, P_LOWEST);
@@ -6704,6 +6843,9 @@ impl<'a> Lowerer<'a> {
             self.e.w("async ");
         }
         let escapes = std::mem::take(&mut self.next_lambda_moves);
+        if escapes && !*is_move {
+            self.stale_captures(e);
+        }
         if *is_move || escapes {
             self.e.w("move ");
         }
@@ -6906,6 +7048,11 @@ fn strip_paren(e: &Expr) -> &Expr {
 }
 
 /// The range an `in` checks: `10 downTo 0` is `(0..=10).rev()`, which holds the same numbers.
+/// `a downTo b`, which is `(b..=a).rev()`: written from its end.
+fn is_down(e: &Expr) -> bool {
+    matches!(&strip_paren(e).kind, ExprKind::MethodCall { name, args, safe: false, .. } if name == "rev" && args.is_empty())
+}
+
 fn range_in(e: &Expr) -> &Expr {
     match &strip_paren(e).kind {
         ExprKind::MethodCall { recv, name, args, safe: false, .. } if name == "rev" && args.is_empty() && matches!(strip_paren(recv).kind, ExprKind::Range { .. }) => strip_paren(recv),

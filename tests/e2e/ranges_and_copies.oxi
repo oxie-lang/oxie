@@ -1,0 +1,38 @@
+// `x in a..b` computes both bounds, in the order written, also when the first comparison
+// already decides; `copy` of a class whose properties are computed from the others builds the
+// copy with the constructor, so they are computed for the new values.
+
+fun top(): i32 {
+    println("top")
+    return 10
+}
+
+fun bottom(): i32 {
+    println("bottom")
+    return 5
+}
+
+data class Rect(w: i32, h: i32) {
+    val area: i32 = w * h
+    val label: String = "${w}x$h"
+}
+
+data class Tagged(name: String, n: i32) {
+    var log: [String] = []
+    init {
+        log.push("made $name")
+    }
+}
+
+fun main() {
+    val x = 3
+    println(x in bottom()..top())
+    println(x in top() downTo bottom())
+    println(x in 1..10)
+
+    val r = Rect(2, 3)
+    val wide = r.copy(w = 10)
+    println("${wide.w} ${wide.area} ${wide.label} ${wide == Rect(10, 3)} ${r.area}")
+    val t = Tagged("a", 1).copy(name = "b")
+    println("${t.name} ${t.n} ${t.log}")
+}

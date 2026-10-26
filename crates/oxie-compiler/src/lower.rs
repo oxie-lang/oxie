@@ -323,6 +323,8 @@ pub struct Lowerer<'a> {
     /// The call being lowered and where its text starts, for computing named arguments before
     /// it in the order they are written (`Lowerer::hoist_reordered`).
     pub(crate) call_start: Option<(Span, crate::emit::Pos)>,
+    /// The assignments of the function being lowered (`visit::assignments`).
+    pub(crate) writes: Vec<(String, u32)>,
     /// Lambda parameters without a known type: (scope depth, name). Rust passes collection
     /// elements by reference, so comparisons of these with literals read the value first.
     pub(crate) lambda_params: Vec<(usize, String)>,
@@ -525,6 +527,7 @@ impl<'a> Lowerer<'a> {
             fn_generics: Vec::new(),
             home: None,
             call_start: None,
+            writes: Vec::new(),
             lambda_params: Vec::new(),
             untyped_params: Vec::new(),
             typed_by_body: false,
@@ -2165,6 +2168,7 @@ impl<'a> Lowerer<'a> {
         let outer_tmp = std::mem::take(&mut self.tmp);
         let outer = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
         self.reused_iters.extend(visit::reused_loop_iters(outer, b));
+        let outer_writes = std::mem::replace(&mut self.writes, visit::assignments(b));
         self.e.w("{");
         self.e.indent();
         self.push_scope();
@@ -2185,6 +2189,7 @@ impl<'a> Lowerer<'a> {
         self.e.nl();
         self.e.w("}");
         self.tmp = outer_tmp;
+        self.writes = outer_writes;
     }
 
     fn ext_fun(&mut self, it: &Item, f: &FunDecl, ctx: ItemCtx) {

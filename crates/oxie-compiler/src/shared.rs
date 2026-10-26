@@ -354,7 +354,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// `obj.field` with the object borrowed: `obj.0.read().field` / `obj.0.write().field`.
-    fn borrowed_field(&mut self, obj: &Expr, field: &str, write: bool) -> Expr {
+    pub(crate) fn borrowed_field(&mut self, obj: &Expr, field: &str, write: bool) -> Expr {
         let o = self.capture(obj, P_POSTFIX);
         if !write && self.cheap_field(obj, field) {
             self.record_member(obj, field);

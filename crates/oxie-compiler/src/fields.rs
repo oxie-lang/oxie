@@ -202,7 +202,7 @@ fn split_of(c: &ClassParts, item: &Item, f: &FunDecl, info: &ClassInfo, k: &Crat
     let names = c.field_names();
     let bound = locals(&f.params, &body)?;
     // a variable named like a field hides it, and would hide its parameter
-    if names.iter().any(|n| bound.contains(*n) && mentions(&body, n)) {
+    if names.iter().any(|n| bound.contains(*n) && crate::visit::mentions_name(&body, n)) {
         return None;
     }
     let uses = field_uses(&body, &names, &bound, &c.methods)?;
@@ -335,16 +335,6 @@ fn locals(params: &[Param], body: &Block) -> Option<HashSet<String>> {
         true
     });
     ok.then(|| names.into_iter().collect())
-}
-
-/// Does the body use the name `n` as a variable or a field?
-fn mentions(body: &Block, n: &str) -> bool {
-    let mut found = false;
-    walk_block(body, &mut |e| {
-        found |= e.ident() == Some(n);
-        !found
-    });
-    found
 }
 
 /// The field `e` names: `count` (when no variable has that name) or `this.count`.

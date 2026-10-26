@@ -474,6 +474,39 @@ pub fn return_values(b: &FunBody) -> Vec<Expr> {
     out
 }
 
+/// The variables `body` assigns to (`x = ..`, `x += ..`, `x.count = ..`, `(a, b) = ..`), each
+/// with where its assignment starts.
+pub fn assignments(body: &Block) -> Vec<(String, u32)> {
+    fn root(t: &Expr) -> Option<&str> {
+        match &t.kind {
+            ExprKind::Field { recv, .. } | ExprKind::Index(recv, _) | ExprKind::Paren(recv) | ExprKind::Unary(UnOp::Deref, recv) => root(recv),
+            _ => t.ident(),
+        }
+    }
+    let mut out = Vec::new();
+    walk_block(body, &mut |e| {
+        if let ExprKind::Assign(_, target, _) = &e.kind {
+            let targets: Vec<&Expr> = match &target.kind {
+                ExprKind::Tuple(parts) => parts.iter().collect(),
+                _ => vec![&**target],
+            };
+            out.extend(targets.into_iter().filter_map(root).map(|n| (n.to_string(), e.span.start)));
+        }
+        true
+    });
+    out
+}
+
+/// Does `body` use the name `n` as a variable (or as the object of a field or method)?
+pub fn mentions_name(body: &Block, n: &str) -> bool {
+    let mut found = false;
+    walk_block(body, &mut |e| {
+        found |= e.ident() == Some(n);
+        !found
+    });
+    found
+}
+
 /// Does `body` change what the loop variable `name` refers to: assign to a place inside it
 /// (`x.qty += 1`, `x[0] = 1`), take `&mut` of one, call a mutating method on it
 /// (`x.tags.push(t)`, or one `changes` names, like an Oxie class's `&mut self` methods), or

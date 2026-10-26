@@ -1,0 +1,31 @@
+// A loop whose body changes the elements changes them in the collection: over a `[..]` literal
+// (a Rust array), with a `var` loop variable, and over a list field of a shared object.
+
+data class Item(name: String, var qty: i32)
+
+data class Point(var x: i32, var y: i32)
+
+shared class Inventory(var items: [Item] = [], var total: i32 = 0)
+
+fun main() {
+    var items = [Item("pen", 1), Item("ink", 2)]
+    for (item in items) item.qty += 10
+    println(items)
+
+    var pts = [Point(0, 0), Point(5, 5)]
+    for (var p in pts) p.x += 10
+    println(pts)
+
+    val inv = Inventory([Item("pen", 1), Item("ink", 2)])
+    for (it in inv.items) it.qty *= 3
+    println(inv.items)
+
+    // a body that also uses the object changes a copy, stored back after the loop
+    var copy = inv.items
+    for (it in copy) {
+        it.qty += 1
+        inv.total += it.qty
+    }
+    inv.items = copy
+    println("${inv.items} ${inv.total}")
+}
