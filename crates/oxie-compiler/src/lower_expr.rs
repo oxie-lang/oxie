@@ -465,6 +465,21 @@ impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ statements
 
     /// Emits statements on new lines. With `tail`, the last expression statement is the block value.
+    /// Does `tail` read a shared object of one of `locals` through a borrow (`p.name.len()` is
+    /// `p.0.read().name.len()`)?
+    fn tail_borrows_local_shared(&self, tail: &Expr, locals: &[String]) -> bool {
+        let mut found = false;
+        visit::walk_expr(tail, &mut |x| {
+            if let ExprKind::Field { recv, .. } | ExprKind::MethodCall { recv, .. } | ExprKind::Index(recv, _) = &x.kind {
+                if let ExprKind::Field { recv: obj, name, safe: false } = &recv.kind {
+                    found |= obj.ident().is_some_and(|n| locals.iter().any(|l| l == n)) && self.shared_field(obj, name).is_some();
+                }
+            }
+            !found
+        });
+        found
+    }
+
     pub(crate) fn stmts_with_tail(&mut self, stmts: &[Stmt], tail: Option<&Target>) {
         let tail_idx = match tail {
             Some(_) => match stmts.last() {
@@ -504,7 +519,26 @@ impl<'a> Lowerer<'a> {
             if Some(i) == tail_idx {
                 if let Stmt::Expr { expr, .. } = s {
                     self.e.mark(expr.span);
-                    self.tail_moving_args(expr, tail.unwrap());
+                    let mut locals = Vec::new();
+                    for st in &stmts[..i] {
+                        if let Stmt::Let { pat, .. } = st {
+                            pat.bindings(&mut locals);
+                        }
+                    }
+                    if self.tail_borrows_local_shared(expr, &locals) {
+                        // Rust drops a borrow in the block's value after the block's variables,
+                        // too late for one of them: the value goes into a variable first
+                        let v = self.fresh("value");
+                        self.e.w(&format!("let {} = ", v));
+                        self.expr(expr, P_LOWEST);
+                        self.e.w(";");
+                        self.e.nl();
+                        let t = self.infer_type(expr);
+                        self.bind_name(&v, t);
+                        self.tail_moving_args(&Expr::new(ExprKind::Path { segs: vec![v], generics: None, global: false }, expr.span), tail.unwrap());
+                    } else {
+                        self.tail_moving_args(expr, tail.unwrap());
+                    }
                 }
             } else if let (true, Stmt::Attributed { attrs, stmt }) = (i >= tail_from, s) {
                 for a in attrs {
@@ -2509,7 +2543,8 @@ impl<'a> Lowerer<'a> {
                     self.e.w(" {");
                     self.e.indent();
                     let from = self.std_name("std::convert::From");
-                    self.e.w(&format!("\nOk({v}) => {v},\nErr({err}) => break '{label} Err({from}::from({err})),"));
+                    let err_ty = self.try_errs.get(&label).map(|t| format!("::<_, {}>", t)).unwrap_or_default();
+                    self.e.w(&format!("\nOk({v}) => {v},\nErr({err}) => break '{label} Err{err_ty}({from}::from({err})),"));
                     self.e.dedent();
                     self.e.w("\n}");
                 } else {
@@ -2593,8 +2628,9 @@ impl<'a> Lowerer<'a> {
                 if let Some(l) = label {
                     self.e.w(&format!("'{}: ", l));
                 }
+                let lbl = self.loop_label(label.as_ref(), body);
                 self.e.w("loop ");
-                self.loops.push(LoopCtx { dowhile_label: None });
+                self.loops.push(self.new_loop(lbl, None));
                 self.block_stmt(body);
                 self.loops.pop();
             }
@@ -2604,10 +2640,11 @@ impl<'a> Lowerer<'a> {
                 if let Some(l) = label {
                     self.e.w(&format!("'{}: ", l));
                 }
+                let lbl = self.loop_label(label.as_ref(), body);
                 self.e.w("loop {");
                 self.e.indent();
                 self.e.nl();
-                self.loops.push(LoopCtx { dowhile_label: None });
+                self.loops.push(self.new_loop(lbl, None));
                 let brk = Expr::new(ExprKind::Break { label: None, value: None }, e.span);
                 self.let_chain(parts, body, Some(&brk), None);
                 self.loops.pop();
@@ -2619,11 +2656,12 @@ impl<'a> Lowerer<'a> {
                 if let Some(l) = label {
                     self.e.w(&format!("'{}: ", l));
                 }
+                let lbl = self.loop_label(label.as_ref(), body);
                 self.e.w("while ");
                 self.push_scope();
                 self.cond(cond);
                 self.e.w(" ");
-                self.loops.push(LoopCtx { dowhile_label: None });
+                self.loops.push(self.new_loop(lbl, None));
                 self.block_stmt(body);
                 self.loops.pop();
                 self.pop_scope();
@@ -2632,12 +2670,13 @@ impl<'a> Lowerer<'a> {
                 if let Some(l) = label {
                     self.e.w(&format!("'{}: ", l));
                 }
+                let outer = self.loop_label(label.as_ref(), body);
                 let needs_label = visit::has_own_continue(body);
                 let lbl = if needs_label { Some(self.fresh("body")) } else { None };
                 self.e.w("loop {");
                 self.e.indent();
                 self.e.nl();
-                self.loops.push(LoopCtx { dowhile_label: lbl.clone() });
+                self.loops.push(self.new_loop(outer, lbl.clone()));
                 if let Some(l) = &lbl {
                     self.e.w(&format!("'{}: ", l));
                 }
@@ -2661,6 +2700,7 @@ impl<'a> Lowerer<'a> {
                 if let Some(l) = label {
                     self.e.w(&format!("'{}: ", l));
                 }
+                let lbl = self.loop_label(label.as_ref(), body);
                 let mut p = self.pat(pat);
                 // the body changes the elements: borrowed mutably (for a field, sema makes the
                 // method `&mut self` by the same rule); `for (var x in xs)` too, when `xs` is used
@@ -2779,7 +2819,11 @@ impl<'a> Lowerer<'a> {
                         MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "iter" | "iter_mut") => {
                             self.elem_type(recv).map(|t| Type::Ref { lifetime: None, mutable: name == "iter_mut", inner: Box::new(t) })
                         }
-                        _ if iter.ident().is_some_and(|n| self.is_local(n)) => self.elem_type(iter),
+                        // over a reference to a collection (`jobs: &[Job]`): references
+                        _ if iter.ident().is_some_and(|n| self.is_local(n)) => match self.infer_type(iter) {
+                            Some(Type::Ref { mutable, .. }) => self.elem_type(iter).map(|t| Type::Ref { lifetime: None, mutable, inner: Box::new(t) }),
+                            _ => self.elem_type(iter),
+                        },
                         _ => None,
                     },
                     _ => None,
@@ -2794,7 +2838,7 @@ impl<'a> Lowerer<'a> {
                     _ => None,
                 };
                 self.lent.extend(lent_elem.clone());
-                self.loops.push(LoopCtx { dowhile_label: None });
+                self.loops.push(self.new_loop(lbl, None));
                 self.block_stmt(body);
                 self.loops.pop();
                 if lent_elem.is_some() {
@@ -2806,7 +2850,7 @@ impl<'a> Lowerer<'a> {
             Return(v) => self.return_expr(v.as_deref()),
             Break { label, value } => {
                 self.e.w("break");
-                if let Some(l) = label {
+                if let Some(l) = label.clone().or_else(|| self.label_from_try()) {
                     self.e.w(&format!(" '{}", l));
                 }
                 if let Some(v) = value {
@@ -2816,14 +2860,16 @@ impl<'a> Lowerer<'a> {
             }
             Continue(label) => match label {
                 Some(l) => self.e.w(&format!("continue '{}", l)),
-                None => match self.loops.last().and_then(|l| l.dowhile_label.clone()) {
-                    Some(l) => self.e.w(&format!("break '{}", l)),
-                    None => self.e.w("continue"),
+                None => match (self.loops.last().and_then(|l| l.dowhile_label.clone()), self.label_from_try()) {
+                    (Some(l), _) => self.e.w(&format!("break '{}", l)),
+                    (None, Some(l)) => self.e.w(&format!("continue '{}", l)),
+                    (None, None) => self.e.w("continue"),
                 },
             },
             Throw(x) => {
                 if let Some(label) = self.fns.last().and_then(|f| f.tries.last().cloned()) {
-                    self.e.w(&format!("break '{} Err(", label));
+                    let err_ty = self.try_errs.get(&label).map(|t| format!("::<_, {}>", t)).unwrap_or_default();
+                    self.e.w(&format!("break '{} Err{}(", label, err_ty));
                     self.expr(x, P_POSTFIX);
                     self.e.w(".into())");
                 } else {
@@ -3088,6 +3134,32 @@ impl<'a> Lowerer<'a> {
 
     /// `x in a..b` -> `a <= x && x < b` (x is evaluated once). In parentheses only after the `!`
     /// of `!in`: `prec_of` tells `expr` where it needs them.
+    /// The label of a loop with `body`: its own, or one Oxie gives it (written here) when a `try`
+    /// in it has a `break` or `continue` of the loop, which need it inside the `try`'s labeled
+    /// block.
+    fn loop_label(&mut self, own: Option<&String>, body: &Block) -> Option<String> {
+        if let Some(l) = own {
+            return Some(l.clone());
+        }
+        if !visit::break_in_try(body) {
+            return None;
+        }
+        let l = self.fresh("loop");
+        self.e.w(&format!("'{}: ", l));
+        Some(l)
+    }
+
+    fn new_loop(&self, label: Option<String>, dowhile_label: Option<String>) -> LoopCtx {
+        LoopCtx { dowhile_label, label, tries: self.fns.last().map_or(0, |f| f.tries.len()) }
+    }
+
+    /// The label an unlabeled `break` or `continue` needs: the loop's, inside a `try` the loop
+    /// contains.
+    fn label_from_try(&self) -> Option<String> {
+        let l = self.loops.last()?;
+        (self.fns.last()?.tries.len() > l.tries).then(|| l.label.clone()).flatten()
+    }
+
     /// `x in a..b` as comparisons (`a <= x && x < b`). Both bounds are computed, in the order
     /// written (`top() downTo bottom()`, `down`, writes the end first), also when the first
     /// comparison already decides: a bound that does something is computed into a variable first.
@@ -3599,6 +3671,14 @@ impl<'a> Lowerer<'a> {
     /// borrows `this`, so the field is matched by reference instead (`match &self.state`), as
     /// `for` borrows a field.
     fn match_field_by_ref(&mut self, subject: &Expr, pats: &[&Pat]) -> bool {
+        // a field of a reference (`j.state` in `for (j in jobs)`) or of a list element
+        // (`jobs[0].state`) can't give up a value either
+        if let ExprKind::Field { safe: false, .. } | ExprKind::Index(..) = &strip_paren(subject).kind {
+            if self.reaches_through_borrow(subject) {
+                let ty = self.infer_type(subject);
+                return ty.as_ref().is_some_and(|t| !matches!(t, Type::Ref { .. })) && pats.iter().any(|p| self.pat_moves(p, ty.clone()));
+            }
+        }
         if self.self_by_value {
             return false;
         }
@@ -3612,6 +3692,21 @@ impl<'a> Lowerer<'a> {
             return false;
         }
         pats.iter().any(|p| self.pat_moves(p, Some(ty.clone())))
+    }
+
+    /// Is the place `e` (`j.state`, `jobs[0].state`) reached through a reference or an index,
+    /// so a value can't be moved out of it? Fields of `this` are `match_field_by_ref`'s own case.
+    fn reaches_through_borrow(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Index(..) => true,
+            ExprKind::Field { recv, safe: false, .. } => match &recv.kind {
+                ExprKind::SelfValue => false,
+                ExprKind::Path { .. } => recv.ident().is_some_and(|n| self.is_local(n)) && matches!(self.infer_type(recv), Some(Type::Ref { .. })),
+                _ => self.reaches_through_borrow(recv),
+            },
+            ExprKind::Paren(x) => self.reaches_through_borrow(x),
+            _ => false,
+        }
     }
 
     /// Does pattern `p`, matching a value of type `ty`, bind a part of it that isn't `Copy`?
@@ -4458,9 +4553,15 @@ impl<'a> Lowerer<'a> {
 
     /// One argument for the parameter `p`: lent or converted as the parameter needs.
     fn emit_arg(&mut self, p: &ParamInfo, a: &Expr, pos: TyPos) {
-        // a lambda can't be annotated with the callee's type parameters
+        // a lambda can't be annotated with the callee's type parameters: Rust infers those
+        // (`|it: _|`), and a stored one is still boxed
         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
-            self.expr(a, P_LOWEST);
+            if matches!(pos, TyPos::Field) && matches!(p.ty, Type::Fn { .. }) {
+                let ty = crate::infer::subst(&p.ty, &p.generics, &[]);
+                self.coerce(a, &ty, pos);
+            } else {
+                self.expr(a, P_LOWEST);
+            }
         } else if p.lent && !is_collection_lit(a) && self.lends_value(a) {
             // its callers passed the owned value before Oxie lent the parameter
             self.e.mark(a.span);
@@ -4768,7 +4869,7 @@ impl<'a> Lowerer<'a> {
                     self.e.w(" ");
                     self.push_scope();
                     self.bind_name(&var, None);
-                    self.loops.push(LoopCtx { dowhile_label: None });
+                    self.loops.push(self.new_loop(None, None));
                     match &body.kind {
                         ExprKind::Block(b) => self.block_stmt(b),
                         _ => {
@@ -6783,6 +6884,9 @@ impl<'a> Lowerer<'a> {
             None => self.rt_name("AnyError"),
         };
         let wrap = format!("Ok::<_, {}>", err_ty);
+        if ends_diverging(&body.stmts) {
+            self.try_errs.insert(label.clone(), err_ty.clone());
+        }
         let emit_block = |l: &mut Self, value: bool| {
             l.e.w(&format!("'{}: ", label));
             if let Some(f) = l.fns.last_mut() {

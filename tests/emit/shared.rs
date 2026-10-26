@@ -6,6 +6,7 @@ pub(crate) mod __oxie;
 #[allow(unused_imports)]
 use crate::__oxie::prelude::*;
 use std::cell::RefCell;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
@@ -41,6 +42,11 @@ impl Eq for Account {}
 impl Hash for Account {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (Rc::as_ptr(&self.0) as *const () as usize).hash(state)
+    }
+}
+impl fmt::Debug for Account {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Account(..)")
     }
 }
 

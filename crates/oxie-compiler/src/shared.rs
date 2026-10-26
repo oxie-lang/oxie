@@ -71,12 +71,21 @@ impl<'a> Lowerer<'a> {
         ));
         self.e.nl();
         let has_display = t.members.iter().any(|m| matches!(&m.kind, ItemKind::Fun(f) if (f.name == "toString" || f.name == "to_string") && f.mods.is_override));
-        for (tr, needed) in [("Debug", derives.iter().any(|d| d == "Debug")), ("Display", has_display)] {
+        let debug = derives.iter().any(|d| d == "Debug");
+        for (tr, needed) in [("Debug", debug), ("Display", has_display)] {
             if needed {
                 let (tr, formatter, result) = (self.std_name(&format!("std::fmt::{}", tr)), self.std_name("std::fmt::Formatter"), self.std_name("std::fmt::Result"));
                 self.e.w(&format!("impl{} {} for {}{} {{\n    fn fmt(&self, f: &mut {}<'_>) -> {} {{\n        {}::fmt(&*self.0.{}, f)\n    }}\n}}", g, tr, handle, wc, formatter, result, tr, read));
                 self.e.nl();
             }
+        }
+        // without its own `Debug`, the handle prints as `Node(..)`, so a data class or list that
+        // holds it can still be printed (and objects that refer to each other don't print forever)
+        let own_debug = self.class_info(&t.name).is_some_and(|c| c.interfaces.iter().any(|i| i == "Debug"));
+        if !debug && !own_debug {
+            let (tr, formatter, result) = (self.std_name("std::fmt::Debug"), self.std_name("std::fmt::Formatter"), self.std_name("std::fmt::Result"));
+            self.e.w(&format!("impl{} {} for {}{} {{\n    fn fmt(&self, f: &mut {}<'_>) -> {} {{\n        f.write_str(\"{}(..)\")\n    }}\n}}", g, tr, handle, wc, formatter, result, t.name));
+            self.e.nl();
         }
 
         self.e.nl();
@@ -418,18 +427,48 @@ impl<'a> Lowerer<'a> {
                 }
                 // `obj.items.push(x)`: evaluate the arguments first, then borrow mutably for the call
                 self.e.mark(e.span);
+                // the value put into a list or map field gets the element's type (`"two"` into a
+                // `[String]`), as it would on a plain object
+                let elem = match (self.assign_field_type(obj, field), name.as_str(), args.len()) {
+                    (Some(Type::Path { segs, .. }), m, n) => match (segs.last().map(|s| s.name.as_str()), segs.last().and_then(|s| s.generics.clone()).as_deref(), m, n) {
+                        (Some("Vec" | "VecDeque"), Some([GenericArg::Type(t)]), "push" | "push_back" | "push_front", 1) => Some((0, t.clone())),
+                        (Some("Vec" | "VecDeque"), Some([GenericArg::Type(t)]), "insert", 2) => Some((1, t.clone())),
+                        (Some("HashMap" | "BTreeMap"), Some([GenericArg::Type(k), GenericArg::Type(v)]), "insert", 2) => Some((usize::MAX, Type::Tuple(vec![k.clone(), v.clone()]))),
+                        (Some("HashSet" | "BTreeSet"), Some([GenericArg::Type(t)]), "insert", 1) => Some((0, t.clone())),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let elem_ty = |i: usize| match &elem {
+                    Some((usize::MAX, Type::Tuple(kv))) => kv.get(i).cloned(),
+                    Some((j, t)) if *j == i => Some(t.clone()),
+                    _ => None,
+                };
                 let mut hoisted = Vec::new();
                 let mut new_args = Vec::new();
                 for (i, a) in args.iter().enumerate() {
                     let simple = matches!(a.value.kind, ExprKind::Lambda { .. } | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Char(_) | ExprKind::Bool(_))
                         || a.value.ident().is_some();
-                    if simple {
-                        new_args.push(a.clone());
-                    } else {
-                        let v = format!("__arg{}", i);
-                        let text = self.capture(&a.value, P_LOWEST);
-                        hoisted.push(format!("let {} = {};", v, text));
-                        new_args.push(Arg { name: a.name.clone(), value: Expr::new(ExprKind::Raw(v), a.value.span), trailing: a.trailing });
+                    let coerced = |l: &mut Self, t: &Type| {
+                        let saved = std::mem::replace(&mut l.e, crate::emit::Emitter::new());
+                        l.coerce(&a.value, t, TyPos::Generic);
+                        std::mem::replace(&mut l.e, saved).buf
+                    };
+                    match elem_ty(i) {
+                        Some(t) if simple => {
+                            let text = coerced(self, &t);
+                            new_args.push(Arg { name: a.name.clone(), value: Expr::new(ExprKind::Raw(text), a.value.span), trailing: a.trailing });
+                        }
+                        _ if simple => new_args.push(a.clone()),
+                        t => {
+                            let v = format!("__arg{}", i);
+                            let text = match t {
+                                Some(t) => coerced(self, &t),
+                                None => self.capture(&a.value, P_LOWEST),
+                            };
+                            hoisted.push(format!("let {} = {};", v, text));
+                            new_args.push(Arg { name: a.name.clone(), value: Expr::new(ExprKind::Raw(v), a.value.span), trailing: a.trailing });
+                        }
                     }
                 }
                 let base = self.borrowed_field(obj, field, true);
@@ -447,10 +486,13 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `obj.items.len()`, `obj.pos.x`, `obj.items[0]`: one borrow for the whole chain.
+    /// `obj.items.len()`, `obj.pos.x`, `obj.items[0]`: one borrow for the whole chain; a
+    /// mutable one when a call in it changes what it is called on
+    /// (`obj.counts.entry(k).or_insert(0)`, `obj.items.iter_mut()`).
     fn chain_through_borrow(&mut self, e: &Expr, write: bool) -> bool {
         // only when the shared field is below the top of the chain
         let Some((obj, field)) = self.shared_base(e) else { return false };
+        let write = write || chain_changes(e);
         if matches!(&e.kind, ExprKind::Field { recv, name, .. } if self.shared_field(recv, name).is_some()) {
             return false;
         }
@@ -509,5 +551,14 @@ impl<'a> Lowerer<'a> {
             _ => t.single_name()?.to_string(),
         };
         self.class_info(&name)?.fields.iter().find(|f| f.name == field).map(|f| f.ty.clone())
+    }
+}
+
+/// Does a call in the chain `e` change what it is called on (`entry`, `iter_mut`, `push`)?
+fn chain_changes(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::MethodCall { recv, name, .. } => sema::MUTATING_METHODS.contains(&name.as_str()) || chain_changes(recv),
+        ExprKind::Field { recv, .. } | ExprKind::Index(recv, _) => chain_changes(recv),
+        _ => false,
     }
 }

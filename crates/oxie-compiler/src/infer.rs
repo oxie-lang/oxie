@@ -539,7 +539,7 @@ fn type_args(t: &Type) -> Vec<Type> {
 }
 
 /// `t` with the type parameters `names` replaced by `args`, or by `_` past the end of `args`.
-fn subst(t: &Type, names: &[String], args: &[Type]) -> Type {
+pub(crate) fn subst(t: &Type, names: &[String], args: &[Type]) -> Type {
     match t {
         Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none() && names.contains(&segs[0].name) => {
             let i = names.iter().position(|n| *n == segs[0].name).unwrap_or(usize::MAX);
@@ -562,6 +562,7 @@ fn subst(t: &Type, names: &[String], args: &[Type]) -> Type {
         Type::Slice(x) => Type::Slice(Box::new(subst(x, names, args))),
         Type::Array(x, n) => Type::Array(Box::new(subst(x, names, args)), n.clone()),
         Type::Tuple(v) => Type::Tuple(v.iter().map(|x| subst(x, names, args)).collect()),
+        Type::Fn { params, ret } => Type::Fn { params: params.iter().map(|x| subst(x, names, args)).collect(), ret: Box::new(subst(ret, names, args)) },
         t => t.clone(),
     }
 }

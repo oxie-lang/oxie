@@ -99,7 +99,7 @@ impl ClassInfo {
         self.fields
             .iter()
             .filter(|f| f.in_ctor)
-            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false })
+            .map(|f| ParamInfo { name: Some(f.name.clone()), ty: f.ty.clone(), default: f.default.clone(), context: None, generics: self.type_names.clone(), boxed: false, lent: false, cfg: false })
             .collect()
     }
 }
@@ -1483,6 +1483,11 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                             }
                             let mut mi = method_info_explicit(f, None).unwrap_or_else(|| default_mi(f));
                             mi.iface = implements_method(k, f, &t.supertypes);
+                            // the class's type parameters are the method's too (a lambda argument
+                            // can't be annotated with them)
+                            for p in &mut mi.params {
+                                p.generics.extend(type_param_names(&t.generics));
+                            }
                             add_method(&mut methods, &f.name, mi);
                         }
                     }
@@ -1664,6 +1669,9 @@ fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
                         let trecv = trait_info.as_ref().and_then(|t| t.methods.get(&f.name)).map(|m| m.recv);
                         let mut mi = method_info_explicit(f, trecv).unwrap_or_else(|| default_mi(f));
                         mi.iface = imp.trait_.is_some();
+                        for p in &mut mi.params {
+                            p.generics.extend(type_param_names(&imp.generics));
+                        }
                         if let Some(c) = k.classes.get_mut(&owner) {
                             // an interface's `new` (`impl Watcher for FsEventWatcher { fun new(..) }`)
                             // too: a generated constructor would hide it

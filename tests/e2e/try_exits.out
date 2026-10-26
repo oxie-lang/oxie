@@ -1,0 +1,4 @@
+skipping 'x'
+sum 1
+5 -1
+Ok(3) Err("checked: not positive: -5")

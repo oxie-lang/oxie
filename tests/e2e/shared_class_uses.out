@@ -1,0 +1,5 @@
+first: a
+a b c 
+x 3
+2 1 ["one"]
+Edge { from: Node(..), to: Node(..) } c

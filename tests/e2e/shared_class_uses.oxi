@@ -1,0 +1,41 @@
+// Shared objects: an optional handle unwrapped by `if (val ..)` is copied, a block's value can
+// read a local object's fields, values put into list and map fields get the element type, calls
+// that change a field borrow the object mutably, and a handle prints as `Node(..)`.
+
+shared class Node(name: String, var next: Node? = null)
+
+shared class Stats(var counts: [String: i32] = [:], var groups: [String: [String]] = [:], var log: [String] = [])
+
+data class Edge(from: Node, to: Node)
+
+fun label(): String {
+    val p = Node("x")
+    p.name.clone()
+}
+
+fun size(): usize {
+    val p = Node("abc")
+    p.name.len()
+}
+
+fun main() {
+    val c = Node("c")
+    val head: Node? = Node("a", Node("b", c))
+    if (val n = head) println("first: ${n.name}")
+    var cur: Node? = head
+    while (val n = cur) {
+        print("${n.name} ")
+        cur = n.next
+    }
+    println()
+    println("${label()} ${size()}")
+
+    val s = Stats()
+    for (w in ["a", "b", "a"]) *s.counts.entry(w.to_string()).or_insert(0) += 1
+    s.groups.entry("a".to_string()).or_default().push("apple".to_string())
+    s.log.push("one")
+    println("${s.counts.len()} ${s.groups.len()} ${s.log}")
+
+    val e = Edge(Node("a"), c)
+    println("${e:?} ${e.to.name}")
+}

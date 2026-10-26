@@ -1,0 +1,43 @@
+// A lambda passed to a method or constructor of a generic class leaves the class's type
+// parameters to Rust; `when` on a field reached through a reference matches it by reference.
+
+class Wrapper<T>(value: T) {
+    fun apply(f: (T) -> T): T where T: Clone = f(value.clone())
+}
+
+class Bag<T>(var items: [T] = []) {
+    fun each(f: (&T) -> Unit) {
+        for (x in items) f(x)
+    }
+}
+
+class Mapper<T>(f: (T) -> T) {
+    fun run(x: T): T = (f)(x)
+}
+
+enum State { Idle, Failed(reason: String) }
+
+data class Job(state: State)
+
+fun describe(jobs: &[Job]): String {
+    var parts: [String] = []
+    for (j in jobs) {
+        parts.push(when (j.state) {
+            State.Idle -> "idle"
+            State.Failed(reason) -> "fail:$reason"
+        })
+    }
+    parts.join(" ")
+}
+
+fun main() {
+    println(Wrapper(20).apply { it + 1 })
+    Bag([1, 2]).each { println(it) }
+    println(Mapper<i32> { it * 2 }.run(21))
+    val jobs = [Job(State.Failed("x".to_string())), Job(State.Idle)]
+    println(describe(&jobs))
+    println(when (jobs[0].state) {
+        State.Failed(reason) -> reason.len()
+        else -> 0
+    })
+}

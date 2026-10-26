@@ -376,6 +376,33 @@ pub fn has_own_continue(b: &Block) -> bool {
     found
 }
 
+/// Does a `try` in the block (of a loop) have a `break` or `continue` of that loop? A `try` is a
+/// labeled block in Rust, inside which these need the loop's label.
+pub fn break_in_try(b: &Block) -> bool {
+    fn exits(b: &Block) -> bool {
+        let mut found = false;
+        walk_block(b, &mut |e| match &e.kind {
+            ExprKind::Break { label: None, .. } | ExprKind::Continue(None) => {
+                found = true;
+                false
+            }
+            ExprKind::Loop { .. } | ExprKind::While { .. } | ExprKind::For { .. } | ExprKind::DoWhile { .. } | ExprKind::Lambda { .. } => false,
+            _ => !found,
+        });
+        found
+    }
+    let mut found = false;
+    walk_block(b, &mut |e| match &e.kind {
+        ExprKind::TryCatch { body, .. } => {
+            found |= exits(body);
+            !found
+        }
+        ExprKind::Loop { .. } | ExprKind::While { .. } | ExprKind::For { .. } | ExprKind::DoWhile { .. } | ExprKind::Lambda { .. } => false,
+        _ => !found,
+    });
+    found
+}
+
 /// Does the function body call the parameter `name` directly (`name(...)`)?
 pub fn calls_ident(b: &FunBody, name: &str) -> bool {
     let mut found = false;

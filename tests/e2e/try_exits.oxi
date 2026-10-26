@@ -1,0 +1,37 @@
+// `break` and `continue` of a loop inside `try`, and a `try` whose body ends in `return` or
+// `throw`.
+
+fun parse(s: &str): i32 throws = s.trim().parse()?
+
+fun parse_or(s: &str, fallback: i32): i32 {
+    try {
+        return s.parse::<i32>()?
+    } catch (_e) {
+        return fallback
+    }
+}
+
+fun positive(n: i32): i32 throws String {
+    try {
+        if (n > 0) return n
+        throw "not positive: $n"
+    } catch (e: String) {
+        throw "checked: $e"
+    }
+}
+
+fun main() {
+    var sum = 0
+    for (s in ["1", "x", "2", "stop", "5"]) {
+        try {
+            if (s == "stop") break
+            if (s == "2") continue
+            sum += parse(s)?
+        } catch (_e) {
+            println("skipping '$s'")
+        }
+    }
+    println("sum $sum")
+    println("${parse_or("5", -1)} ${parse_or("x", -1)}")
+    println("${positive(3):?} ${positive(-5):?}")
+}
