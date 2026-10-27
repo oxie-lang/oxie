@@ -112,34 +112,33 @@ fun short(x: i32) = x * 2
   declared in Oxie is borrowed: `total(v)` → `total(&v)`, `add_one(v)` → `add_one(&mut v)`.
   For a `&str` or `&[T]` parameter any owned argument is lent (`greet(name.to_uppercase())`); for
   another `&T` parameter, so is a call whose result Oxie knows is a value (`describe(Point.origin())`).
-* **Borrowed parameters**: a `String` or list (`[T]`) parameter that the body only reads
-  becomes `&str` or `&[T]` (calls `len`, `contains`, `iter`, `map`, ..., prints it, compares it,
-  joins it with `+`, indexes it, loops over it reading the elements, or passes it on to another
-  borrowed parameter), so callers keep their value; `Copy` elements of a lent list stay values in
-  a loop (`for &x in xs`). So
-  does a map or set (`[K: V]`, `HashSet<T>`, `BTreeMap<K, V>`; reading it with `get`, `keys`,
-  `key in m`, `m[k]`, ...: `&HashMap<K, V>`) and a `PathBuf` (`exists`, `join`, `display`, ...:
-  `&Path`). A function that stores, returns or consumes the value keeps the owned type, and so
-  do functions that are `async`, used as values (`xs.map(greet)`) or called through a path
-  (`util.greet(x)`). A list is lent only when dropping a `T` just frees memory (numbers,
-  strings, std collections of them, and Oxie types made of those that don't implement `Drop`).
-  A list of mutex guards, files, `Rc`s or a type parameter stays owned, so the function drops
-  it when it returns, as in Rust: a guard unlocks there, not at the end of the caller.
-  A parameter of an Oxie class or `Box<T>` becomes `&T` the same way when the body only reads
-  it: calls its methods that take `&self` (or `clone`, `to_string`, `copy(...)`), formats it, or
-  reads its fields (`u.name.len()`, `u.age > 18`, `"${u.address.city}"`, a `Copy` field
-  anywhere). Comparing the value itself (`u == other`), taking a field out (`val n = u.name`),
-  changing it or calling a method that does keeps it owned. So do `Copy` classes (a copy is
-  passed) and `shared` classes (a handle is), and functions whose result is a reference. The drop
-  rule of lists applies to the whole value.
-  **Methods** lend their parameters the same way, when Oxie resolves every call that may reach
-  them, so it can write the `&`: not a method called on a value whose type Oxie doesn't know,
-  after `?.`, used as a value (`Self.save`) or called from a `rust { }` block, nor one that
-  implements an interface method or an operator (its parameters are the interface's).
-  **Who calls it**: in a program (`main.oxi`), every function and method; in a library
-  (`lib.oxi`), those that aren't `pub`, since other crates call those with the declared types;
-  in a Rust crate with Oxie modules, top-level functions that aren't `pub`, and no methods, since
-  its Rust code may call them.
+* **Borrowed parameters**: a parameter is borrowed unless it says `own`. A `String` parameter
+  becomes `&str`, a list (`[T]`) `&[T]`, a map or set (`[K: V]`, `HashSet<T>`, `BTreeMap<K, V>`)
+  `&HashMap<K, V>` (...), a `PathBuf` `&Path`, and a parameter of an Oxie class or `Box<T>`
+  `&T`, and every argument for it is lent, so callers keep their value. This holds for functions
+  and methods, `pub` or not, in programs, libraries and Rust crates with Oxie modules alike (Rust
+  code that calls one passes the reference). `Copy` values (numbers, `Copy` data classes),
+  `shared` classes (a handle) and functions (a boxed function too) are passed as they are. An
+  interface's methods, their implementations and operators take what the interface or Rust's
+  trait declares, and `main`, extension functions and `const` and `extern` functions keep the
+  types they declare.
+  **`own name: T`** takes the value: the argument moves, and the function may change it (`mut`
+  in the Rust). A function that keeps a borrowed parameter (returns it, stores it in a field, a
+  struct or a collection with `push`, `insert`, ..., gives it to an `own` parameter or a
+  constructor, takes a field out of it with `val n = u.name`, calls an `into_...` method on it,
+  takes the elements out in a loop, or uses it in a lambda that outlives the call) is an error at
+  that use, with two fixes: `own`, or keep a copy (`.clone()`). Text it keeps is copied instead
+  (`names.push(name)` pushes `name.to_string()`), as any `&str` is where a `String` is needed;
+  `own` moves it. A function that changes a borrowed parameter (assigns into it, calls a method
+  that changes it, takes `&mut` of it) is an error with the fixes `&mut T` (change the caller's
+  value) and `own` (change a value of its own).
+  A borrowed list is dropped by the caller: a function that should drop a list of mutex guards
+  or files when it returns (so a guard unlocks there) takes it with `own`. `xs.clone()` of a
+  borrowed list, text or path is an owned copy (`to_vec()`, `to_string()`, `to_path_buf()`), and
+  `&name`, `name.as_str()` and `xs.as_slice()` are the reference it already is.
+  A function or method used as a value (`xs.map(greet)`, `Self.save`) lends through a lambda:
+  `xs.map(|name| greet(&name))`. A call Oxie can't follow (on a value whose type it doesn't know)
+  passes its arguments as written: write `&x` there.
   Arguments that already are references (`&v`, reference-typed variables, `self`, string
   literals) are passed as they are. Passing a field to a `&mut` parameter makes the method
   `&mut self`.
@@ -1043,4 +1042,4 @@ false null this self Self in is as where async move unsafe dyn mut ref extern pu
 
 Contextual (usable as names elsewhere): `data`, `error`, `shared`, `object`, `companion`, `init`,
 `union`, `override`, `operator`, `private`, `internal`, `public`, `test`, `rust`, `throws`, `to`,
-`until`, `downTo`, `step`, `await`, `it`, `context`.
+`until`, `downTo`, `step`, `await`, `it`, `context`, `own`.

@@ -10,7 +10,7 @@ fun main() {
     val tag = Tag("new".to_string())
     println(describe(tag))
     println(tag.name)
-    // error: 12: fix: let `describe` borrow it (parameter type `&Tag`) (in src/text.oxi): `pub fun describe(t: &Tag): String = "#${t.name}"`
+    // error: 12: fix: let `describe` borrow it (without `own`) (in src/text.oxi): `pub fun describe(t: Tag): String = "#${t.name}"`
     val line = "hello world".to_string()
     val w = first_word(line, " ".to_string())
     // error: 15: name the lifetime yourself (in text.oxi): `fun first_word<'a>(text: &'a str, sep: &str): &'a str`

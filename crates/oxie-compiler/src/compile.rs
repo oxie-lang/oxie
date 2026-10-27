@@ -148,8 +148,7 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
     // in a program (an Oxie root without a library) no other crate calls `pub` items, so they lend
     // their parameters too
     let has_root = parsed.iter().any(|p| p.is_root);
-    let lend_pub = has_root && !has_lib;
-    let param_notes = crate::params::borrow_params(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>(), lend_pub);
+    let param_notes = crate::params::borrow_params(&mut parsed.iter_mut().map(|p| &mut p.file).collect::<Vec<_>>());
     let collect = |parsed: &[Parsed]| {
         let units: Vec<SourceUnit> = parsed.iter().map(|p| SourceUnit { module: p.module.clone(), file: &p.file }).collect();
         sema::collect(&units, &opts.crate_name, opts.extern_crates.clone(), has_lib)
@@ -161,37 +160,33 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
     if sema::by_value_receivers(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k) || changing_exts {
         k = collect(&parsed);
     }
-    // what takes the receivers: methods that take only the fields they use, and class and `Box`
-    // parameters to lend. Then sema again, for the new signatures.
+    // what takes the receivers: methods that take only the fields they use, and the class and
+    // `Box` parameters of functions and every kind of parameter of methods to lend. Then sema
+    // again, for the new signatures, and the errors for lent parameters that a body keeps.
     let field_notes = crate::fields::take_fields(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
-    let class_notes = crate::params::borrow_class_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k, lend_pub);
-    if !field_notes.is_empty() || class_notes.iter().any(|n| n.borrowed) {
+    let class_notes = crate::params::borrow_class_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
+    let method_notes = crate::params::borrow_method_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
+    if !field_notes.is_empty() || !class_notes.is_empty() || !method_notes.is_empty() {
         k = collect(&parsed);
     }
-    let mut param_notes: Vec<crate::params::ParamNote> = param_notes.into_iter().chain(field_notes).chain(class_notes).collect();
+    let kept = crate::params::check_kept(&parsed.iter().map(|p| (p.module.as_slice(), &p.file)).collect::<Vec<_>>(), &k);
+    for (i, d) in kept {
+        parsed[i].diags.push(d);
+    }
+    let param_notes: Vec<crate::params::ParamNote> = param_notes.into_iter().chain(field_notes).chain(class_notes).chain(method_notes).collect();
     let words: Vec<HashSet<String>> = parsed.iter().map(|p| source_words(&p.input.text)).collect();
     // what the crate calls: the dry run records the Oxie code's calls, beside those in Rust code
     let mut calls = HashSet::new();
     for p in &parsed {
         crate::params::raw_calls(&p.file.items, &mut calls);
     }
-    // methods lend theirs where every call that may reach them is one the lowering resolves, so
-    // it writes the `&`: a dry run of the lowering names the methods called otherwise. Not in a
-    // Rust crate with Oxie modules, whose Rust code may call them too.
     if has_root {
-        let mut unresolved = HashSet::new();
         for (i, p) in parsed.iter().enumerate() {
             let mut l = Lowerer::new(&k, p.module.clone(), p.is_root);
             l.source_words = Some(words[i].clone());
             l.lower_file(&p.file);
-            unresolved.extend(l.unresolved);
             calls.extend(l.calls);
         }
-        let notes = crate::params::borrow_method_params(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k, &unresolved, lend_pub);
-        if notes.iter().any(|n| n.borrowed) {
-            k = collect(&parsed);
-        }
-        param_notes.extend(notes);
     }
 
     let mut out = Output::default();
@@ -596,11 +591,11 @@ mod tests {
 
     #[test]
     fn decisions_are_about_the_right_function() {
-        // the method shares the name of the function whose parameter is lent, but keeps its own
-        let src = "fun describe(t: String): usize = t.len()\nclass Shelf(var items: Vec<String> = vec[]) {\n    fun describe(t: String) { items.push(t) }\n}\n";
+        // the method shares the name of the function whose parameter is lent, but takes its own
+        let src = "fun describe(t: String): usize = t.len()\nclass Shelf(var items: Vec<String> = vec[]) {\n    fun describe(own t: String) { items.push(t) }\n}\n";
         let ds = decisions(src);
         let about_t: Vec<_> = ds.iter().filter(|(about, ..)| about.starts_with("t:")).map(|(_, what, why)| (what.as_str(), why.as_str())).collect();
-        assert_eq!(about_t, [("&str", "it only reads `t`"), ("owned", "it passes `t` to `.push()`")], "{ds:?}");
+        assert_eq!(about_t, [("&str", "`t` isn't `own`")], "{ds:?}");
         assert!(ds.contains(&("describe".into(), "&mut self".into(), "it calls `items.push()`".into())), "{ds:?}");
     }
 

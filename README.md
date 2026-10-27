@@ -143,7 +143,8 @@ Kotlin and TypeScript developers already know:
 | `error enum E { NotFound(p: String) = "no $p" }` | enum + `Display` + `Error` + `From` impls |
 | `when (x) { 1, 2 -> a; in 3..=9 -> b; else -> c }` | `match` |
 | `xs.filter { it > 2 }.sum_of { it.price }` | `xs.iter().filter(..).cloned().collect()`, `iter().map(..).sum()` |
-| `total(nums)` with `fun total(xs: [i32])` | `fn total(xs: &[i32])` and `total(&nums)`: a parameter that is only read is borrowed |
+| `total(nums)` with `fun total(xs: [i32])` | `fn total(xs: &[i32])` and `total(&nums)`: a parameter is borrowed unless it says `own` |
+| `fun add(own item: Item)` | `fn add(&mut self, item: Item)`: `own` takes the value, and the caller gives it up |
 | `fun show<T>(x: T) = "<$x>"` | `fn show<T>(x: T) -> String where T: Display` |
 | `shared class Node(var next: Node?)` | `Rc<RefCell<..>>` handle with getters, setters and forwarding methods |
 | `interface Shape { fun area(): f64 }` | `trait Shape { fn area(&self) -> f64; }` |

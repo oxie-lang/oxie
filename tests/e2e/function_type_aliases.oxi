@@ -3,7 +3,7 @@ typealias Handler = (i32) -> String
 
 fun run_handler(h: Handler, x: i32): String = h(x)
 
-fun make(prefix: String): Handler = move { "$prefix$it" }
+fun make(own prefix: String): Handler = move { "$prefix$it" }
 
 class Router(handlers: Vec<Handler>)
 

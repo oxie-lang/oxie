@@ -1,9 +1,9 @@
-// A list or map parameter that a function keeps (returns or stores) stays owned: the error says
-// why, and offers no fix that would borrow it.
+// A list or map parameter that a function keeps (returns or stores) is `own`: the error for a
+// value moved into it says why the function keeps it, and offers no fix that would borrow it.
 
-fun keep(v: [i32]): [i32] = v
+fun keep(own v: [i32]): [i32] = v
 
-fun count(m: [String: i32]): usize = m.into_iter().count()
+fun count(own m: [String: i32]): usize = m.into_iter().count()
 
 fun main() {
     val nums: [i32] = [1, 2]

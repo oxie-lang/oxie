@@ -507,7 +507,8 @@ fn collect_items(items: &[syn::Item], info: &mut Info, fn_counts: &mut HashMap<S
                 let new = news.get(&s.ident.to_string()).cloned();
                 let has_new = named && (new.is_some() || class) && !info.trait_new.contains(&s.ident.to_string());
                 let new_params = new.unwrap_or_else(|| fields.iter().map(|(_, t)| t.clone()).collect());
-                info.structs.insert(s.ident.to_string(), printer::StructInfo { fields, has_new, new_params });
+                let copy = facts::derives_of(&s.attrs).contains("Copy");
+                info.structs.insert(s.ident.to_string(), printer::StructInfo { fields, has_new, new_params, copy });
             }
             syn::Item::Enum(e) => {
                 let mut ei = printer::EnumInfo::default();

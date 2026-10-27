@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+A parameter is borrowed unless it says `own`. Oxie used to decide from a function's body whether
+a parameter declared as a value (`name: String`, `u: User`) was lent or taken, and that decision
+also depended on code elsewhere: a call Oxie couldn't follow, a function used as a value, or
+`pub` in a library changed it, and the errors appeared at calls nobody had touched. Now the
+signature alone says whether a call keeps the caller's value.
+
+### Upgrading
+
+* A function that keeps a parameter (stores it in a field or a list, returns it, gives it to
+  another `own` parameter or a constructor, takes a field out of it, uses it in a lambda that
+  outlives the call) is now an error that offers two fixes: write `own` before the parameter
+  (`fun add(own item: Item)`), which moves the caller's value as before, or keep a copy. Text
+  is the exception: a `String` parameter that a function keeps is copied, as any `&str` is.
+* A function that changes a borrowed parameter is an error whose fixes are `&mut T` and `own`.
+* `pub` functions and methods of a library, methods called where Oxie can't tell their type,
+  functions used as values (`xs.map(greet)`, which now lend through a lambda) and functions that
+  Rust code calls now borrow their parameters too. Rust code calling such a function passes a
+  reference (`f(&s)`), or the function takes the value with `own`.
+* A list of values whose drop does more than free memory (mutex guards, files) is dropped by the
+  caller when it is lent; take it with `own` to drop it in the function, as before.
+* `oxie from-rust` writes `own` for the parameters Rust takes by value.
+
+### Changes
+
+* `own name: T` takes a parameter's value; the function may change it (`mut` in the Rust).
+* Errors that Oxie finds itself can carry fixes, printed as `= fix:` lines and offered by the
+  language server as quick fixes.
+* `&name`, `name.as_str()` and `name.clone()` of a borrowed parameter are the reference it is and
+  an owned copy (`to_string()`, `to_vec()`, `to_path_buf()`); `names.contains(&who)` with
+  borrowed text compares one element at a time, as `who in names` does.
+* A moved-value error for an `own` parameter that the function only reads offers to drop `own`.
+
 ## 0.5.0 - 2026-10-27
 
 `oxie from-rust` now translates all the Rust it was tested on into Oxie: in 82 crates with

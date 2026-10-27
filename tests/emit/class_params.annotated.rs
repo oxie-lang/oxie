@@ -41,17 +41,17 @@ impl Node {
 }
 
 // class_params.oxi:9
-pub(crate) fn describe(u: &User /* oxie: &User because it only reads `u` */) -> String {
+pub(crate) fn describe(u: &User /* oxie: &User because `u` isn't `own` */) -> String {
     format!("{} ({}) {}", u.name, u.age, u.greeting())
 }
 
 // class_params.oxi:10
-pub(crate) fn label_of(n: &Node /* oxie: &Node because it only reads `n` */) -> String {
+pub(crate) fn label_of(n: &Node /* oxie: &Node because `n` isn't `own` */) -> String {
     format!("<{}>", n.label)
 }
 
 // class_params.oxi:12
-pub(crate) fn register(u: User /* oxie: owned because it passes `u` to `.push()` */, all: &mut Vec<User>) {
+pub(crate) fn register(u: User, all: &mut Vec<User>) {
     all.push(u)
 }
 

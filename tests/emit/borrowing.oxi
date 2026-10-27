@@ -1,8 +1,9 @@
-// Automatic `&`/`&mut`, borrowed parameters, inferred receivers, loop borrowing and lifetimes.
+// Automatic `&`/`&mut`, borrowed and `own` parameters, inferred receivers, loop borrowing and
+// lifetimes.
 
 fun total(v: &[i32]): i32 = v.iter().sum()
 fun shout(s: String): String = s.to_uppercase()
-fun keep(v: Vec<i32>): Vec<i32> = v
+fun keep(own v: Vec<i32>): Vec<i32> = v
 fun add_one(v: &mut Vec<i32>) { v.push(1) }
 fun longest(a: &str, b: &str): &str = if (a.len() >= b.len()) a else b
 

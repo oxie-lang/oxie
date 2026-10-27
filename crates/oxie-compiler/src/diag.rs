@@ -33,6 +33,15 @@ pub struct Diag {
     pub span: Span,
     pub message: String,
     pub help: Option<String>,
+    /// Quick fixes, printed as `= fix:` lines and offered by the editor.
+    pub fixes: Vec<DiagFix>,
+}
+
+/// A quick fix: text that replaces spans of the diagnostic's file.
+#[derive(Clone, Debug)]
+pub struct DiagFix {
+    pub title: String,
+    pub edits: Vec<(Span, String)>,
 }
 
 /// What Oxie says about a class listed as a supertype (`class Dog : Animal(name)`).
@@ -42,14 +51,41 @@ pub fn no_inheritance(name: &str) -> String {
 
 impl Diag {
     pub fn error(span: Span, message: impl Into<String>) -> Diag {
-        Diag { severity: Severity::Error, span, message: message.into(), help: None }
+        Diag { severity: Severity::Error, span, message: message.into(), help: None, fixes: Vec::new() }
     }
     pub fn warning(span: Span, message: impl Into<String>) -> Diag {
-        Diag { severity: Severity::Warning, span, message: message.into(), help: None }
+        Diag { severity: Severity::Warning, span, message: message.into(), help: None, fixes: Vec::new() }
     }
     pub fn with_help(mut self, help: impl Into<String>) -> Diag {
         self.help = Some(help.into());
         self
+    }
+    pub fn with_fix(mut self, title: impl Into<String>, edits: Vec<(Span, String)>) -> Diag {
+        self.fixes.push(DiagFix { title: title.into(), edits });
+        self
+    }
+}
+
+impl DiagFix {
+    /// The line the fix changes, after the change, when it only changes one line of `src`.
+    pub fn preview(&self, src: &str) -> Option<String> {
+        let idx = LineIndex::new(src);
+        let line = idx.line_col(src, self.edits.first()?.0.start as usize).0;
+        if self.edits.iter().any(|(s, _)| idx.line_col(src, s.start as usize).0 != line || idx.line_col(src, s.end as usize).0 != line) {
+            return None;
+        }
+        let start = idx.line_start(line);
+        let mut text = src[start..].lines().next().unwrap_or("").to_string();
+        let mut edits: Vec<&(Span, String)> = self.edits.iter().collect();
+        edits.sort_by_key(|(s, _)| std::cmp::Reverse(s.start));
+        for (s, new) in edits {
+            let (a, b) = (s.start as usize - start, s.end as usize - start);
+            if b > text.len() || a > b {
+                return None;
+            }
+            text.replace_range(a..b, new);
+        }
+        Some(text.trim().to_string())
     }
 }
 
@@ -140,6 +176,13 @@ pub fn render(diag: &Diag, path: &str, src: &str, color: bool) -> String {
     out += &format!("{pad} {blue}|{reset} {}{lc}{}{reset}\n", " ".repeat(col), "^".repeat(width));
     if let Some(help) = &diag.help {
         out += &format!("{pad} {blue}={reset} {bold}help{reset}: {}\n", help);
+    }
+    for f in &diag.fixes {
+        out += &format!("{pad} {blue}={reset} {bold}fix{reset}: {}", f.title);
+        if let Some(line) = f.preview(src) {
+            out += &format!(": `{}`", line);
+        }
+        out.push('\n');
     }
     out
 }

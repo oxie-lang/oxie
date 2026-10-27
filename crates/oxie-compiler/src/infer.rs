@@ -447,6 +447,11 @@ impl<'a> Lowerer<'a> {
                         .filter(|t| *t != Type::Infer)
                         .map(|t| Type::Option(Box::new(Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) }))),
                     "first_mut" | "last_mut" if args.is_empty() => self.list_elem_ref(recv, true),
+                    // the value of an optional, as `x!!` is (`m.get_mut(k).unwrap()`)
+                    "unwrap" | "expect" if args.len() == usize::from(name == "expect") => match self.infer_type(recv)? {
+                        Type::Option(t) => Some(*t).filter(|t| *t != Type::Infer),
+                        _ => None,
+                    },
                     "get_mut" if args.len() == 1 && !self.infer_type(recv).is_some_and(|t| map_value(&t).is_some()) => self.list_elem_ref(recv, true),
                     "clone" | "abs" | "sqrt" | "sin" | "cos" | "tan" | "powi" | "powf" | "floor" | "ceil" | "round" | "min" | "max" | "exp" | "ln"
                     | "log10" | "signum" | "pow" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "saturating_sub" | "saturating_add" | "clamp" => {

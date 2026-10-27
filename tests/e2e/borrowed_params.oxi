@@ -1,20 +1,21 @@
-// A `String` or `Vec<T>` parameter that a function only reads becomes `&str` / `&[T]`, so callers
-// keep their values. Functions that keep the value and ones used as values are unchanged; `pub` ones
-// are lent too, since no other crate calls a program's functions (a library's keep their types).
+// A parameter is borrowed unless it says `own`: a `String` or `Vec<T>` parameter becomes `&str` /
+// `&[T]`, so callers keep their values, also for `pub` functions and ones used as values. Text that
+// a function keeps is copied.
 
 fun greet(name: String) = println("hi $name (${name.len()})")
 fun shout(name: String): String = name.to_uppercase()
+// returns the text: a copy
 fun keep(name: String): String = name
 fun total(xs: Vec<i32>): i32 = xs.sum()
 fun describe(xs: Vec<String>) = println("${xs.len()} names: ${xs.join_to_string(", ")} ${xs.contains(&"ada".to_string())}")
 // passes it on to another borrowed parameter
 fun relay(name: String) = greet(name)
-// keeps it: stays owned
+// stores the text: a copy, so the caller keeps its own
 fun store(name: String, into: &mut Vec<String>) = into.push(name)
 pub fun public_api(name: String) = println(name)
-// used as a value below: keeps its signature
+// used as a value below: a lambda lends its argument
 fun used_as_value(s: String) = println(s)
-// called from Rust that Oxie doesn't read, with the declared type
+// called from Rust that Oxie doesn't read, which passes the `&str` the signature takes
 pub fun called_from_rust(s: String): usize = s.len()
 fun main() {
     val n = "ada".to_string()
@@ -30,8 +31,8 @@ fun main() {
     describe(names)
     var all: Vec<String> = vec[]
     store(n, all)
-    println("${nums:?} ${names:?} ${all:?} ${keep("k".to_string())}")
+    println("${nums:?} ${names:?} ${all:?} ${keep("k".to_string())} $n")
     public_api("p".to_string())
     vec["v".to_string()].into_iter().for_each(used_as_value)
-    println(rust { called_from_rust(String::from("rust")) })
+    println(rust { called_from_rust(&String::from("rust")) })
 }

@@ -126,9 +126,11 @@ pub struct Param {
     pub default: Option<Expr>,
     /// A context parameter (`context(cx: &mut App)`): its default is the caller's own `cx`.
     pub context: bool,
-    /// Declared as a value that the body only reads, so Oxie lends it (`params.rs`): its type is
-    /// now the reference, and every argument for it is lent.
-    pub lent: bool,
+    /// Written `own name: T`: the function takes the value, and callers give theirs up.
+    pub own: bool,
+    /// Declared as a value without `own`, so Oxie lends it (`params.rs`): the declared type. The
+    /// parameter's type is now the reference, and every argument for it is lent.
+    pub lent: Option<Type>,
     /// Its attributes (`@cfg(unix) fd: i32`) as Rust text.
     pub attrs: Vec<String>,
     pub span: Span,

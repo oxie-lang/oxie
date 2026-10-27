@@ -20,15 +20,15 @@ impl Library {
         }
     }
 
-    pub(crate) fn add(&mut self, shelf: String, title: String) {
-        if !self.shelves.contains_key(&shelf) {
-            self.shelves.insert(shelf.clone(), vec![]);
+    pub(crate) fn add(&mut self, shelf: &str, title: &str) {
+        if !self.shelves.contains_key(shelf) {
+            self.shelves.insert(shelf.to_string(), vec![]);
         }
-        self.shelves.get_mut(&shelf).unwrap().push(title);
+        self.shelves.get_mut(shelf).unwrap().push(title.to_string());
     }
 
-    pub(crate) fn count(&self, shelf: String) -> usize {
-        self.shelves.get(&shelf).map(|it| it.len()).unwrap_or(0)
+    pub(crate) fn count(&self, shelf: &str) -> usize {
+        self.shelves.get(shelf).map(|it| it.len()).unwrap_or(0)
     }
 
     pub(crate) fn label(&self, shelf: &str) -> String {
@@ -42,11 +42,11 @@ pub(crate) fn longest(titles: &[String]) -> usize {
 
 fn main() {
     let mut lib = Library::new();
-    lib.add("a".to_string(), "Dune".to_string());
+    lib.add(&"a".to_string(), &"Dune".to_string());
     let titles: Vec<String> = vec![String::from("Emma"), String::from("Ulysses")];
     let mut seen = vec![1, 2];
     seen.push(3);
     let sizes = titles.iter().map(|it| it.len()).to_list();
     let shelf = "a".to_string();
-    println!("{} {} {shelf} {} {seen:?} {sizes:?}", lib.count(shelf.clone()), lib.label(&shelf), longest(&titles));
+    println!("{} {} {shelf} {} {seen:?} {sizes:?}", lib.count(&shelf.clone()), lib.label(&shelf), longest(&titles));
 }

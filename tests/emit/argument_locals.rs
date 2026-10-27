@@ -54,9 +54,9 @@ impl Ids {
         self.pairs.push((next_id, next_id_2))
     }
 
-    pub(crate) fn name(&mut self, n: String) -> Option<String> {
+    pub(crate) fn name(&mut self, n: &str) -> Option<String> {
         let next_id = self.next_id();
-        let old = self.names.insert(next_id, n);
+        let old = self.names.insert(next_id, n.to_string());
         old.into()
     }
 
@@ -81,7 +81,7 @@ fn __oxie_main() -> Result<(), String> {
     ids.add();
     ids.add_scaled();
     ids.add_pair();
-    ids.name(String::from("a"));
+    ids.name("a");
     ids.add_checked()?;
     let least = ids.min_with_next();
     println!("{:?} {:?} {least}", ids.items, ids.pairs);

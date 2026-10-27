@@ -16,11 +16,11 @@ This document is for people working on Oxie itself.
   │ contexts.rs   context parameters: `context(...)` clauses become parameters whose default is
   │               the caller's variable of that name; a class's methods get the ones they use
   ▼
-  │ params.rs     parameters that functions only read become references
+  │ params.rs     parameters become references unless they say `own`
   │ sema.rs       crate-wide symbol table: classes, enums, traits, functions, modules,
   │               extension traits; receiver inference; automatic derives
   │ fields.rs     methods that take only the fields they use (then sema.rs again)
-  │ params.rs     class parameters, then methods' (after a dry run of the lowering)
+  │ params.rs     class parameters and methods', then the bodies that keep a lent one
   ▼
   │ lower.rs      items, types, patterns → Rust text
   │ lower_expr.rs statements and expressions → Rust text (with source-map marks)
@@ -117,7 +117,7 @@ std's full path) or is a module declared beside it, when the file imports with a
 (`::std::rc::Rc`) is written. `rt_name` does the same for runtime items in the prelude
 (`AnyError`).
 
-With an Oxie root, the dry run of the lowering (see `params.rs`) also records what the code calls
+With an Oxie root, a dry run of the lowering records what the code calls
 (`Lowerer::calls`: methods, getters and setters by name, constructors as `Class::new`), with the
 calls in Rust text (`params::raw_calls`). The final lowering gets that set as `crate_calls`:
 a shared class's getters and setters that nothing calls are left out (a library keeps those of
@@ -164,36 +164,29 @@ Notable translations:
   `&`/`&mut`; references (`&x`, reference-typed locals, `self`, string literals, untyped
   lambda parameters) don't. Receiver inference (`sema.rs`) treats a field passed to a `&mut`
   parameter as a mutation of `self`.
-* **Borrowed parameters** (`params.rs`, before lowering): a `String`/`Vec<T>` parameter of a
-  top-level function becomes `&str`/`&[T]` when every use is a read (a method that exists on
-  `str`/slices, printing, comparing, indexing, or passing it to a parameter that is itself
-  borrowed); a map or set (`Kind::Coll`) becomes `&HashMap<K, V>` and a `PathBuf` `&Path` the
-  same way. `pub` functions are left out, except in a program (`main.oxi` without `lib.oxi`),
-  which no other crate calls. A field written without its value (`Point { x, y }`) or Rust text
-  (`rust { }`, a macro's arguments) that names the parameter keeps it owned. A greatest fixpoint over the crate handles forwarding and recursion; a
-  `move` lambda or async block capturing the parameter keeps it owned. A `Vec<T>` is lent only
-  when dropping a `T` just frees memory (`Types::drop_free`: primitives, `String`, std
-  containers of such types, and Oxie classes, enums and aliases made of them with no `Drop`
-  impl, in Oxie or in a `rust { }` block), since lending moves the drop to the caller. Types
-  Oxie can't see into, type parameters and `Rc`/`Arc` (whose counts can be observed) keep it
-  owned, and the note names the element type as the cause. `kept_reason` reports the
-  first use that keeps a parameter owned ("it returns `v`"), for the explanation of E0382.
-  Parameters of Oxie classes and `Box<T>` go through the same analysis after receiver inference
-  (`borrow_class_params`, `Stage::Types`), since what reads them takes the classes: their
-  methods that take `&self`, and field chains (`chain_type` follows the fields' types) that are
-  formatted, compared, indexed, lent on, `Copy`, or the receiver of a method that only reads
-  their type. `Copy` and `shared` classes, classes with lifetimes, and functions whose result
-  is a reference are left out. The pass runs next to `fields.rs`, before sema collects again.
-  Methods go through it last (`borrow_method_params`, `Stage::Methods`), with every kind of
-  parameter: a call `x.f(..)` from a method of the same class (`f(..)`, `this.f(..)`) lends when
-  `f`'s parameter does. A lent parameter only works where the lowering writes the `&`, in calls
-  it resolves to the method, so `compile.rs` first lowers the crate once without keeping the
-  result: `Lowerer::unresolved` collects the names of methods called where the receiver's type
-  doesn't say which method it is (`may_reach_oxie`: unknown, `Box<..>`, a crate's type), after
-  `?.`, or through a path the lowering can't follow, and methods of those names keep their
-  types. So do methods used as values, called from Rust text (`raw_calls`) or implementing an
-  interface or operator, a library's `pub` methods, and every method of a Rust crate with Oxie
-  modules, whose Rust code may call any of them.
+* **Borrowed parameters** (`params.rs`, before lowering): a parameter is borrowed unless it
+  says `own` (`Param::own`). The pass lends every other parameter of the kinds it knows: a
+  `String`/`Vec<T>` becomes `&str`/`&[T]`, a map or set (`Kind::Coll`) `&HashMap<K, V>`, a
+  `PathBuf` `&Path` (`borrow_params`, `Stage::Text`, for top-level functions); after receiver
+  inference a parameter of an Oxie class or `Box<T>` becomes `&T` (`borrow_class_params`,
+  `Stage::Types`), and methods lend every kind (`borrow_method_params`, `Stage::Methods`).
+  `Param::lent` keeps the declared type. `Copy` and `shared` classes, classes with lifetimes,
+  boxed functions, `var` parameters, contexts, and the parameters of interface methods, their
+  implementations, operators, `main`, extension, `const` and `extern` functions keep theirs.
+  Whether a parameter is lent never depends on the body or on other code: `pub`, a library,
+  functions used as values and calls the lowering can't follow change nothing.
+  `check_kept` then reads the bodies, with every signature known: a use of a lent parameter
+  that isn't a read (`owned_uses`, which knows the methods that only read `str`, slices, maps,
+  paths and the crate's classes, field chains (`chain_type`), and calls that lend) and that keeps
+  the value (`kept_at`: returned, stored with `push`/`insert`/..., given to an `own` parameter
+  or a constructor, a field taken out with `val n = u.name`, an `into_...` call, a loop that
+  takes the elements, a lambda that outlives the call) or changes it (`first_change`) is an
+  error with fixes (`Diag::fixes`): `own`, a `.clone()` copy, or `&mut`. Text a function keeps
+  is copied by the lowering's conversion of `&str` where a `String` is needed, so it isn't an
+  error. `kept_reason` says why a function takes an `own` parameter, for the explanation of
+  E0382. The lowering lends arguments where it resolves the call, wraps a function used as a
+  value in a lambda that lends (`lending_value`), and reads `&name`, `name.as_str()` and
+  `name.clone()` of a lent parameter as the reference and an owned copy.
 * **Methods that take only the fields they use** (`fields.rs`, after receiver inference): a
   `&mut self` method that a method of its class calls inside a loop over another field (or a
   lambda passed to a method of one) becomes `static`, with the fields it uses as parameters.

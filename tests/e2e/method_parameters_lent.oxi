@@ -1,4 +1,4 @@
-// Methods that only read a `String`, `Vec` or class parameter borrow it, like top-level
+// Methods borrow a `String`, `Vec` or class parameter unless it says `own`, like top-level
 // functions (not interface methods, whose signature the interface fixes). Extension functions
 // that change their receiver take `&mut self`.
 data class Item(name: String, price: i32) {
@@ -11,11 +11,11 @@ class Hi : Greeter {
     override fun greet(n: String): String = "hi $n"
 }
 class Shop(var items: Vec<Item> = vec[]) {
-    fun add(i: Item) = items.push(i)
+    fun add(own i: Item) = items.push(i)
     fun has(n: String): Boolean = items.any { it.name == n }
 }
 
-// a parameter moved into a struct (`Self { label, .. }`) stays owned
+// text stored in a struct (`Self { label, .. }`) is a copy
 class Tagged(label: String, n: i32) {
     static fun make(label: String): Self = Self { label, n: 1 }
 }

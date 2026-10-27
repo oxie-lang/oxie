@@ -4,12 +4,12 @@
 import std::sync::{Mutex, MutexGuard}
 import std::thread
 
-// keeps its guards, so they unlock when it returns
-fun release(guards: Vec<MutexGuard<i32>>) = println("releasing ${guards.len()}")
+// takes its guards, so they unlock when it returns
+fun release(own guards: Vec<MutexGuard<i32>>) = println("releasing ${guards.len()}")
 
 class Token(val text: String)
 
-fun show(t: Token) = println(t.text)                     // used as a value: keeps its parameter type
+fun show(own t: Token) = println(t.text)                 // takes it, and only reads it
 
 fun main() {
     val m = Mutex::new(0)
@@ -21,14 +21,15 @@ fun main() {
     val t = Token("a".to_string())
     show(t)
     println(t.text)
-    // error: 23: Let `show` borrow the value instead.
+    // error: 23: Finish using `t` before the call.
+    // error: 23: fix: let `show` borrow it (without `own`): `fun show(t: Token) = println(t.text)
     // not: 23: .clone()
     val name = "worker".to_string()
     val h = thread::spawn(move { println(name) })
     println(name)
-    // error: 28: `name` was moved
-    // error: 28: fix: give the lambda its own copy of `name`
-    // not: 28: let value
+    // error: 29: `name` was moved
+    // error: 29: fix: give the lambda its own copy of `name`
+    // not: 29: let value
     h.join().unwrap()
     vec[Token("b".to_string())].into_iter().for_each(show)
 }

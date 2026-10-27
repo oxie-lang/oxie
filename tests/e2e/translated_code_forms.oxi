@@ -17,7 +17,7 @@ class Doc(var saves: u64 = 0) {
 class Store {
     var docs: [Doc] = [Doc()]
     // the loop variable `written` hides the list it goes over
-    fun background_saved(written: [(usize, Written)]): [u64] {
+    fun background_saved(own written: [(usize, Written)]): [u64] {
         var out = vec[]
         for ((doc, written) in written) {
             val d = &mut docs[doc]

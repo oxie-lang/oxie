@@ -1,0 +1,46 @@
+// A parameter is borrowed unless it says `own`. A function that keeps or changes a borrowed one
+// is an error at that use, with fixes: take it (`own`), keep a copy, or change the caller's
+// value (`&mut`).
+data class Item(name: String, price: i32)
+class Label(text: String)
+
+class Cart(var items: [Item] = []) {
+    fun add(item: Item) = items.push(item)
+    // error: 8: `add` can't keep `item`: it is borrowed
+    // error: 8: It stores `item` with `.push()`
+    // error: 8: fix: take `item` (`own item`): `fun add(own item: Item) = items.push(item)`
+    // error: 8: fix: keep a copy of `item`: `fun add(item: Item) = items.push(item.clone())`
+}
+
+fun add_one(xs: [i32]) = xs.push(1)
+// error: 15: `xs` is borrowed, so `add_one` can't change it
+// error: 15: fix: change the caller's `xs` (`&mut`): `fun add_one(xs: &mut [i32]) = xs.push(1)`
+// error: 15: fix: take `xs` (`own xs`): `fun add_one(own xs: [i32]) = xs.push(1)`
+
+fun name_of(u: Item): String {
+    val n = u.name
+    // error: 21: `name_of` can't keep `u.name`: `u` is borrowed
+    // error: 21: fix: take `u` (`own u`)
+    // error: 21: fix: keep a copy of `u.name`: `val n = u.name.clone()`
+    return n
+}
+
+fun first(own xs: [Item]): Item = xs.into_iter().next().unwrap()
+fun pick(xs: [Item]): Item = first(xs)
+// error: 29: `pick` can't keep `xs`: it is borrowed
+// error: 29: It passes `xs` to `first`, which takes it (`own xs`)
+
+// text a function keeps is copied, so these are fine
+fun label(s: String): Label = Label(s)
+fun texts(s: String, out: &mut [String]) = out.push(s)
+// not: 34: can't keep
+// not: 35: can't keep
+
+fun main() {
+    var cart = Cart()
+    cart.add(Item("pen", 2))
+    var v: [i32] = []
+    add_one(v)
+    println("${name_of(Item("ink", 3))} ${pick([Item("cup", 4)]).name}")
+    println(label("x").text)
+}

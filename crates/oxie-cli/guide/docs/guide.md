@@ -68,8 +68,8 @@ fun main() {
 ```
 
 Parameters are written `name: Type`, the return type after `:` (Rust's `->` also works). A
-parameter that the function only reads is borrowed: `greet` takes `&str` in the generated Rust,
-so `greet(name)` doesn't use up `name` (see [Ownership](#ownership)).
+parameter is borrowed unless it says `own`: `greet` takes `&str` in the generated Rust, so
+`greet(name)` doesn't use up `name` (see [Ownership](#ownership)).
 
 A value that many functions pass along, such as a configuration, a logger or GPUI's `window` and
 `cx`, can be a *context parameter*: each call passes the variable of that name where it is made,
@@ -538,14 +538,11 @@ can't change its length.
 
 What Oxie removes is the bookkeeping around it:
 
+* a parameter is borrowed unless it says `own`: a `String` parameter is `&str` in the generated
+  Rust, a list `&[T]`, a map or set `&HashMap<K, V>`, a `PathBuf` `&Path`, and a class or
+  `Box<T>` parameter `&T` (below), so `greet(name)` lends `name` instead of giving it away;
 * arguments for `&T` and `&mut T` parameters of Oxie functions are borrowed for you (writing
   `&v` yourself works too);
-* a `String` or list parameter that a function or method only reads becomes `&str` or `&[T]`,
-  so `greet(name)` lends `name` instead of giving it away (for a list only when dropping its
-  elements just frees memory: a list of mutex guards is still dropped, and unlocked, when the
-  function returns). A map or set becomes `&HashMap<K, V>`, a `PathBuf` `&Path`, and a class or
-  `Box<T>` parameter `&T` the same way (below). A library's `pub` functions and methods keep the
-  types they declare, since other crates call them;
 * lifetimes are filled in when Rust can't infer them (a function returning a reference gets one
   lifetime tied to its reference parameters, a class holding a `&str` gets a lifetime
   parameter, and so does a reference inside an `impl Trait` parameter);
@@ -558,8 +555,9 @@ What Oxie removes is the bookkeeping around it:
 * trait bounds on type parameters are inferred from the body: `fun show<T>(x: T) = "<$x>"`
   becomes `fn show<T>(x: T) -> String where T: Display`.
 
-A function that only reads a value of a class, through its fields and methods that take
-`&self`, borrows it, so the caller can go on using it:
+A function borrows its parameters, so the caller can go on using what it passes. One that keeps
+a parameter (stores it, returns it, or gives it to a function that keeps it) takes it with
+`own`, and its callers give theirs up:
 
 ```oxie
 data class User(val name: String, val age: i32)
@@ -567,12 +565,40 @@ data class User(val name: String, val age: i32)
 // fn describe(u: &User) -> String, called as describe(&ada)
 fun describe(u: User): String = "${u.name} (${u.age})"
 
+class Team(var members: [User] = []) {
+    // fn add(&mut self, u: User)
+    fun add(own u: User) = members.push(u)
+}
+
 fun main() {
     val ada = User("Ada", 36)
     println(describe(ada))
     println(ada.name)    // still `ada`'s: `describe` only borrowed it
+    var team = Team()
+    team.add(ada)        // `ada` moves into the team
+    println(team.members.len())
 }
 ```
+
+The signature says it, not the body: a function that keeps a parameter without `own` is an
+error, with both fixes. Without `own`, `add` would get:
+
+```
+error: `add` can't keep `u`: it is borrowed
+ --> main.oxi:8:37
+  |
+8 |     fun add(u: User) = members.push(u)
+  |                                     ^
+  = help: It stores `u` with `.push()`. A parameter is borrowed unless it says `own`: a function
+    that keeps one takes it, and its callers give theirs up.
+  = fix: take `u` (`own u`): `fun add(own u: User) = members.push(u)`
+  = fix: keep a copy of `u`: `fun add(u: User) = members.push(u.clone())`
+```
+
+Text is the exception: a function that keeps borrowed text copies it, as Oxie copies any `&str`
+where a `String` is needed (`names.push(name)` pushes `name.to_string()`); `own name: String`
+moves it instead. A function that changes a borrowed parameter is an error too, whose fixes are
+`&mut` (change the caller's value) and `own` (change a value of its own).
 
 Rust rejects `self.items.push(self.next_id())` when `next_id` changes `self`: it borrows
 `items` for the call before it runs the argument. Oxie computes such an argument first, as you
@@ -633,18 +659,21 @@ A method that changes the list the loop goes over stays a method, and the error 
 the loop really would see the list change.
 
 When the borrow checker still says no, the error is explained in Oxie terms, with fixes. Here
-`register` stores the name in a list, so it has to own it:
+`register` takes the name with `own`, since it stores it in a list:
 
 ```
 error[E0382]: `name` was moved, so it can't be used anymore
  --> main.oxi:7:30
   |
+1 | fun register(names: &mut [String], own name: String) = names.push(name)
+  |                                                                   ---- `register` keeps it: it stores `name` with `.push()`
+...
 6 |     register(names, name)
   |                     ---- `name` moved into `register()` here
 7 |     println("${names.len()} $name")
   |                              ^^^^ used here after the move
-  = help: giving a value to a function moves it: `register` keeps it, and `name` can't be used
-    afterwards. Pass a copy with `name.clone()`.
+  = help: giving a value to an `own` parameter moves it: `register` keeps it (it stores `name`
+    with `.push()`), and `name` can't be used afterwards. Pass a copy with `name.clone()`.
   = fix: pass a copy of `name`: `register(names, name.clone())`
 ```
 

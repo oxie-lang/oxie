@@ -1387,7 +1387,7 @@ pub fn params_info(f: &FunDecl) -> Vec<ParamInfo> {
         .collect();
     f.params
         .iter()
-        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), boxed: false, lent: p.lent, cfg: p.attrs.iter().any(|a| a.starts_with("cfg(")), stored: p.name().is_some_and(|n| matches!(p.ty, Type::Fn { .. }) && f.body.as_ref().is_some_and(|b| crate::visit::stores_ident(b, n))) })
+        .map(|p| ParamInfo { name: p.name().map(|s| s.to_string()), ty: p.ty.clone(), default: p.default.clone(), context: p.context.then(|| f.name.clone()), generics: generics.clone(), boxed: false, lent: p.lent.is_some(), cfg: p.attrs.iter().any(|a| a.starts_with("cfg(")), stored: p.name().is_some_and(|n| matches!(p.ty, Type::Fn { .. }) && f.body.as_ref().is_some_and(|b| crate::visit::stores_ident(b, n))) })
         .collect()
 }
 

@@ -6,27 +6,27 @@ pub(crate) mod __oxie;
 #[allow(unused_imports)]
 use crate::__oxie::prelude::*;
 
-// borrowing.oxi:3
+// borrowing.oxi:4
 pub(crate) fn total(v: &[i32]) -> i32 {
     v.iter().sum()
 }
 
-// borrowing.oxi:4
-pub(crate) fn shout(s: &str /* oxie: &str because it only reads `s` */) -> String {
+// borrowing.oxi:5
+pub(crate) fn shout(s: &str /* oxie: &str because `s` isn't `own` */) -> String {
     s.to_uppercase()
 }
 
-// borrowing.oxi:5
-pub(crate) fn keep(v: Vec<i32> /* oxie: owned because it returns `v` */) -> Vec<i32> {
+// borrowing.oxi:6
+pub(crate) fn keep(v: Vec<i32>) -> Vec<i32> {
     v
 }
 
-// borrowing.oxi:6
+// borrowing.oxi:7
 pub(crate) fn add_one(v: &mut Vec<i32>) {
     v.push(1);
 }
 
-// borrowing.oxi:7
+// borrowing.oxi:8
 pub(crate) fn longest<'a>(a: &'a str, b: &'a str) -> &'a str /* oxie: 'a because the result borrows from `a` or `b` */ {
     if a.len() >= b.len() {
         a
@@ -35,7 +35,7 @@ pub(crate) fn longest<'a>(a: &'a str, b: &'a str) -> &'a str /* oxie: 'a because
     }
 }
 
-// borrowing.oxi:9
+// borrowing.oxi:10
 pub(crate) struct Counter {
     pub(crate) hits: Vec<i32>,
 }
@@ -47,41 +47,41 @@ impl Counter {
         }
     }
 
-    // borrowing.oxi:10
+    // borrowing.oxi:11
     pub(crate) fn hit(&mut self /* oxie: &mut self because it passes `hits` to `add_one`, which takes `&mut` */) {
         add_one(&mut self.hits /* oxie: &mut because the parameter is `&mut Vec<i32>` */);
     }
 
-    // borrowing.oxi:11
+    // borrowing.oxi:12
     pub(crate) fn count(&self) -> usize {
         self.hits.len()
     }
 }
 
-// borrowing.oxi:14
+// borrowing.oxi:15
 fn main() {
-    // borrowing.oxi:15
-    let mut nums = vec![1, 2, 3];
     // borrowing.oxi:16
-    let name = "ada".to_string();
+    let mut nums = vec![1, 2, 3];
     // borrowing.oxi:17
-    add_one(&mut nums /* oxie: &mut because the parameter is `&mut Vec<i32>` */);
+    let name = "ada".to_string();
     // borrowing.oxi:18
-    println!("{} {} {name}", total(&nums /* oxie: & because the parameter is `&[i32]` */), shout(&name /* oxie: & because the parameter is `&str` */));
+    add_one(&mut nums /* oxie: &mut because the parameter is `&mut Vec<i32>` */);
     // borrowing.oxi:19
+    println!("{} {} {name}", total(&nums /* oxie: & because the parameter is `&[i32]` */), shout(&name /* oxie: & because the parameter is `&str` */));
+    // borrowing.oxi:20
     for &n in &nums /* oxie: &nums because `nums` is used after the loop */ {
         println!("{}", n);
     }
-    // borrowing.oxi:20
-    println!("{}", nums.len());
     // borrowing.oxi:21
-    let mut c = Counter::new(vec![]);
+    println!("{}", nums.len());
     // borrowing.oxi:22
-    c.hit();
+    let mut c = Counter::new(vec![]);
     // borrowing.oxi:23
-    println!("{} {}", c.count(), longest(&name /* oxie: & because the parameter is `&str` */, "bob"));
+    c.hit();
     // borrowing.oxi:24
-    let kept = keep(nums);
+    println!("{} {}", c.count(), longest(&name /* oxie: & because the parameter is `&str` */, "bob"));
     // borrowing.oxi:25
+    let kept = keep(nums);
+    // borrowing.oxi:26
     println!("{}", kept.len());
 }

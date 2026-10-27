@@ -45,11 +45,12 @@ compiles to Rust. This page maps what you know to Oxie, and lists the Rust ideas
 These come from Rust and are what makes Oxie as fast as Rust.
 
 **Values have one owner.** Assigning a `String`, list or class instance *moves* it; the old
-variable can't be used afterwards. A function or method that only reads a parameter borrows it
+variable can't be used afterwards. A parameter is borrowed unless it says `own`
 (`names: [String]` becomes `&[String]`), so `show(names)` lends `names` and the caller keeps
-it; one that changes the caller's value takes a reference (`&mut T`), and Oxie lends the
-argument for you. A `for` loop over a list you use again afterwards borrows it too. Call
-`.clone()` when you really want a copy.
+it; a function that keeps a parameter (stores or returns it) takes it with `own`, and one that
+changes the caller's value takes a reference (`&mut T`), and Oxie lends the argument for you. A
+`for` loop over a list you use again afterwards borrows it too. Call `.clone()` when you really
+want a copy.
 
 ```oxie
 fun show(names: [String]) = println("${names.len()} names")

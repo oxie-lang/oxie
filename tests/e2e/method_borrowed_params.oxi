@@ -1,6 +1,6 @@
-// Methods lend the parameters they only read, like functions, when Oxie resolves every call
-// that may reach them: callers keep their values. A method that keeps the value, implements an
-// interface, is called after `?.` or uses the value in Rust code keeps the declared type.
+// Methods borrow their parameters unless they say `own`, like functions: callers keep their
+// values, also where a method is called after `?.` or uses the value in Rust code. Text a method
+// keeps is copied. An interface's methods keep the types the interface declares.
 import std::path::PathBuf
 
 interface Named {
@@ -26,10 +26,12 @@ class Shop(owner: String) : Named {
     fun location(path: PathBuf): String = "${path.display()}"
     pub fun public_read(text: String): usize = text.len() // a program: `pub` too
 
-    // kept owned
-    fun add(item: Item) = items.push(item)
+    // keeps it: takes it
+    fun add(own item: Item) = items.push(item)
+    // keeps the text: a copy
     fun rename(name: String): Item = Item { name, price: 0.0 }
     fun raw_len(text: String): usize = rust { text.len() }
+    // the interface's type
     override fun named(prefix: String): String = "$prefix $owner"
     fun label(text: String): String = "[$text]"
 }

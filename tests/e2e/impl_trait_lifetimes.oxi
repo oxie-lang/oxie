@@ -15,7 +15,7 @@ fun longest(a: &str, b: &str, extra: impl Iterator<Item = &str>): &str {
 
 fun first_word(words: impl Iterator<Item = &str>): &str = words.into_iter().next() ?: ""
 
-fun last_of(a: &str, rest: Box<dyn Iterator<Item = &str>>): &str = rest.last() ?: a
+fun last_of(a: &str, own rest: Box<dyn Iterator<Item = &str>>): &str = rest.last() ?: a
 
 // `Fn(&str)` stays as it is
 fun count_with(f: impl Fn(&str) -> usize, words: impl IntoIterator<Item = &String>): usize = words.into_iter().map { f(it) }.sum()

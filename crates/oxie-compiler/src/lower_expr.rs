@@ -2535,6 +2535,8 @@ impl<'a> Lowerer<'a> {
             }
             // `*this` in `fun i32.positive()`, which takes the number by value
             Unary(UnOp::Deref, x) if matches!(x.kind, SelfValue) && self.this_by_value => self.expr(x, P_UNARY),
+            // `&name` of a parameter Oxie lends is the reference it already is
+            Unary(UnOp::Ref, x) if x.ident().is_some_and(|n| self.lent.iter().any(|l| l == n)) => self.expr(x, P_UNARY),
             Unary(op, x) => {
                 let s = match op {
                     UnOp::Neg => "-",
@@ -2672,7 +2674,16 @@ impl<'a> Lowerer<'a> {
             }
             Field { recv, name, .. } => {
                 if let Some((p, _)) = self.field_path(e) {
-                    self.e.w(&p);
+                    // a method that takes lent parameters, used as a value (`Self.save`)
+                    let method = self.as_path(recv).filter(|(_, k)| matches!(k, PathKind::Type)).and_then(|(segs, _)| self.class_at(&segs)).and_then(|c| c.methods.get(name.as_str()));
+                    match method.and_then(|m| self.lending_value(&m.params, m.recv != Recv::Static)) {
+                        Some((head, tail)) => {
+                            self.e.w(&head);
+                            self.e.w(&p);
+                            self.e.w(&tail);
+                        }
+                        None => self.e.w(&p),
+                    }
                     return;
                 }
                 self.expr(recv, P_POSTFIX);
@@ -3190,6 +3201,11 @@ impl<'a> Lowerer<'a> {
                         self.e.w("*");
                         self.expr(place, P_POSTFIX);
                         self.e.w(".as_ref().unwrap()");
+                    }
+                    // a reference (an element of a borrowed list) compared with the value
+                    None if matches!(self.infer_type(x), Some(Type::Ref { .. })) => {
+                        self.e.w("*");
+                        self.expr(x, P_UNARY);
                     }
                     None => self.operand(x, if i == 0 { p + 1 } else { p + 1 }, i == 0 && matches!(op, BinOp::Lt | BinOp::Shl) || i == 1 && before_lt),
                 }
@@ -4485,6 +4501,40 @@ impl<'a> Lowerer<'a> {
     // ------------------------------------------------------------------ paths
 
     fn path_expr(&mut self, segs: &[String], generics: Option<&Vec<GenericArg>>, global: bool, span: Span) {
+        // a function that takes lent parameters, used as a value (`xs.map(greet)`)
+        let variable = segs.len() == 1 && (self.is_local(&segs[0]) || self.implicit_field(&segs[0]).is_some());
+        if let Some((head, tail)) = self.fun_at(segs).filter(|_| !variable).and_then(|f| self.lending_value(&f.params, false)) {
+            self.e.w(&head);
+            self.plain_path_expr(segs, generics, global, span);
+            self.e.w(&tail);
+            return;
+        }
+        self.plain_path_expr(segs, generics, global, span);
+    }
+
+    /// A function or method used as a value whose parameters Oxie lends takes references, while
+    /// a call passes it values: it is passed as a lambda that lends them, `|name| greet(&name)`.
+    /// The text before the function's path and after it (`recv`: a method's receiver comes
+    /// first, as it does in `Type::method`).
+    fn lending_value(&self, params: &[ParamInfo], recv: bool) -> Option<(String, String)> {
+        if !params.iter().any(|p| p.lent) || params.iter().any(|p| p.context.is_some()) {
+            return None;
+        }
+        let mut names = Vec::new();
+        let mut args = Vec::new();
+        if recv {
+            names.push("this".to_string());
+            args.push("this".to_string());
+        }
+        for (i, p) in params.iter().enumerate() {
+            let n = p.name.as_deref().map(esc).unwrap_or_else(|| format!("a{}", i));
+            args.push(if p.lent { format!("&{}", n) } else { n.clone() });
+            names.push(n);
+        }
+        Some((format!("|{}| ", names.join(", ")), format!("({})", args.join(", "))))
+    }
+
+    fn plain_path_expr(&mut self, segs: &[String], generics: Option<&Vec<GenericArg>>, global: bool, span: Span) {
         // `Account::balance` as a value
         if let [_, .., last] = segs {
             self.calls.insert(last.clone());
@@ -5135,9 +5185,6 @@ impl<'a> Lowerer<'a> {
                 self.arg_list(args, Some(&fi.params), TyPos::Param, span);
                 return;
             }
-        }
-        if n >= 2 {
-            self.unresolved.insert(segs[n - 1].clone());
         }
         let mut path = self.join_path(segs);
         if let Some(g) = generics {
@@ -6176,16 +6223,45 @@ impl<'a> Lowerer<'a> {
                 return;
             }
         }
-        // `xs.clone()` of a parameter Oxie lent (`&[T]`, `&str`): a copy of what it lends
+        // `xs.clone()` of a parameter Oxie lent (`&[T]`, `&str`, `&Path`): a copy of what it lends
         if name == "clone" && args.is_empty() && recv.ident().is_some_and(|n| self.lent.iter().any(|l| l == n)) {
             let copy = match self.infer_type(recv) {
                 Some(Type::Ref { inner, .. }) if matches!(*inner, Type::Slice(_)) => Some("to_vec"),
                 Some(Type::Ref { inner, .. }) if inner.single_name() == Some("str") => Some("to_string"),
+                Some(Type::Ref { inner, .. }) if inner.last_name() == Some("Path") => Some("to_path_buf"),
                 _ => None,
             };
             if let Some(c) = copy {
                 self.expr(recv, P_POSTFIX);
                 self.e.w(&format!(".{}()", c));
+                return;
+            }
+        }
+        // `name.as_str()` of a parameter Oxie lent: the `&str` (`&[T]`, `&Path`) it already is
+        if matches!(name, "as_str" | "as_slice" | "as_path") && args.is_empty() && recv.ident().is_some_and(|n| self.lent.iter().any(|l| l == n)) {
+            let lent = match self.infer_type(recv) {
+                Some(Type::Ref { inner, .. }) => match name {
+                    "as_str" => inner.single_name() == Some("str"),
+                    "as_slice" => matches!(*inner, Type::Slice(_)),
+                    _ => inner.last_name() == Some("Path"),
+                },
+                _ => false,
+            };
+            if lent {
+                self.expr(recv, P_POSTFIX);
+                return;
+            }
+        }
+        // `names.contains(&who)` with text Oxie lent: compared one by one, as `who in names` is (a
+        // list of `String`s takes a `&String`)
+        if name == "contains" && args.len() == 1 && args[0].name.is_none() {
+            let arg = match &args[0].value.kind {
+                ExprKind::Unary(UnOp::Ref, x) => &**x,
+                _ => &args[0].value,
+            };
+            let lent_text = arg.ident().is_some_and(|n| self.lent.iter().any(|l| l == n)) && matches!(self.infer_type(arg), Some(Type::Ref { inner, .. }) if inner.single_name() == Some("str"));
+            if lent_text && self.contains_kind(recv) == Contains::Value {
+                self.contains(recv, arg);
                 return;
             }
         }
@@ -6253,9 +6329,6 @@ impl<'a> Lowerer<'a> {
                 }
                 self.arg_list(args, Some(&params), TyPos::Param, span);
                 return;
-            }
-            if self.may_reach_oxie(recv_ty.as_ref()) {
-                self.unresolved.insert(name.to_string());
             }
         }
         // an interface's method, on an interface value, a type parameter bound by one or a value
@@ -6389,30 +6462,6 @@ impl<'a> Lowerer<'a> {
         Some(if pred { by_ref(by_ref(elem)) } else { by_ref(elem) })
     }
 
-    /// Can a method call on a value of type `t` reach a method of an Oxie class it didn't
-    /// resolve to? Not on std's plain values (`String`, `Vec`, numbers, `Option`, ...) or on an
-    /// Oxie class or enum without that method; on anything else (an unknown type, `Box<..>`, a
-    /// crate's type) it may, through `Deref`.
-    fn may_reach_oxie(&self, t: Option<&Type>) -> bool {
-        const PLAIN: &[&str] = &[
-            "String", "Vec", "VecDeque", "LinkedList", "BinaryHeap", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Option", "Result",
-            "PathBuf", "Path", "OsString", "OsStr", "Duration", "Instant", "SystemTime", "Range", "RangeInclusive",
-        ];
-        match t {
-            None => true,
-            Some(Type::Ref { inner, .. }) => self.may_reach_oxie(Some(inner)),
-            Some(Type::Tuple(_) | Type::Array(..) | Type::Slice(_) | Type::Option(_) | Type::Never) => false,
-            Some(t @ Type::Path { segs, .. }) => {
-                if self.type_owner(t).is_some_and(|o| self.class_at(&o).is_some() || self.enum_at(&o).is_some()) {
-                    return false;
-                }
-                let name = segs.last().map(|s| s.name.as_str()).unwrap_or_default();
-                !(PLAIN.contains(&name) || crate::lower::PRIMITIVES.contains(&name) || kotlin_alias(name).is_some())
-            }
-            Some(_) => true,
-        }
-    }
-
     /// Kotlin lambdas may ignore their argument (`map_err { MyError() }`); Rust closures must
     /// declare it. Adds `_` for std methods whose closure always receives a value.
     fn fix_lambda_arity(&self, recv: &Expr, name: &str, args: &[Arg]) -> Vec<Arg> {
@@ -6480,9 +6529,6 @@ impl<'a> Lowerer<'a> {
                         None => self.enum_at(&o).and_then(|en| en.methods.get(name).map(|m| (m.params.clone(), self.enum_home(en, Some(r.clone()))))),
                     }
                 });
-                if resolved.is_none() {
-                    self.unresolved.insert(name.clone());
-                }
                 self.e.w(".");
                 self.e.w(&member(name));
                 if let Some(g) = generics {
@@ -8324,6 +8370,12 @@ impl<'a> Lowerer<'a> {
                 }
                 None => match self.implicit_field(n) {
                     Some(f) => self.e.w(&format!("{}: {}", esc(n), f)),
+                    // `Self { label }` with text Oxie lent: converted as `label: label` would be
+                    None if self.lent.iter().any(|l| l == n) && fty.is_some() => {
+                        let var = Expr::new(ExprKind::Path { segs: vec![n.clone()], generics: None, global: false }, Span::default());
+                        self.e.w(&format!("{}: ", esc(n)));
+                        self.coerce(&var, fty.as_ref().unwrap(), TyPos::Field);
+                    }
                     None => self.e.w(&esc(n)),
                 },
             }

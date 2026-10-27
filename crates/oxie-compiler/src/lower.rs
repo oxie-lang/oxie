@@ -423,11 +423,6 @@ pub struct Lowerer<'a> {
     /// typed as an Oxie interface are `Box<dyn I>` there, which keeps the interface usable as
     /// `dyn` (an `impl I` would make the method generic).
     pub(crate) iface_sig: bool,
-    /// The methods called where Oxie can't tell which method the call reaches (on a value of
-    /// unknown type, after `?.`, through a path it can't follow): such a call passes its
-    /// arguments as written, so methods of these names keep their parameters' types (see
-    /// `params::borrow_method_params`).
-    pub unresolved: HashSet<String>,
     /// The words of the file's source and the modules declared beside it: generated code names
     /// a std item by its short name only where none of them can shadow it. `None` keeps full
     /// paths.
@@ -697,7 +692,6 @@ impl<'a> Lowerer<'a> {
             optional_locals: Vec::new(),
             in_trait_items: false,
             iface_sig: false,
-            unresolved: HashSet::new(),
             source_words: None,
             std_uses: RefCell::new(BTreeSet::new()),
             infer_cache: RefCell::new(HashMap::new()),
@@ -2211,6 +2205,10 @@ impl<'a> Lowerer<'a> {
                 parts.push(format!("{}: {}", pat, self.ty(&p.ty, TyPos::Field)));
                 continue;
             }
+            // an `own` parameter is the function's own value, which it may change
+            if p.own && !pat.starts_with("mut ") && p.name().is_some_and(|n| f.body.as_ref().is_some_and(|b| self.changes_param(b, n, &p.ty))) {
+                pat = format!("mut {}", pat);
+            }
             let mut pos = TyPos::Param;
             if fn_typed {
                 let captured = p.name().is_some_and(|n| f.body.as_ref().is_some_and(|b| visit::ident_in_lambda(b, n)));
@@ -2226,6 +2224,35 @@ impl<'a> Lowerer<'a> {
             parts.push(format!("{}: {}", pat, ty));
         }
         parts
+    }
+
+    /// Does the body change its parameter `name` of type `ty`: assign to it or into it, call a
+    /// method that changes it (a mutating one, or a `&mut self` method of its class), take
+    /// `&mut` of it, or lend it to a `&mut` parameter?
+    fn changes_param(&self, b: &FunBody, name: &str, ty: &Type) -> bool {
+        let block = match b {
+            FunBody::Block(b) => b.clone(),
+            FunBody::Expr(e) => Block { stmts: vec![Stmt::Expr { expr: e.clone(), semi: false }], span: e.span },
+        };
+        if visit::assignments(&block).iter().any(|(n, _)| n == name) {
+            return true;
+        }
+        let class = ty.single_name().and_then(|n| self.class_info(n));
+        let changes = |m: &str| class.and_then(|c| c.methods.get(m)).is_some_and(|mi| mi.recv == Recv::RefMut);
+        if visit::writes_through(&block, name, &changes) {
+            return true;
+        }
+        // `add_one(xs)` passes `&mut xs` to a `&mut` parameter
+        let mut lent_mut = false;
+        visit::walk_block(&block, &mut |e| {
+            if let ExprKind::Call { callee, args } = &e.kind {
+                if let Some(f) = callee.ident().and_then(|c| self.k.funs.get(c)) {
+                    lent_mut |= args.iter().enumerate().any(|(i, a)| a.value.ident() == Some(name) && a.name.is_none() && f.params.get(i).is_some_and(|p| matches!(p.ty, Type::Ref { mutable: true, .. })));
+                }
+            }
+            !lent_mut
+        });
+        lent_mut
     }
 
     fn fn_header(&self, f: &FunDecl) -> String {

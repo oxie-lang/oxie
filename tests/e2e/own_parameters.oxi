@@ -1,0 +1,80 @@
+// A parameter is borrowed unless it says `own`: the signature decides whether a call keeps the
+// caller's value, whatever the body does.
+import std.path.PathBuf
+
+data class Item(name: String, price: i32)
+
+class Cart(var items: [Item] = []) {
+    // keeps it, so it takes it
+    fun add(own item: Item) = items.push(item)
+    fun total(): i32 = items.sum_of { it.price }
+    fun has(name: String): bool = items.any { it.name == name }
+}
+
+// borrows: callers keep theirs
+fun describe(u: Item): String = "${u.name} (${u.price})"
+
+// text that a function keeps is copied, so callers keep theirs too
+class Names(var all: [String] = []) {
+    fun add(n: String) = all.push(n)
+}
+
+// an `own` parameter is the function's own value, which it may change
+fun with_four(own xs: [i32]): [i32] {
+    xs.push(4)
+    xs
+}
+
+// a copy of a borrowed list, text or path is owned
+fun copies(xs: [i32], s: String, p: PathBuf): String {
+    var mine = xs.clone()
+    mine.push(9)
+    val path: PathBuf = p.clone()
+    "${mine.len()} ${s.clone().len()} ${path.display()}"
+}
+
+fun shout(name: String): String = name.to_uppercase()
+
+class Fmt {
+    companion object {
+        fun loud(s: String): String = s.to_uppercase() + "!"
+    }
+}
+
+// `&name` and `name.as_str()` of a borrowed parameter are the reference it already is, and a
+// list of `String`s looks for borrowed text one element at a time
+fun lookup(stock: [String: i32], name: String): i32 = stock.get(&name).copied() ?: 0
+fun is_tea(name: String): bool = when (name.as_str()) {
+    "tea" -> true
+    else -> false
+}
+fun has(names: [String], who: String): bool = names.contains(&who)
+fun find(names: [String], who: String): bool = who in names
+
+fun main() {
+    var cart = Cart()
+    val pen = Item("pen", 2)
+    println(describe(pen))
+    cart.add(pen)
+    cart.add(Item("ink", 5))
+    println("${cart.total()} ${cart.has("ink")}")
+
+    var names = Names()
+    val ada = "Ada".to_string()
+    names.add(ada)
+    println("${names.all} $ada")
+
+    println(with_four([1, 2, 3]))
+    println(copies([1, 2], "abc", PathBuf.from("/tmp")))
+
+    // functions and methods used as values lend what they are given
+    val words: [String] = ["a", "b"]
+    println(words.iter().map(shout).to_list())
+    println(words.clone().into_iter().map(shout).to_list())
+    println(words.iter().map(Fmt.loud).to_list())
+
+    val stock: [String: i32] = ["tea": 3]
+    println("${lookup(stock, "tea")} ${is_tea("tea")} ${is_tea("ink")}")
+    val who = "b".to_string()
+    println("${has(words, who)} ${find(words, who)} $who")
+}

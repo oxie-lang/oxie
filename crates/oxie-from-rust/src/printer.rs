@@ -58,6 +58,8 @@ pub struct StructInfo {
     pub has_new: bool,
     /// Parameter types of `new`.
     pub new_params: Vec<syn::Type>,
+    /// Derives `Copy`, so Oxie passes it by value.
+    pub copy: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1003,6 +1005,20 @@ impl<'a> Printer<'a> {
         lines.join("\n")
     }
 
+    /// Does the parameter take a value that Oxie would lend without `own`: a `String`, `Vec`,
+    /// map, set, `PathBuf` or `Box`, or a struct of the file that isn't `Copy`? (`mut x: T` is
+    /// `var x: T`, which takes it anyway.)
+    fn takes_value(&self, pt: &syn::PatType) -> bool {
+        let syn::Pat::Ident(p) = &*pt.pat else { return false };
+        let syn::Type::Path(t) = &*pt.ty else { return false };
+        if p.mutability.is_some() || p.by_ref.is_some() || t.qself.is_some() {
+            return false;
+        }
+        let Some(last) = t.path.segments.last() else { return false };
+        let name = last.ident.to_string();
+        ["String", "Vec", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "PathBuf", "Box"].contains(&name.as_str()) || self.info.structs.get(&name).is_some_and(|s| !s.copy)
+    }
+
     /// Attributes before a field, variant or parameter: `@serde(skip) ` inline, doc comments on
     /// their own lines.
     pub fn field_attrs_inline(&self, attrs: &[syn::Attribute]) -> String {
@@ -1594,7 +1610,8 @@ impl<'a> Printer<'a> {
                     }
                 }
                 syn::FnArg::Typed(pt) => {
-                    params.push(format!("{}{}: {}", self.field_attrs_inline(&pt.attrs), self.pat(&pt.pat), self.ty(&pt.ty)));
+                    let own = if self.takes_value(pt) { "own " } else { "" };
+                    params.push(format!("{}{}{}: {}", self.field_attrs_inline(&pt.attrs), own, self.pat(&pt.pat), self.ty(&pt.ty)));
                 }
             }
         }

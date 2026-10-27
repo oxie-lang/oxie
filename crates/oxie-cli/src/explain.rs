@@ -341,18 +341,22 @@ fn moved_value(d: &mut MappedDiag, sources: &Sources, lines: &[&str], name: &str
         let (pl, pc, pe, ty) = fun_param(&lines, f, *index)?;
         Some((sources.elsewhere(&file.path, &d.file), pl, pc, pe, ty, lines[pl as usize].to_string()))
     });
-    // Oxie already lends `String`, list, map, set and `PathBuf` parameters that a top-level
-    // function only reads; one that stayed owned is kept by the function (stored or returned), so
-    // `&` wouldn't compile. Nor would it for a parameter of any function that stores or returns it.
+    // `own name: T`: the function takes the value (where `own ` is, for the fix that removes it).
+    // Oxie lends the parameters of the kinds it lends that aren't `own`.
+    let own_at = callee.as_ref().and_then(|(f, index)| {
+        let file = sources.declaring(&d.file, |ls| fun_param(ls, f, *index).is_some())?;
+        let (l, c) = own_param(&file.lines(), f, *index)?;
+        Some((sources.elsewhere(&file.path, &d.file), l, c))
+    });
+    // a function that stores or returns its parameter needs the value: `&` wouldn't compile
     let stored = callee.as_ref().filter(|_| param.is_some()).and_then(|(f, index)| stored_reason(sources, &d.file, f, *index));
-    let lendable = |ty: &str| {
-        ty == "String" || ty == "PathBuf" || (ty.starts_with('[') && !ty.contains(';')) || ["Vec<", "HashMap<", "HashSet<", "BTreeMap<", "BTreeSet<"].iter().any(|p| ty.starts_with(p))
-    };
-    let lent_kind = param.as_ref().is_some_and(|(.., ty, decl)| ["fun ", "private fun ", "internal fun "].iter().any(|p| decl.starts_with(p)) && lendable(ty));
-    let kept = lent_kind || stored.is_some();
+    let kept = own_at.is_some() || stored.is_some();
+    // an `own` parameter that the function doesn't keep: it can borrow it instead
+    let mut only_own = false;
     if kept {
         // say where and why the function keeps it, from the same rules that decided it
         let why = callee.as_ref().and_then(|(f, index)| kept_reason(sources, &d.file, f, *index)).or(stored);
+        only_own = own_at.is_some() && why.as_ref().is_some_and(|(.., w)| w.starts_with("its parameter is `own"));
         if let Some((file, l, c, e, why)) = &why {
             d.secondary.push(Label { file: file.clone(), line: *l, col: *c, end_col: *e, text: format!("{} keeps it: {}", callee_text, why), exact: true });
         }
@@ -362,10 +366,8 @@ fn moved_value(d: &mut MappedDiag, sources: &Sources, lines: &[&str], name: &str
             (false, false) => format!(" Finish using `{}` before the call.", name),
             (false, true) => String::new(),
         };
-        d.notes.push(help(&format!(
-            "giving a value to a function moves it: {} keeps it{}, and `{}` can't be used afterwards.{}",
-            callee_text, because, name, instead
-        )));
+        let giving = if own_at.is_some() { "giving a value to an `own` parameter moves it" } else { "giving a value to a function moves it" };
+        d.notes.push(help(&format!("{}: {} keeps it{}, and `{}` can't be used afterwards.{}", giving, callee_text, because, name, instead)));
     } else {
         let instead = if copyable { format!("Pass a copy with `{}.clone()`, or let {} borrow the value instead", name, callee_text) } else { format!("Let {} borrow the value instead", callee_text) };
         d.notes.push(help(&format!(
@@ -379,6 +381,9 @@ fn moved_value(d: &mut MappedDiag, sources: &Sources, lines: &[&str], name: &str
             let end = c + name.chars().count() as u32;
             d.fixes.push(Fix { title: format!("pass a copy of `{}`", name), edits: vec![edit(l, end, end, ".clone()")] });
         }
+    }
+    if let (Some((f, _)), Some((file, l, c)), true) = (&callee, &own_at, only_own) {
+        d.fixes.push(Fix { title: format!("let `{}` borrow it (without `own`)", f), edits: vec![Edit { file: file.clone(), ..edit(*l, *c, *c + 4, "") }] });
     }
     if let (Some((f, _)), Some((file, pl, pc, pe, ty, _))) = (callee, param) {
         if !ty.starts_with('&') && !is_copy_type(&ty) && !kept {
@@ -3144,6 +3149,23 @@ fn fun_param(lines: &[&str], name: &str, index: usize) -> Option<(u32, u32, u32,
     let ty_lead = ty.len() - ty.trim_start().len();
     let col = base + off + pname.chars().count() + 1 + ty[..ty_lead].chars().count();
     Some((l as u32, col as u32, (col + ty_text.chars().count()) as u32, ty_text.to_string()))
+}
+
+/// Where the parameter number `index` of the function `name` says `own`: the zero-based line and
+/// the column of `own`.
+fn own_param(lines: &[&str], name: &str, index: usize) -> Option<(u32, u32)> {
+    let pat = format!("fun {}(", name);
+    let l = lines.iter().position(|t| declares_fun(t, name))?;
+    let text = lines[l];
+    let open = text.find(&pat)? + pat.len();
+    let params = split_args(&text[open..]);
+    let (off, p) = params.get(index)?;
+    let lead = p.len() - p.trim_start().len();
+    if !p[lead..].starts_with("own ") {
+        return None;
+    }
+    let col = text[..open].chars().count() + off + p[..lead].chars().count();
+    Some((l as u32, col as u32))
 }
 
 /// Where and why the function `f` keeps its parameter number `index`: the file when it isn't

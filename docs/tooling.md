@@ -90,15 +90,15 @@ rewrites rustc's messages so they point at `.oxi` lines, including warnings:
 error[E0382]: `name` was moved, so it can't be used anymore
  --> src/main.oxi:7:30
   |
-1 | fun register(names: &mut [String], name: String) = names.push(name)
-  |                                                               ---- `register` keeps it: it passes `name` to `.push()`
+1 | fun register(names: &mut [String], own name: String) = names.push(name)
+  |                                                                   ---- `register` keeps it: it stores `name` with `.push()`
 ...
 6 |     register(names, name)
   |                     ---- `name` moved into `register()` here
 7 |     println("${names.len()} $name")
   |                              ^^^^ used here after the move
-  = help: giving a value to a function moves it: `register` keeps it (it passes `name` to
-    `.push()`), and `name` can't be used afterwards. Pass a copy with `name.clone()`.
+  = help: giving a value to an `own` parameter moves it: `register` keeps it (it stores `name`
+    with `.push()`), and `name` can't be used afterwards. Pass a copy with `name.clone()`.
   = fix: pass a copy of `name`: `register(names, name.clone())`
   = rustc: borrow of moved value: `name`
 ```
@@ -109,7 +109,7 @@ fixes:
 
 | rustc error | Oxie explanation and fix |
 |---|---|
-| use of moved value (E0382) | where it moved, and where and why the function keeps it; let the function borrow, or pass a copy when the type implements `Clone` (otherwise use the value before the call); for a value a `move` lambda took, give the lambda its own copy in a capture list (`{ [name] -> ... }`) |
+| use of moved value (E0382) | where it moved, and where and why the function keeps it (an `own` parameter); let the function borrow (without `own`) when it only reads the value, or pass a copy when the type implements `Clone` (otherwise use the value before the call); for a value a `move` lambda took, give the lambda its own copy in a capture list (`{ [name] -> ... }`) |
 | dropped while borrowed (E0597, E0716) | keep the value in a `val`; for a function whose result Oxie tied to all its references, the signature that leaves this argument out |
 | borrowed text where a `String` is expected, from `?.` ... `?:` through a reference (E0308) | copy the field: `u.address?.city.clone() ?: "unknown"` |
 | `?:` or `?.` on a value that can't be null, such as a `String` (E0277, E0599, E0282) | which value isn't optional, and its type; remove the default, or use `.` |
@@ -147,12 +147,12 @@ function a value moved into. A label there is shown under that file's name, and 
 says which file it changes:
 
 ```
- ::: src/text.oxi:3:35
+ ::: src/text.oxi:3:39
   |
-3 | fun keep(v: Vec<i32>): Vec<i32> = v
-  |                                   - `keep` keeps it: it returns `v`
+3 | fun keep(own v: Vec<i32>): Vec<i32> = v
+  |                                       - `keep` keeps it: it returns `v`
   ...
-  = fix: let `describe` borrow it (parameter type `&Tag`) (in src/text.oxi): `fun describe(t: &Tag): String = "#${t.name}"`
+  = fix: let `describe` borrow it (without `own`) (in src/text.oxi): `pub fun describe(t: Tag): String = "#${t.name}"`
 ```
 
 In editors the label is a related location, and the fix edits the other file.
@@ -199,10 +199,10 @@ method takes instead of `this` (`count: &mut i32 /* oxie: &mut i32 because `note
 of these choices where it lands, with the reason:
 
 ```rust
-// borrowing.oxi:4
-pub(crate) fn shout(s: &str /* oxie: &str because it only reads `s` */) -> String {
+// borrowing.oxi:5
+pub(crate) fn shout(s: &str /* oxie: &str because `s` isn't `own` */) -> String {
 ...
-    // borrowing.oxi:10
+    // borrowing.oxi:11
     pub(crate) fn hit(&mut self /* oxie: &mut self because it passes `hits` to `add_one`, which takes `&mut` */) {
         add_one(&mut self.hits /* oxie: &mut because the parameter is `&mut Vec<i32>` */);
 ```

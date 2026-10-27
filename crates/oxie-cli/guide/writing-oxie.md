@@ -18,7 +18,7 @@ when this guide or the compiler disagrees with what you remember about Oxie, the
   script, `oxie run tool.oxi`, with its crates in header comments: `// dep: rand = "0.8"`.
 * Errors are explained in Oxie terms at `.oxi` lines. Many end with `= fix:` and the corrected
   line: apply it when it matches what you meant. A fix that adds `.clone()` copies the data;
-  when the value is only read, borrowing it (a `&T` parameter) is usually the better fix.
+  when a function keeps a parameter, taking it with `own` moves it instead.
 * `oxie emit src/main.oxi --annotate` prints the Rust generated for a file, with the reasons
   for what Oxie inferred. Use it when you aren't sure what a construct does.
 * `oxie from-rust file.rs` translates Rust into Oxie, for example code from a crate's docs.
@@ -40,7 +40,7 @@ interface Priced {
 class Cart(owner: String) : Priced {                        // no inheritance, only interfaces
     var items: [Item] = []                                  // a list; body properties need a value
 
-    fun add(item: Item) = items.push(item)                  // changes the cart: Oxie makes it &mut self
+    fun add(own item: Item) = items.push(item)              // keeps `item`, so it says `own`; changes the cart: &mut self
     override fun total() = items.sum_of { it.price * it.qty as f64 }
 }
 
@@ -135,13 +135,15 @@ fun main() {
 * **Numbers don't convert by themselves.** `i32 * f64` is an error: write `n as f64`.
   `len()` is a `usize`; a list can be indexed with any integer type. Integer division truncates. `Int`, `Long` and `Double` are
   names for `i32`, `i64` and `f64`.
-* **Values have one owner.** Assigning a `String`, list or class value, or passing it to a
-  function that keeps it, moves it, and the old variable can't be used afterwards. Lend it
-  instead (`&T` and `&mut T` parameters; Oxie writes the `&` at the call), or pass
-  `.clone()` when the function really needs its own copy. Write parameters as values
-  (`name: String`, `items: [Item]`, `prices: [String: f64]`, `user: User`): a function or
-  method that only reads one borrows it without your help (`&str`, `&[Item]`, ...), and one that
-  keeps it takes it. A `for (x in xs)`
+* **Values have one owner.** Assigning a `String`, list or class value, or passing it to an
+  `own` parameter, moves it, and the old variable can't be used afterwards. Write parameters as
+  values (`name: String`, `items: [Item]`, `prices: [String: f64]`, `user: User`): they are
+  borrowed (`&str`, `&[Item]`, ...; Oxie writes the `&` at the call), so callers keep theirs.
+  A function that keeps one (stores it in a field or list, returns it, gives it to an `own`
+  parameter) says so: `fun add(own item: Item) = items.push(item)`. Without `own` that is an
+  error whose fix adds it; text it keeps is copied instead. One that changes the caller's value
+  takes `&mut T`. Older Oxie decided from the body whether a parameter was borrowed and never
+  needed `own`: add it where the compiler asks. A `for (x in xs)`
   over a local list that is used afterwards borrows it, so `x` is a reference; when the body
   changes `x` (`x.qty += 1`), it borrows the list mutably.
 * **Objects are not shared references.** `val b = a` moves or copies `a`; it doesn't alias it.

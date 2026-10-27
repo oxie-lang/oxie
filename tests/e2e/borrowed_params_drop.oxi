@@ -1,6 +1,6 @@
-// A `Vec<T>` parameter that a function only reads is lent as `&[T]` only when dropping a `T`
-// just frees memory. Otherwise the function keeps the `Vec` and drops it when it returns, as in
-// Rust: a value with `Drop` runs it there, and a `MutexGuard` unlocks there.
+// A parameter is borrowed unless it says `own`. A function that takes its list with `own` drops
+// it when it returns, as in Rust: a value with `Drop` runs it there, and a `MutexGuard` unlocks
+// there. A borrowed list is dropped by the caller.
 import std::sync::{Mutex, MutexGuard}
 
 class Noisy(val name: String)
@@ -25,13 +25,14 @@ rust {
 
 data class Point(val x: i32, val y: i32)
 
-fun count(xs: Vec<Noisy>) = println("count ${xs.len()}")
-fun count_held(xs: Vec<Holder>) = println("held ${xs.len()}: ${xs[0].inner.name}")
-fun count_logged(xs: Vec<Logged>) = println("logged ${xs.len()}")
-fun size<T>(xs: Vec<T>): usize = xs.len()
-fun release(guards: Vec<MutexGuard<i32>>) = println("releasing ${guards.len()}")
+fun count(own xs: Vec<Noisy>) = println("count ${xs.len()}")
+fun count_held(own xs: Vec<Holder>) = println("held ${xs.len()}: ${xs[0].inner.name}")
+fun count_logged(own xs: Vec<Logged>) = println("logged ${xs.len()}")
+fun size<T>(own xs: Vec<T>): usize = xs.len()
+fun release(own guards: Vec<MutexGuard<i32>>) = println("releasing ${guards.len()}")
 
-// dropping these only frees memory, so they are lent and the caller keeps its list
+// borrowed: the caller keeps its list
+fun peek(xs: Vec<Noisy>) = println("peek ${xs.len()}")
 fun sum_x(ps: Vec<Point>): i32 = ps.iter().map { it.x }.sum()
 fun longest(names: Vec<String>): usize = names.iter().map { it.len() }.max().unwrap_or(0)
 
@@ -61,4 +62,8 @@ fun main() {
     println("${sum_x(ps)} ${sum_x(ps)}")
     val names = vec["ada".to_string(), "grace".to_string()]
     println("${longest(names)} ${names:?}")
+
+    val es = vec[Noisy("e")]
+    peek(es)
+    println("after peek")
 }

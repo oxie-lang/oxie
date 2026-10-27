@@ -1,4 +1,4 @@
-fun register(names: &mut Vec<String>, name: String) = names.push(name)
+fun register(names: &mut Vec<String>, own name: String) = names.push(name)
 
 fun main() {
     var names: Vec<String> = vec[]

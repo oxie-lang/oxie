@@ -79,9 +79,9 @@ Oxie follows Rust's rules, so the mistakes a model makes are often Rust's: a val
 function took it, a `val` that is changed later. This function has both:
 
 ```oxie
-fun register(names: &mut [String], name: String) = names.push(name)
+fun register(names: &mut [String], own name: String) = names.push(name)
 
-fun sign_up(names: &mut [String], name: String) {
+fun sign_up(names: &mut [String], own name: String) {
     register(names, name)
     val count = names.len()
     count += 1
@@ -106,15 +106,15 @@ error[E0384]: `count` is a `val`, so it can't be changed
 error[E0382]: `name` was moved, so it can't be used anymore
  --> src/main.oxi:7:24
   |
-1 | fun register(names: &mut [String], name: String) = names.push(name)
-  |                                                               ---- `register` keeps it: it passes `name` to `.push()`
+1 | fun register(names: &mut [String], own name: String) = names.push(name)
+  |                                                                   ---- `register` keeps it: it stores `name` with `.push()`
 ...
 4 |     register(names, name)
   |                     ---- `name` moved into `register()` here
 ...
 7 |     println("welcome, $name, member $count")
   |                        ^^^^ used here after the move
-  = help: giving a value to a function moves it: `register` keeps it (it passes `name` to `.push()`), and `name` can't be used afterwards. Pass a copy with `name.clone()`.
+  = help: giving a value to an `own` parameter moves it: `register` keeps it (it stores `name` with `.push()`), and `name` can't be used afterwards. Pass a copy with `name.clone()`.
   = fix: pass a copy of `name`: `register(names, name.clone())`
   = rustc: borrow of moved value: `name`
 ```
@@ -122,9 +122,9 @@ error[E0382]: `name` was moved, so it can't be used anymore
 With both fixes the program builds and runs:
 
 ```oxie
-fun register(names: &mut [String], name: String) = names.push(name)
+fun register(names: &mut [String], own name: String) = names.push(name)
 
-fun sign_up(names: &mut [String], name: String) {
+fun sign_up(names: &mut [String], own name: String) {
     register(names, name.clone())
     var count = names.len()
     count += 1

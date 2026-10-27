@@ -390,10 +390,9 @@ fn symlinked_directories_keep_the_editors_uri() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// `pub`, so Oxie keeps the owned parameter (it would lend a private function's)
-// `consume` only reads `v`, but it is used as a value below, so it keeps its signature and the
-// call moves `nums`; being `pub`, it gets the fix that lets it borrow
-const MOVED: &str = r#"pub fun consume(v: Vec<i32>): usize = v.len()
+// `consume` takes `v` with `own`, so the call moves `nums`; it only reads `v`, so it gets the fix
+// that lets it borrow
+const MOVED: &str = r#"pub fun consume(own v: Vec<i32>): usize = v.len()
 
 fun main() {
     val nums = vec[1, 2, 3]
@@ -429,7 +428,7 @@ fn borrow_errors_have_quick_fixes() {
 
     let actions = c.request("textDocument/codeAction", json!({"textDocument": {"uri": uri}, "range": diag["range"], "context": {"diagnostics": [diag]}}));
     let titles: Vec<&str> = actions.as_array().unwrap().iter().map(|a| a["title"].as_str().unwrap()).collect();
-    assert_eq!(titles, ["Pass a copy of `nums`", "Let `consume` borrow it (parameter type `&[i32]`)"], "{actions}");
+    assert_eq!(titles, ["Pass a copy of `nums`", "Let `consume` borrow it (without `own`)"], "{actions}");
     let edit = &actions[0]["edit"]["changes"][&uri][0];
     assert_eq!(edit["range"]["start"], json!({"line": 4, "character": 24}), "{edit}");
     assert_eq!(edit["newText"], ".clone()");
@@ -451,10 +450,10 @@ fun main() {
 }
 "#;
 
-const PROJECT_TEXT: &str = r##"fun keep(v: Vec<i32>): Vec<i32> = v
+const PROJECT_TEXT: &str = r##"fun keep(own v: Vec<i32>): Vec<i32> = v
 data class Tag(name: String)
-pub fun describe(t: Tag): String = "#${t.name}"
-fun describe_all(tags: Vec<Tag>): Vec<String> = tags.into_iter().map(describe).collect()
+pub fun describe(own t: Tag): String = "#${t.name}"
+fun describe_all(own tags: Vec<Tag>): Vec<String> = tags.into_iter().map(describe).collect()
 "##;
 
 /// In a project, an explanation can point at another file (where a function keeps the value
@@ -488,17 +487,17 @@ fn explanations_and_fixes_reach_other_files_of_the_project() {
     let moved = at_line(5);
     let related = moved["relatedInformation"].as_array().unwrap();
     let kept = related.iter().find(|r| r["location"]["uri"] == text_uri).unwrap_or_else(|| panic!("{moved}"));
-    assert_eq!(kept["location"]["range"]["start"], json!({"line": 0, "character": 34}), "{moved}");
+    assert_eq!(kept["location"]["range"]["start"], json!({"line": 0, "character": 38}), "{moved}");
     assert!(kept["message"].as_str().unwrap().contains("it returns `v`"), "{moved}");
 
-    // `tag` moved into `describe` (used as a value, so Oxie keeps its signature): the fix changes
-    // the parameter in text.oxi
+    // `tag` moved into `describe`, which takes it with `own` but only reads it: the fix removes
+    // `own` in text.oxi
     let moved = at_line(8);
     let actions = c.request("textDocument/codeAction", json!({"textDocument": {"uri": uri}, "range": moved["range"], "context": {"diagnostics": [moved]}}));
-    let borrow = actions.as_array().unwrap().iter().find(|a| a["title"] == "Let `describe` borrow it (parameter type `&Tag`)").unwrap_or_else(|| panic!("{actions}"));
+    let borrow = actions.as_array().unwrap().iter().find(|a| a["title"] == "Let `describe` borrow it (without `own`)").unwrap_or_else(|| panic!("{actions}"));
     let edit = &borrow["edit"]["changes"][&text_uri][0];
-    assert_eq!(edit["range"]["start"], json!({"line": 2, "character": 20}), "{borrow}");
-    assert_eq!(edit["newText"], "&Tag", "{borrow}");
+    assert_eq!(edit["range"], json!({"start": {"line": 2, "character": 17}, "end": {"line": 2, "character": 21}}), "{borrow}");
+    assert_eq!(edit["newText"], "", "{borrow}");
     assert!(borrow["edit"]["changes"].get(&uri).is_none(), "{borrow}");
 
     let _ = c.request("shutdown", Value::Null);
@@ -560,6 +559,9 @@ fn quick_fixes_fix_their_errors() {
         .collect();
     items.sort();
     let results = common::parallel(&items, |p, cache| check_fixes(p, cache));
+    // the fixes of errors Oxie finds itself are checked too: two for each of the four there
+    let own = items.iter().position(|p| p.ends_with("own_parameters.oxi")).unwrap();
+    assert_eq!(results[own].0, 8, "{:?}", results[own]);
     let checked: usize = results.iter().map(|(n, _)| n).sum();
     let failures: Vec<String> = results.into_iter().flat_map(|(_, f)| f).collect();
     assert!(checked >= 20, "only {checked} fixes were checked");
@@ -584,9 +586,10 @@ fn check_fixes(p: &Path, cache: &Path) -> (usize, Vec<String>) {
     };
     // the errors and their fixes, as an editor gets them
     let work = copy_to(&fixes_dir.join(&name));
-    // with Oxie errors in any file of it, the server doesn't run cargo check
+    // with Oxie errors in any file of it, the server doesn't run cargo check: the fixes of those
+    // errors are checked instead
     if oxie_errors(&work, project).is_some() {
-        return (0, Vec::new());
+        return check_oxie_fixes(p, &work, &name, project, cache, &copy_to);
     }
     let main = if project { work.join("src/main.oxi") } else { work.join(&name) };
     let main_name = main.file_name().unwrap().to_string_lossy().to_string();
@@ -688,6 +691,67 @@ fn check_fixes(p: &Path, cache: &Path) -> (usize, Vec<String>) {
         }
     }
     (checked, failures)
+}
+
+/// For a program with errors Oxie finds itself: applies each fix the language server offers for
+/// them to a fresh copy, and checks that the error is gone and that no other Oxie error came.
+fn check_oxie_fixes(p: &Path, work: &Path, name: &str, project: bool, cache: &Path, copy_to: &dyn Fn(&Path) -> PathBuf) -> (usize, Vec<String>) {
+    let main = if project { work.join("src/main.oxi") } else { work.join(name) };
+    let uri = file_uri(&main);
+    let mut c = Client::start_in(cache);
+    c.request("initialize", json!({"rootUri": file_uri(work), "capabilities": {}}));
+    c.notify("initialized", json!({}));
+    c.notify("textDocument/didOpen", json!({"textDocument": {"uri": uri, "languageId": "oxie", "version": 1, "text": std::fs::read_to_string(&main).unwrap()}}));
+    let own = c.wait_diagnostics(&uri);
+    let _ = c.request("shutdown", Value::Null);
+    c.notify("exit", Value::Null);
+    let before = oxie_error_messages(work, project);
+    let count = |list: &[String], m: &str| list.iter().filter(|x| *x == m).count();
+    let (mut checked, mut failures) = (0, Vec::new());
+    for d in own.as_array().into_iter().flatten().filter(|d| d["source"] == "oxie") {
+        let message = d["message"].as_str().unwrap().lines().next().unwrap().to_string();
+        let line = d["range"]["start"]["line"].as_i64().unwrap();
+        for (i, fix) in d["data"]["fixes"].as_array().into_iter().flatten().enumerate() {
+            checked += 1;
+            let fixed = copy_to(&cache.join("fixes").join(format!("{}-oxie-{}-{}", name, line + 1, i)));
+            let mut edits: Vec<&Value> = fix["edits"].as_array().unwrap().iter().collect();
+            edits.sort_by_key(|e| std::cmp::Reverse((e["range"]["start"]["line"].as_u64(), e["range"]["start"]["character"].as_u64())));
+            for e in edits {
+                let file = uri_path(e["uri"].as_str().unwrap_or(&uri));
+                let target = fixed.join(file.strip_prefix(work).unwrap());
+                let mut text = std::fs::read_to_string(&target).unwrap();
+                let (start, end) = (offset(&text, &e["range"]["start"]), offset(&text, &e["range"]["end"]));
+                text.replace_range(start..end, e["newText"].as_str().unwrap());
+                std::fs::write(&target, text).unwrap();
+            }
+            let title = format!("{}:{}: the fix `{}` for `{}`", p.display(), line + 1, fix["title"].as_str().unwrap_or(""), message);
+            let after = oxie_error_messages(&fixed, project);
+            if count(&after, &message) >= count(&before, &message) {
+                failures.push(format!("{} leaves the error: {:?}", title, after));
+            }
+            for m in &after {
+                if count(&after, m) > count(&before, m) {
+                    failures.push(format!("{} adds an error: {}", title, m));
+                }
+            }
+            let _ = std::fs::remove_dir_all(&fixed);
+        }
+    }
+    (checked, failures)
+}
+
+/// The messages of the errors Oxie itself reports for the program in `dir` (a script, or a
+/// project).
+fn oxie_error_messages(dir: &Path, project: bool) -> Vec<String> {
+    let inputs = if project {
+        oxie_compiler::discover(&dir.join("src")).unwrap()
+    } else {
+        let file = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "oxi")).unwrap();
+        vec![oxie_compiler::Input { rel_path: PathBuf::from("main.oxi"), text: std::fs::read_to_string(&file).unwrap(), abs_path: file }]
+    };
+    let opts = oxie_compiler::Options { crate_name: "main".into(), extern_crates: Default::default(), out_dir: PathBuf::from("/oxie"), script: !project, root_attrs: Vec::new() };
+    let out = oxie_compiler::compile(inputs, &opts);
+    out.diags.iter().flat_map(|(_, _, ds)| ds).filter(|d| d.severity == oxie_compiler::Severity::Error).map(|d| d.message.clone()).collect()
 }
 
 /// The errors Oxie itself reports for the program in `dir` (a script, or a project), if any.

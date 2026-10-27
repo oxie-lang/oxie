@@ -226,12 +226,25 @@ impl Server {
                     if let Some(h) = &d.help {
                         msg.push_str(&format!("\nhelp: {}", h));
                     }
-                    json!({
+                    let mut v = json!({
                         "range": range(text, &idx, d.span.start as usize, d.span.end as usize),
                         "severity": if d.severity == Severity::Error { 1 } else { 2 },
                         "source": "oxie",
                         "message": msg,
-                    })
+                    });
+                    // its quick fixes, as `code_actions` reads them
+                    if !d.fixes.is_empty() {
+                        let fixes: Vec<Value> = d
+                            .fixes
+                            .iter()
+                            .map(|f| {
+                                let edits: Vec<Value> = f.edits.iter().map(|(s, t)| json!({"range": range(text, &idx, s.start as usize, s.end as usize), "newText": t})).collect();
+                                json!({"title": f.title, "edits": edits})
+                            })
+                            .collect();
+                        v["data"] = json!({ "fixes": fixes });
+                    }
+                    v
                 })
                 .collect();
             diags.insert(canonical(path), list);
@@ -901,7 +914,8 @@ fn code_actions(server: &Server, params: &Value) -> Value {
     let uri = params["textDocument"]["uri"].as_str().unwrap_or("");
     let path = canonical(&uri_to_path(uri));
     let mut diags: Vec<Value> = params["context"]["diagnostics"].as_array().cloned().unwrap_or_default();
-    let published = server.cargo_diags.lock().unwrap().get(&path).cloned().unwrap_or_default();
+    let mut published = server.cargo_diags.lock().unwrap().get(&path).cloned().unwrap_or_default();
+    published.extend(server.oxie_diags.lock().unwrap().get(&path).cloned().unwrap_or_default());
     for d in diags.iter_mut() {
         if d.get("data").is_none() {
             if let Some(p) = published.iter().find(|p| p["range"] == d["range"] && p["message"] == d["message"]) {

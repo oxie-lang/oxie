@@ -6,7 +6,7 @@ ADA
 6
 4
 2 names: ada, bob true
-[1, 2, 3] ["ada", "bob"] ["ada"] k
+[1, 2, 3] ["ada", "bob"] ["ada"] k ada
 p
 v
 4

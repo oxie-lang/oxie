@@ -35,8 +35,8 @@ fun has(xs: Vec<String>, who: String): Boolean {
     for (x in xs) if (x == who) return true
     return false
 }
-// takes the elements: stays owned
-fun keep(xs: Vec<String>): Vec<String> {
+// takes the elements: `own`
+fun keep(own xs: Vec<String>): Vec<String> {
     var out: Vec<String> = vec[]
     for (x in xs) out.push(x)
     return out

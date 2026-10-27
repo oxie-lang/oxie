@@ -1,11 +1,11 @@
 // Declarations the errors in main.oxi depend on.
 
-fun keep(v: Vec<i32>): Vec<i32> = v
+fun keep(own v: Vec<i32>): Vec<i32> = v
 // error: 3: `keep` keeps it: it returns `v`
 
 data class Tag(name: String)
-// used as a value (`describe_all`): its signature stays as written, so the move error and its fix stay
-pub fun describe(t: Tag): String = "#${t.name}"
+// takes its tag but only reads it: the move error offers to let it borrow, in this file
+pub fun describe(own t: Tag): String = "#${t.name}"
 
 data class Total(sum: i32)
 
@@ -16,4 +16,4 @@ class Counter(var hits: Vec<i32> = vec[]) {
     // error: 15: `hit` changes its object here, so it takes `&mut self`
 }
 
-fun describe_all(tags: Vec<Tag>): Vec<String> = tags.into_iter().map(describe).collect()
+fun describe_all(own tags: Vec<Tag>): Vec<String> = tags.into_iter().map(describe).collect()

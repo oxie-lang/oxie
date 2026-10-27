@@ -1,6 +1,6 @@
-// A parameter of an Oxie class or `Box<T>` that a function only reads becomes `&T`, so the caller
-// keeps its value: `describe(ada)` lends `ada`, which `is_adult(ada)` and `shout(ada)` use again.
-// A function that stores the value or takes a field out of it keeps it owned.
+// A parameter of an Oxie class or `Box<T>` becomes `&T` unless it says `own`, so the caller keeps
+// its value: `describe(ada)` lends `ada`, which `is_adult(ada)` and `shout(ada)` use again. A
+// function that stores the value or takes a field out of it takes it with `own`.
 
 data class User(val name: String, val age: i32) {
     fun greeting(): String = "hi $name"
@@ -23,9 +23,9 @@ fun label_of(n: Box<Node>): String = "<${n.label}>"
 // a `Copy` value is copied: nothing to lend
 fun norm(p: Point): i32 = p.x + p.y
 // keeps it: stores it
-fun register(u: User, all: &mut Vec<User>) = all.push(u)
+fun register(own u: User, all: &mut Vec<User>) = all.push(u)
 // keeps it: takes a field out
-fun name_of(u: User): String = u.name
+fun name_of(own u: User): String = u.name
 
 fun main() {
     val ada = User("Ada", 36)

@@ -87,6 +87,7 @@ What the generated Rust looks like:
 |---|---|
 | `data class P(x: f64)` | `struct P { pub(crate) x: f64 }`, `P::new(x)`, derives |
 | `class C(a: A) { fun m() }` | `struct C`, `C::new(a)`, `c.m()` |
+| `fun f(s: String, own t: String)` | `fn f(s: &str, t: String)`: a parameter is borrowed unless it says `own` |
 | `enum E { V(n: i32) }` | `enum E { V { n: i32 } }` |
 | `interface I { fun f(): i32 }` | `trait I { fn f(&self) -> i32; }` |
 | `fun f(): T throws` | `fn f() -> Result<T, Box<dyn Error + Send + Sync>>` |
@@ -107,7 +108,9 @@ pub data class Point(x: f64, y: f64) {
 pub fun origin() = Point(0.0, 0.0)
 ```
 
-Rust users depend on it like any crate: `geometry::Point::new(1.0, 2.0).distance(...)`.
+Rust users depend on it like any crate: `geometry::Point::new(1.0, 2.0).distance(...)`. The
+parameters of `pub` functions are borrowed unless they say `own`, as everywhere, so a function's
+signature, and the crate's API, changes only when its declaration does.
 [`examples/geometry`](../examples/geometry) has an integration test written in Rust.
 
 ## Generated code

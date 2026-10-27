@@ -24,22 +24,22 @@ impl Library {
     }
 
     // list_map_types.oxi:7
-    pub(crate) fn add(&mut self /* oxie: &mut self because it assigns `shelves` */, shelf: String /* oxie: owned because it looks for `shelf` with `in`, which compares the value itself */, title: String /* oxie: owned because it passes `title` to `.push()` */) {
+    pub(crate) fn add(&mut self /* oxie: &mut self because it assigns `shelves` */, shelf: &str /* oxie: &str because `shelf` isn't `own` */, title: &str /* oxie: &str because `title` isn't `own` */) {
         // list_map_types.oxi:8
-        if !self.shelves.contains_key(&shelf) {
-            self.shelves.insert(shelf.clone(), vec![]);
+        if !self.shelves.contains_key(shelf) {
+            self.shelves.insert(shelf.to_string(), vec![]);
         }
         // list_map_types.oxi:9
-        self.shelves.get_mut(&shelf).unwrap().push(title);
+        self.shelves.get_mut(shelf).unwrap().push(title.to_string());
     }
 
     // list_map_types.oxi:12
-    pub(crate) fn count(&self, shelf: String /* oxie: owned because it uses `&shelf`, a reference to the value itself */) -> usize {
-        self.shelves.get(&shelf).map(|it| it.len()).unwrap_or(0)
+    pub(crate) fn count(&self, shelf: &str /* oxie: &str because `shelf` isn't `own` */) -> usize {
+        self.shelves.get(shelf).map(|it| it.len()).unwrap_or(0)
     }
 
     // list_map_types.oxi:14
-    pub(crate) fn label(&self, shelf: &str /* oxie: &str because it only reads `shelf` */) -> String {
+    pub(crate) fn label(&self, shelf: &str /* oxie: &str because `shelf` isn't `own` */) -> String {
         format!("shelf {}", shelf.to_uppercase())
     }
 }
@@ -54,7 +54,7 @@ fn main() {
     // list_map_types.oxi:20
     let mut lib = Library::new();
     // list_map_types.oxi:21
-    lib.add("a".to_string(), "Dune".to_string());
+    lib.add(&"a".to_string() /* oxie: & because the parameter is `&str` */, &"Dune".to_string() /* oxie: & because the parameter is `&str` */);
     // list_map_types.oxi:22
     let titles: Vec<String> = vec![String::from("Emma"), String::from("Ulysses")];
     // list_map_types.oxi:23
@@ -66,5 +66,5 @@ fn main() {
     // list_map_types.oxi:26
     let shelf = "a".to_string();
     // list_map_types.oxi:27
-    println!("{} {} {shelf} {} {seen:?} {sizes:?}", lib.count(shelf.clone()), lib.label(&shelf /* oxie: & because the parameter is `&str` */), longest(&titles /* oxie: & because the parameter is `&[String]` */));
+    println!("{} {} {shelf} {} {seen:?} {sizes:?}", lib.count(&shelf.clone() /* oxie: & because the parameter is `&str` */), lib.label(&shelf /* oxie: & because the parameter is `&str` */), longest(&titles /* oxie: & because the parameter is `&[String]` */));
 }

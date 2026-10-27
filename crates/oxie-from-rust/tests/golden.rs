@@ -986,7 +986,7 @@ impl Pane {
 "#,
         r#"context(cx: &mut Context<Self>)
 pub class Pane(items: [String]) {
-    pub fun add(item: String) {
+    pub fun add(own item: String) {
         items.push(item)
         changed()
     }

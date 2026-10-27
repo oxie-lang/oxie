@@ -1,6 +1,6 @@
 // Errors caused by what Oxie decided say why it decided that.
 
-fun keep(v: Vec<i32>): Vec<i32> = v
+fun keep(own v: Vec<i32>): Vec<i32> = v
 fun first_word(text: &str, sep: &str): &str = text.split(sep).next().unwrap_or(text)
 
 fun main() {

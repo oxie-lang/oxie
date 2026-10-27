@@ -10,7 +10,7 @@ class Cart(owner: String) {
     var items: [Item] = []
     var tags: [String: [String]] = [:]
 
-    fun add(item: Item) = items.push(item)
+    fun add(own item: Item) = items.push(item)
     fun tag(name: String, tag: String) {
         if (name !in tags) tags[name.clone()] = []
         tags.get_mut(&name).unwrap().push(tag)
