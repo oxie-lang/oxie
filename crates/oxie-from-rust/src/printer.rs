@@ -66,6 +66,8 @@ pub struct StructInfo {
 pub struct EnumInfo {
     /// variant name → named fields (empty for tuple and unit variants)
     pub named: HashMap<String, Vec<String>>,
+    /// Derives `Copy`, so Oxie passes it by value.
+    pub copy: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -110,6 +112,8 @@ pub struct Cx {
     pub class: Option<ClassCx>,
     /// receivers key: (type, trait)
     pub impl_key: Option<(String, String)>,
+    /// The type parameters of the `impl` block around a method, without a `Copy` bound.
+    pub impl_generics: Vec<String>,
     pub throws: bool,
     /// the error type of a `throws` function converts from `&str` (`String`, `AnyError`)
     pub err_from_str: bool,
@@ -1006,17 +1010,31 @@ impl<'a> Printer<'a> {
     }
 
     /// Does the parameter take a value that Oxie would lend without `own`: a `String`, `Vec`,
-    /// map, set, `PathBuf` or `Box`, or a struct of the file that isn't `Copy`? (`mut x: T` is
-    /// `var x: T`, which takes it anyway.)
-    fn takes_value(&self, pt: &syn::PatType) -> bool {
+    /// map, set, `PathBuf` or `Box` (not of a function), a struct or enum of the file that isn't
+    /// `Copy`, a type parameter of `generics` (those without a `Copy` bound), or an `Option` of
+    /// one? (`mut x: T` is `var x: T`, which takes it anyway.)
+    fn takes_value(&self, pt: &syn::PatType, generics: &[String]) -> bool {
         let syn::Pat::Ident(p) = &*pt.pat else { return false };
-        let syn::Type::Path(t) = &*pt.ty else { return false };
-        if p.mutability.is_some() || p.by_ref.is_some() || t.qself.is_some() {
-            return false;
-        }
-        let Some(last) = t.path.segments.last() else { return false };
+        p.mutability.is_none() && p.by_ref.is_none() && self.lent_by_oxie(&pt.ty, generics, true)
+    }
+
+    /// Does Oxie lend a parameter of type `ty`? An `Option` of such a type too, when `option`
+    /// (not an `Option` of an `Option`).
+    fn lent_by_oxie(&self, ty: &syn::Type, generics: &[String], option: bool) -> bool {
+        let syn::Type::Path(t) = ty else { return false };
+        let Some(last) = t.path.segments.last().filter(|_| t.qself.is_none()) else { return false };
         let name = last.ident.to_string();
-        ["String", "Vec", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "PathBuf", "Box"].contains(&name.as_str()) || self.info.structs.get(&name).is_some_and(|s| !s.copy)
+        let arg = || match &last.arguments {
+            syn::PathArguments::AngleBracketed(a) => a.args.iter().find_map(|g| if let syn::GenericArgument::Type(t) = g { Some(t) } else { None }),
+            _ => None,
+        };
+        match name.as_str() {
+            "Option" => option && arg().is_some_and(|t| self.lent_by_oxie(t, generics, false)),
+            "Box" => !arg().is_some_and(|t| matches!(t, syn::Type::TraitObject(o) if o.bounds.iter().any(|b| matches!(b, syn::TypeParamBound::Trait(tr) if tr.path.segments.last().is_some_and(|s| ["Fn", "FnMut", "FnOnce"].contains(&s.ident.to_string().as_str())))))),
+            "String" | "Vec" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "PathBuf" => true,
+            _ if t.path.segments.len() == 1 && last.arguments.is_empty() && generics.contains(&name) => true,
+            _ => self.info.structs.get(&name).is_some_and(|s| !s.copy) || self.info.enums.get(&name).is_some_and(|e| !e.copy),
+        }
     }
 
     /// Attributes before a field, variant or parameter: `@serde(skip) ` inline, doc comments on
@@ -1082,6 +1100,7 @@ impl<'a> Printer<'a> {
                         self.cx = self.method_cx(decl, &f.sig, &f.block, &methods);
                         let tkey = facts::type_key(&imp.self_ty);
                         self.cx.impl_key = Some((format!("{}{}", self.mod_prefix, tkey), trait_name.clone().unwrap_or_default()));
+                        self.cx.impl_generics = lent_generics(&imp.generics);
                         let kind = FunKind::Method { class: true, overrides: trait_name.is_some() };
                         let mut s = cs.join("\n");
                         if !s.is_empty() {
@@ -1404,6 +1423,7 @@ impl<'a> Printer<'a> {
                     let saved = std::mem::take(&mut self.cx);
                     self.cx.bound = bound_names(&f.sig, &f.block);
                     self.cx.impl_key = Some((tkey.clone(), trait_key.clone()));
+                    self.cx.impl_generics = lent_generics(&imp.generics);
                     self.cx.type_fns = self.type_fns(&facts::type_name(&imp.self_ty));
                     self.cx.ctx_class = Some(facts::type_name(&imp.self_ty)).filter(|n| self.krate.class(n).is_some());
                     let ty = facts::type_name(&imp.self_ty);
@@ -1602,6 +1622,10 @@ impl<'a> Printer<'a> {
                 Recv::Value | Recv::Typed => write_recv = true,
             }
         }
+        // Oxie lends the parameters it writes the signatures of (not an interface's or an
+        // operator's), unless they say `own`
+        let lends = matches!(kind, FunKind::Free | FunKind::Method { overrides: false, .. });
+        let generics: Vec<String> = lent_generics(&sig.generics).into_iter().chain(self.cx.impl_generics.iter().cloned()).collect();
         for (i, a) in sig.inputs.iter().enumerate().take(sig.inputs.len() - ctx.drop) {
             match a {
                 syn::FnArg::Receiver(r) => {
@@ -1610,7 +1634,7 @@ impl<'a> Printer<'a> {
                     }
                 }
                 syn::FnArg::Typed(pt) => {
-                    let own = if self.takes_value(pt) { "own " } else { "" };
+                    let own = if lends && self.takes_value(pt, &generics) { "own " } else { "" };
                     params.push(format!("{}{}{}: {}", self.field_attrs_inline(&pt.attrs), own, self.pat(&pt.pat), self.ty(&pt.ty)));
                 }
             }
@@ -1853,6 +1877,17 @@ fn tt_mentions(t: &proc_macro2::TokenTree, name: &str) -> bool {
         proc_macro2::TokenTree::Group(g) => g.stream().into_iter().any(|t| tt_mentions(&t, name)),
         _ => false,
     }
+}
+
+/// The type parameters that Oxie lends a parameter of: those without a `Copy` or `Fn` bound.
+fn lent_generics(g: &syn::Generics) -> Vec<String> {
+    let value = |bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::token::Plus>| {
+        bounds.iter().any(|b| matches!(b, syn::TypeParamBound::Trait(t) if t.path.segments.last().is_some_and(|s| ["Copy", "Fn", "FnMut", "FnOnce"].contains(&s.ident.to_string().as_str()))))
+    };
+    let in_where = |name: &syn::Ident| {
+        g.where_clause.iter().flat_map(|w| &w.predicates).any(|p| matches!(p, syn::WherePredicate::Type(t) if matches!(&t.bounded_ty, syn::Type::Path(b) if b.path.is_ident(name)) && value(&t.bounds)))
+    };
+    g.type_params().filter(|p| !value(&p.bounds) && !in_where(&p.ident)).map(|p| p.ident.to_string()).collect()
 }
 
 /// Names bound by parameters, `let`s, patterns and closures anywhere in a function.

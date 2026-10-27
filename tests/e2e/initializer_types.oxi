@@ -12,7 +12,7 @@ class Log(var lines: Vec<String> = vec[]) {
 
 context(log: &mut Log)
 class Stack<T>(var items: Vec<T> = vec[]) {
-    fun push(x: T, times: usize = 1) {
+    fun push(own x: T, times: usize = 1) {
         repeat(times) { log.add("push") }
         items.push(x)
     }

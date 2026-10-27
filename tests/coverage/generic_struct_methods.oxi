@@ -1,7 +1,7 @@
 struct Stack<T> { items: Vec<T> }
 impl<T: Clone> Stack<T> {
     fun new(): Self = Stack { items: Vec.new() }
-    mut fun push(x: T) { self.items.push(x) }
+    mut fun push(own x: T) { self.items.push(x) }
     fun peek(): T? = self.items.last().cloned()
 }
 fun main() { var s = Stack::<i32>.new(); s.push(3); println("${s.peek():?}") }

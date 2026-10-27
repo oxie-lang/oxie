@@ -7,7 +7,7 @@ import std::collections::HashMap
 data class P<T>(x: T, y: T) {
     override fun toString() = "($x, $y)"
     operator fun plus(o: P<T>): P<T> = P(x + o.x, y + o.y)
-    fun with_y(o: T): P<T> = this.copy(y = o)
+    fun with_y(own o: T): P<T> = this.copy(y = o)
 }
 
 interface Repo<T> {
@@ -26,7 +26,7 @@ class Bag<T>(items: Vec<T>) : Repo<T> {
 }
 
 class Index<K, V>(map: HashMap<K, V>) {
-    fun put(k: K, v: V) { map.insert(k, v) }
+    fun put(own k: K, own v: V) { map.insert(k, v) }
     fun size(): usize = map.len()
 }
 

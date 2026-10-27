@@ -511,7 +511,7 @@ fn collect_items(items: &[syn::Item], info: &mut Info, fn_counts: &mut HashMap<S
                 info.structs.insert(s.ident.to_string(), printer::StructInfo { fields, has_new, new_params, copy });
             }
             syn::Item::Enum(e) => {
-                let mut ei = printer::EnumInfo::default();
+                let mut ei = printer::EnumInfo { copy: facts::derives_of(&e.attrs).contains("Copy"), ..Default::default() };
                 for v in &e.variants {
                     if let syn::Fields::Named(n) = &v.fields {
                         ei.named.insert(v.ident.to_string(), n.named.iter().map(|f| f.ident.as_ref().unwrap().to_string()).collect());

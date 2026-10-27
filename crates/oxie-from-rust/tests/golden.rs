@@ -532,7 +532,7 @@ rust {
     trait Number = Copy + std::ops::Add<Output = Self>;
 }
 
-fun double<T: Number>(x: T): T = x + x
+fun double<T: Number>(own x: T): T = x + x
 
 fun parse_sum(a: &str, b: &str): i32? {
     // TODO(from-rust): kept as Rust: no Oxie syntax for this expression

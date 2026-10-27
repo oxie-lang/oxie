@@ -1,7 +1,7 @@
 class Stack<T> {
     var items: Vec<T> = vec[]
 
-    fun push(item: T) = items.push(item)
+    fun push(own item: T) = items.push(item)
     fun pop(): T? = items.pop()
     fun peek(): &T? = items.last()
     fun size(): usize = items.len()

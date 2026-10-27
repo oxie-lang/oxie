@@ -1,0 +1,72 @@
+// Optionals, type parameters, interface values and enums are borrowed unless they say `own`: a
+// function that keeps one is an error, with the fix that takes it (and one that keeps a copy
+// where a copy can be made). Optional text is copied, as text is.
+interface Shape {
+    fun area(): f64
+}
+
+class Square(side: f64) : Shape {
+    override fun area() = side * side
+}
+
+enum Expr {
+    Num(f64)
+    Neg(Expr)
+}
+
+data class User(name: String)
+data class Pair<T>(x: T, y: T)
+
+class Holder(var owner: User? = null, var nick: String? = null) {
+    fun set(u: User?) { owner = u }
+    // error: 21: `set` can't keep `u`: it is borrowed
+    // error: 21: fix: take `u` (`own u`): `fun set(own u: User?) { owner = u }`
+    // not: 21: keep a copy
+    fun set_nick(n: String?) { nick = n }
+    // not: 25: can't keep
+}
+
+class Stack<T> {
+    var items: [T] = []
+    fun push(x: T) = items.push(x)
+    // error: 31: `push` can't keep `x`: it is borrowed
+    // error: 31: fix: keep a copy of `x`: `fun push(x: T) = items.push(x.clone())`
+}
+
+fun pick<T>(a: T, b: T, first: bool): T = if (first) a else b
+// error: 36: `pick` can't keep `a`: it is borrowed
+// error: 36: It returns `a`
+fun or_default<T>(x: T?, d: T): T = x ?: d
+// error: 39: `or_default` can't keep `x`: it is borrowed
+fun both<T>(x: T): [T] = [x]
+// error: 41: `both` can't keep `x`: it is borrowed
+fun with_y<T: Clone>(p: Pair<T>, y: T): Pair<T> = p.copy(y = y)
+// error: 43: It passes `y` to `.copy()`, which keeps it
+fun keep_shape(s: Shape): Shape = s
+// error: 45: `keep_shape` can't keep `s`: it is borrowed
+// not: 45: keep a copy
+fun wrap(e: Expr): Expr = Expr.Neg(e)
+// error: 48: It passes `e` to `Expr.Neg`, which keeps it
+// error: 48: fix: take `e` (`own e`): `fun wrap(own e: Expr): Expr = Expr.Neg(e)`
+fun same(e: Expr): Expr = when (e) {
+    Expr.Num(n) -> Expr.Num(n + 1.0)
+    other -> other
+    // error: 53: `same` can't keep `other`: `e` is borrowed
+    // error: 53: `other` is `e`, and it returns `other`
+    // error: 53: fix: take `e` (`own e`)
+}
+
+fun main() {
+    var h = Holder()
+    h.set(User("a"))
+    h.set_nick("x")
+    var s = Stack<i32>()
+    s.push(1)
+    println(pick(1, 2, true))
+    println(or_default(null, 1))
+    println(both(1))
+    println(with_y(Pair(1, 2), 3))
+    println(keep_shape(Square(1.0)).area())
+    val w = wrap(Expr.Num(1.0))
+    val v = same(Expr.Num(1.0))
+}

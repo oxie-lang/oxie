@@ -88,6 +88,7 @@ What the generated Rust looks like:
 | `data class P(x: f64)` | `struct P { pub(crate) x: f64 }`, `P::new(x)`, derives |
 | `class C(a: A) { fun m() }` | `struct C`, `C::new(a)`, `c.m()` |
 | `fun f(s: String, own t: String)` | `fn f(s: &str, t: String)`: a parameter is borrowed unless it says `own` |
+| `fun f<T>(x: T, s: Shape, u: User?)` | `fn f<T>(x: &T, s: &dyn Shape, u: Option<&User>)` |
 | `enum E { V(n: i32) }` | `enum E { V { n: i32 } }` |
 | `interface I { fun f(): i32 }` | `trait I { fn f(&self) -> i32; }` |
 | `fun f(): T throws` | `fn f() -> Result<T, Box<dyn Error + Send + Sync>>` |

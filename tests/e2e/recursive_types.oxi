@@ -26,7 +26,7 @@ fun show(e: &Expr): String = when (e) {
 }
 
 // an owned value: the arms take the boxed values out
-fun simplify(e: Expr): Expr = when (e) {
+fun simplify(own e: Expr): Expr = when (e) {
     Neg(x) -> when (x) {
         Neg(y) -> simplify(y)
         other -> Expr.Neg(simplify(other))
@@ -35,7 +35,7 @@ fun simplify(e: Expr): Expr = when (e) {
     other -> other
 }
 
-fun strip(e: Expr): Expr {
+fun strip(own e: Expr): Expr {
     if (val Expr.Neg(x) = e) return strip(x)
     e
 }

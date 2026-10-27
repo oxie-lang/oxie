@@ -114,24 +114,31 @@ fun short(x: i32) = x * 2
   another `&T` parameter, so is a call whose result Oxie knows is a value (`describe(Point.origin())`).
 * **Borrowed parameters**: a parameter is borrowed unless it says `own`. A `String` parameter
   becomes `&str`, a list (`[T]`) `&[T]`, a map or set (`[K: V]`, `HashSet<T>`, `BTreeMap<K, V>`)
-  `&HashMap<K, V>` (...), a `PathBuf` `&Path`, and a parameter of an Oxie class or `Box<T>`
-  `&T`, and every argument for it is lent, so callers keep their value. This holds for functions
-  and methods, `pub` or not, in programs, libraries and Rust crates with Oxie modules alike (Rust
-  code that calls one passes the reference). `Copy` values (numbers, `Copy` data classes),
-  `shared` classes (a handle) and functions (a boxed function too) are passed as they are. An
-  interface's methods, their implementations and operators take what the interface or Rust's
-  trait declares, and `main`, extension functions and `const` and `extern` functions keep the
-  types they declare.
+  `&HashMap<K, V>` (...), a `PathBuf` `&Path`, a parameter of an Oxie class, enum or `Box<T>`
+  `&T`, an interface value (`s: Shape`) `&dyn Shape`, a type parameter `&T`, and an optional of
+  any of these `Option<&T>` (`Option<&str>` for a `String?`). Every argument for it is lent, so
+  callers keep their value; an optional one is passed with `as_deref()` or `as_ref()`, a value
+  as `Some(&x)`, `null` as `None`. This holds for functions and methods, `pub` or not, in
+  programs, libraries and Rust crates with Oxie modules alike (Rust code that calls one passes
+  the reference). `Copy` values (numbers, `Copy` data classes and enums, also those that derive
+  `Copy` themselves, and a type parameter that must be `Copy`, by its bounds or because the body
+  needs it, as `a + b` does), `shared` classes (a handle) and functions (a boxed function, or a
+  type parameter bound by `Fn`, too) are passed as they are. An interface's methods, their
+  implementations and operators take what the interface or Rust's trait declares, and `main`,
+  extension functions and `const` and `extern` functions keep the types they declare.
   **`own name: T`** takes the value: the argument moves, and the function may change it (`mut`
-  in the Rust). A function that keeps a borrowed parameter (returns it, stores it in a field, a
-  struct or a collection with `push`, `insert`, ..., gives it to an `own` parameter or a
-  constructor, takes a field out of it with `val n = u.name`, calls an `into_...` method on it,
-  takes the elements out in a loop, or uses it in a lambda that outlives the call) is an error at
-  that use, with two fixes: `own`, or keep a copy (`.clone()`). Text it keeps is copied instead
-  (`names.push(name)` pushes `name.to_string()`), as any `&str` is where a `String` is needed;
-  `own` moves it. A function that changes a borrowed parameter (assigns into it, calls a method
-  that changes it, takes `&mut` of it) is an error with the fixes `&mut T` (change the caller's
-  value) and `own` (change a value of its own).
+  in the Rust). A function that keeps a borrowed parameter (returns it, also as the default of
+  `?:` or in a list, stores it in a field, a struct or a collection with `push`, `insert`, ...,
+  gives it to an `own` parameter, a constructor, an enum's case or a data class's `copy(..)`,
+  takes a field out of it with `val n = u.name`, calls an `into_...` method on it, takes the
+  elements out in a loop, or uses it in a lambda that outlives the call) is an error at that use,
+  with two fixes: `own`, or keep a copy (`.clone()`, where it makes one). So is keeping it under
+  another name: `val v = u`, or the `other ->` of a `when (u)`. Text it keeps is copied instead
+  (`names.push(name)` pushes `name.to_string()`), as any `&str` is where a `String` is needed,
+  and so is optional text (`nick = n` stores `n.map(str::to_string)`); `own` moves it. A
+  function that changes a borrowed parameter (assigns into it, calls a method that changes it,
+  takes `&mut` of it) is an error with the fixes `&mut T` (change the caller's value) and `own`
+  (change a value of its own).
   A borrowed list is dropped by the caller: a function that should drop a list of mutex guards
   or files when it returns (so a guard unlocks there) takes it with `own`. `xs.clone()` of a
   borrowed list, text or path is an owned copy (`to_vec()`, `to_string()`, `to_path_buf()`), and
@@ -694,13 +701,13 @@ the declared type of a variable, field, parameter or return value:
 ```oxie
 fun initial(name: String?): char {
     if (name == null) return '?'
-    name.chars().next().unwrap_or('?')     // `name` is a String here
+    name.chars().next().unwrap_or('?')     // `name` is the text here
 }
 
 fun main() {
     val nick: String? = "ada"
     if (nick != null && nick.len() > 2) println("hello ${nick.to_uppercase()}")
-    println("${initial(nick.clone())} ${initial(null)}")
+    println("${initial(nick)} ${initial(null)} $nick")
 }
 ```
 * `x?.let { ... }` runs the block when `x` is present.

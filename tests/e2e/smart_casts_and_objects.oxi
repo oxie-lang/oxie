@@ -42,7 +42,7 @@ interface Shape { fun area(): f64 }
 class Sq(s: f64) : Shape { override fun area() = s * s }
 
 class Scene(var main: Shape? = null) {
-    fun set_main(s: Shape) { main = s }
+    fun set_main(own s: Shape) { main = s }
     fun main_area(): f64 = main?.area() ?: 0.0
 }
 

@@ -34,6 +34,11 @@ fn is_std_value(n: &str) -> bool {
     matches!(n, "String" | "str" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64" | "Vec" | "HashMap" | "HashSet" | "Option")
 }
 
+/// Is `t` a reference to what an owned value lends with `as_deref()`: `&str`, `&[T]`, `&Path`?
+fn derefs_owned(t: &Type) -> bool {
+    matches!(t, Type::Ref { mutable: false, inner, .. } if inner.single_name() == Some("str") || matches!(**inner, Type::Slice(_)) || inner.last_name() == Some("Path"))
+}
+
 /// Is `t` a box (`Box<T>`, behind any references)?
 fn is_box(t: &Type) -> bool {
     match t {
@@ -1556,6 +1561,8 @@ impl<'a> Lowerer<'a> {
                 }
                 self.e.w(")");
             }
+            // a `&T?` parameter (`Option<&T>`, as a lent `T?` is)
+            Type::Option(inner) if pos == TyPos::Param && matches!(&**inner, Type::Ref { mutable: false, .. }) && self.lent_optional_arg(e, inner) => {}
             Type::Option(inner) => match &e.kind {
                 ExprKind::Null => self.e.w("None"),
                 // an interface value for a `Shape?` field or variable: `Some(Box::new(s))`
@@ -1574,11 +1581,38 @@ impl<'a> Lowerer<'a> {
                     self.expr(e, P_LOWEST);
                     self.e.w(")");
                 }
-                // a `T?` lent to a `&T?` parameter (`Option<&T>`): `x.as_ref()`, also for `&x`
+                // lent optional text (`Option<&str>`) where a `String?` is kept: a copy, as for `&str`
+                _ if inner.is_string() && matches!(self.infer_type(e), Some(Type::Option(t)) if matches!(&*t, Type::Ref { mutable: false, inner: s, .. } if s.single_name() == Some("str"))) => {
+                    self.expr(e, P_POSTFIX);
+                    self.e.w(".map(str::to_string)");
+                }
+                // a `T?` lent to a `&T?` parameter (`Option<&T>`): `x.as_ref()`, also for `&x`, and
+                // `x.as_deref()` for text, a list or a path (`Option<&str>`, ...)
                 _ if pos == TyPos::Param && matches!(&**inner, Type::Ref { .. }) && self.owned_option_place(e).is_some() => {
                     let place = self.owned_option_place(e).unwrap();
                     self.expr(place, P_POSTFIX);
-                    self.e.w(if matches!(&**inner, Type::Ref { mutable: true, .. }) { ".as_mut()" } else { ".as_ref()" });
+                    self.e.w(if matches!(&**inner, Type::Ref { mutable: true, .. }) {
+                        ".as_mut()"
+                    } else if derefs_owned(inner) {
+                        ".as_deref()"
+                    } else {
+                        ".as_ref()"
+                    });
+                }
+                // a value, not a `T?`, for a `&T?` parameter: `Some(&x)` (`Some(x)` when it is a
+                // reference already)
+                _ if pos == TyPos::Param
+                    && matches!(&**inner, Type::Ref { mutable: false, .. })
+                    && self.is_place(e)
+                    && !self.place_is_option(e)
+                    && !matches!(self.infer_type(e), None | Some(Type::Option(_)) | Some(Type::Infer)) =>
+                {
+                    self.e.w("Some(");
+                    if !matches!(self.infer_type(e), Some(Type::Ref { .. })) {
+                        self.e.w("&");
+                    }
+                    self.expr(e, P_UNARY);
+                    self.e.w(")");
                 }
                 // a `Copy` value changed in place after a null check (`let Some(p) = &mut p`)
                 _ if self.copy_ref_local(e, inner) => {
@@ -1641,6 +1675,11 @@ impl<'a> Lowerer<'a> {
                     self.e.w(".into()");
                 }
                 ExprKind::Path { .. } if self.is_str_var(e) => {
+                    self.expr(e, P_POSTFIX);
+                    self.e.w(".to_string()");
+                }
+                // `n ?: d` of borrowed text (a lent `String?`, a `&str`): a copy
+                ExprKind::Elvis(..) if matches!(self.infer_type(e), Some(Type::Ref { inner, .. }) if inner.single_name() == Some("str")) => {
                     self.expr(e, P_POSTFIX);
                     self.e.w(".to_string()");
                 }
@@ -3340,9 +3379,12 @@ impl<'a> Lowerer<'a> {
             ("HashMap" | "BTreeMap", "insert", [k, v], 2) => vec![Some(k.clone()), Some(v.clone())],
             _ => return None,
         };
-        let str_ref = |me: &Self, e: &Expr| me.infer_type(e).is_some_and(|t| matches!(&t, Type::Ref { mutable: false, inner, .. } if inner.single_name() == Some("str")));
-        let converts = |me: &Self, a: &Arg, t: &Option<Type>| {
-            t.as_ref().is_some_and(|t| t.is_string()) && (matches!(a.value.kind, ExprKind::Str(_) | ExprKind::RawStr(_)) || me.is_str_var(&a.value) || str_ref(me, &a.value))
+        let str_ref = |t: &Type| matches!(t, Type::Ref { mutable: false, inner, .. } if inner.single_name() == Some("str"));
+        let converts = |me: &Self, a: &Arg, t: &Option<Type>| match t {
+            Some(t) if t.is_string() => matches!(a.value.kind, ExprKind::Str(_) | ExprKind::RawStr(_)) || me.is_str_var(&a.value) || me.infer_type(&a.value).is_some_and(|t| str_ref(&t)),
+            // lent optional text (`Option<&str>`) for a `String?`
+            Some(Type::Option(t)) if t.is_string() => matches!(me.infer_type(&a.value), Some(Type::Option(t)) if str_ref(&t)),
+            _ => false,
         };
         args.iter().zip(&types).any(|(a, t)| converts(self, a, t)).then_some(types)
     }
@@ -4512,6 +4554,39 @@ impl<'a> Lowerer<'a> {
         self.plain_path_expr(segs, generics, global, span);
     }
 
+    /// An argument for a `&T?` parameter (`Option<&T>`, as a lent `T?` is): a `T?` lends what it
+    /// holds (`x.as_deref()` for text, a list or a path, `x.as_ref()` else), and a `T` is lent in
+    /// `Some(&x)`. False, writing nothing, for what `coerce` handles as it is: `null`, a literal,
+    /// `&x`, an `Option<&T>`, or a value of a type Oxie doesn't know.
+    fn lent_optional_arg(&mut self, e: &Expr, inner: &Type) -> bool {
+        if matches!(e.kind, ExprKind::Null | ExprKind::Unary(UnOp::Ref | UnOp::RefMut, _)) || is_literal(e) {
+            return false;
+        }
+        match self.infer_type(e) {
+            Some(Type::Option(t)) if !matches!(*t, Type::Ref { .. } | Type::Infer) => {
+                self.expr(e, P_POSTFIX);
+                // a box (a recursive field's `Option<Box<Node>>`) lends what it holds too
+                let boxed = t.auto_boxed().is_some() || is_box(&t);
+                self.e.w(if derefs_owned(inner) || boxed { ".as_deref()" } else { ".as_ref()" });
+                true
+            }
+            None | Some(Type::Infer) | Some(Type::Option(_)) => false,
+            Some(_) if self.is_option_expr(e) => false,
+            Some(Type::Ref { .. }) => {
+                self.e.w("Some(");
+                self.expr(e, P_LOWEST);
+                self.e.w(")");
+                true
+            }
+            Some(_) => {
+                self.e.w("Some(");
+                self.coerce(e, inner, TyPos::Param);
+                self.e.w(")");
+                true
+            }
+        }
+    }
+
     /// A function or method used as a value whose parameters Oxie lends takes references, while
     /// a call passes it values: it is passed as a lambda that lends them, `|name| greet(&name)`.
     /// The text before the function's path and after it (`recv`: a method's receiver comes
@@ -4528,7 +4603,12 @@ impl<'a> Lowerer<'a> {
         }
         for (i, p) in params.iter().enumerate() {
             let n = p.name.as_deref().map(esc).unwrap_or_else(|| format!("a{}", i));
-            args.push(if p.lent { format!("&{}", n) } else { n.clone() });
+            args.push(match &p.ty {
+                // an optional lends what it holds: `Option<&str>` from an `Option<String>`
+                Type::Option(inner) if p.lent => format!("{}.{}()", n, if derefs_owned(inner) { "as_deref" } else { "as_ref" }),
+                _ if p.lent => format!("&{}", n),
+                _ => n.clone(),
+            });
             names.push(n);
         }
         Some((format!("|{}| ", names.join(", ")), format!("({})", args.join(", "))))
@@ -5388,7 +5468,13 @@ impl<'a> Lowerer<'a> {
                 Type::Fn { ret, .. } if !matches!(**ret, Type::Infer) => self.lambda(a, None, Some(ret)),
                 _ => self.expr(a, P_LOWEST),
             }
-        } else if p.lent && !is_collection_lit(a) && self.lends_value(a) {
+        } else if p.lent
+            && !matches!(p.ty, Type::Option(_))
+            && !is_collection_lit(a)
+            // a lent type parameter takes any argument by reference (`show("x")` is `show(&"x")`:
+            // `T` is `&str`, not `str`)
+            && (self.lends_value(a) || matches!(&p.ty, Type::Ref { inner, .. } if inner.single_name().is_some_and(|n| p.generics.iter().any(|g| g == n))))
+        {
             // its callers passed the owned value before Oxie lent the parameter
             self.e.mark(a.span);
             self.e.w("&");

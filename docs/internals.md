@@ -168,9 +168,12 @@ Notable translations:
   says `own` (`Param::own`). The pass lends every other parameter of the kinds it knows: a
   `String`/`Vec<T>` becomes `&str`/`&[T]`, a map or set (`Kind::Coll`) `&HashMap<K, V>`, a
   `PathBuf` `&Path` (`borrow_params`, `Stage::Text`, for top-level functions); after receiver
-  inference a parameter of an Oxie class or `Box<T>` becomes `&T` (`borrow_class_params`,
-  `Stage::Types`), and methods lend every kind (`borrow_method_params`, `Stage::Methods`).
-  `Param::lent` keeps the declared type. `Copy` and `shared` classes, classes with lifetimes,
+  inference a parameter of an Oxie class, enum or `Box<T>` becomes `&T`, an interface value
+  `&dyn I`, a type parameter `&T` (`lent_type_params`: not one that a bound, written or inferred
+  by `bounds.rs`, makes `Copy` or a function), and an optional of these `Option<&T>`
+  (`borrow_class_params`, `Stage::Types`), and methods lend every kind (`borrow_method_params`,
+  `Stage::Methods`). `Param::lent` keeps the declared type. `Copy` classes and enums (derived
+  automatically or named, `Crate::derives_trait`) and `shared` classes, types with lifetimes,
   boxed functions, `var` parameters, contexts, and the parameters of interface methods, their
   implementations, operators, `main`, extension, `const` and `extern` functions keep theirs.
   Whether a parameter is lent never depends on the body or on other code: `pub`, a library,
@@ -178,15 +181,18 @@ Notable translations:
   `check_kept` then reads the bodies, with every signature known: a use of a lent parameter
   that isn't a read (`owned_uses`, which knows the methods that only read `str`, slices, maps,
   paths and the crate's classes, field chains (`chain_type`), and calls that lend) and that keeps
-  the value (`kept_at`: returned, stored with `push`/`insert`/..., given to an `own` parameter
-  or a constructor, a field taken out with `val n = u.name`, an `into_...` call, a loop that
-  takes the elements, a lambda that outlives the call) or changes it (`first_change`) is an
-  error with fixes (`Diag::fixes`): `own`, a `.clone()` copy, or `&mut`. Text a function keeps
-  is copied by the lowering's conversion of `&str` where a `String` is needed, so it isn't an
-  error. `kept_reason` says why a function takes an `own` parameter, for the explanation of
-  E0382. The lowering lends arguments where it resolves the call, wraps a function used as a
-  value in a lambda that lends (`lending_value`), and reads `&name`, `name.as_str()` and
-  `name.clone()` of a lent parameter as the reference and an owned copy.
+  the value (`kept_at`: returned, stored with `push`/`insert`/..., given to an `own` parameter,
+  a constructor, an enum's case or `copy(..)`, a field taken out with `val n = u.name`, an
+  `into_...` call, a loop that takes the elements, a lambda that outlives the call; also inside
+  `?:`, `!!`, branches and collection literals (`through`), and under another name, `val v = u`
+  or a `when (u)` arm's `other`) or changes it (`first_change`) is an error with fixes
+  (`Diag::fixes`): `own`, a `.clone()` copy, or `&mut`. Text a function keeps, also optional, is
+  copied by the lowering's conversion of `&str` where a `String` is needed (`Option<&str>`:
+  `.map(str::to_string)`), so it isn't an error. `kept_reason` says why a function takes an
+  `own` parameter, for the explanation of E0382. The lowering lends arguments where it resolves
+  the call (an optional one with `as_deref()`, `as_ref()` or `Some(&x)`: `lent_optional_arg`),
+  wraps a function used as a value in a lambda that lends (`lending_value`), and reads `&name`,
+  `name.as_str()` and `name.clone()` of a lent parameter as the reference and an owned copy.
 * **Methods that take only the fields they use** (`fields.rs`, after receiver inference): a
   `&mut self` method that a method of its class calls inside a loop over another field (or a
   lambda passed to a method of one) becomes `static`, with the fields it uses as parameters.

@@ -211,6 +211,8 @@ pub struct Crate {
     pub has_lib: bool,
     /// Automatic derives per type (data classes and enums), keyed like `classes`.
     pub derives: HashMap<String, Vec<String>>,
+    /// Derives a type names itself (`@derive(Clone, Copy)`), keyed like `classes`.
+    pub named_derives: HashMap<String, Vec<String>>,
     /// Types declared inside a class body (hoisted to the module): outer name -> inner names.
     pub nested: HashMap<String, Vec<String>>,
     /// Declared type names in all capitals (`class DB`, `enum HTTP`), which don't look like types.
@@ -361,6 +363,10 @@ impl Crate {
                 && !self.imports.contains_key(&(module.to_vec(), first.to_string()));
             other || self.leaves_crate(p, module)
         })
+    }
+    /// Does the type `key` derive `name`, automatically or by naming it?
+    pub fn derives_trait(&self, key: &str, name: &str) -> bool {
+        [&self.derives, &self.named_derives].iter().any(|m| m.get(key).is_some_and(|d| d.iter().any(|x| x == name)))
     }
     /// The key of the class or enum `name` declared in `module`.
     pub fn decl_key(&self, module: &[String], name: &str) -> String {
@@ -1088,7 +1094,28 @@ fn compute_derives(k: &mut Crate, units: &[SourceUnit]) {
             }
         }
         k.derives.insert(key.clone(), d);
+        let named = named_derives(attrs);
+        if !named.is_empty() {
+            k.named_derives.insert(key.clone(), named);
+        }
     }
+}
+
+/// The derives an item names itself, with `@derive(..)` or `#[derive(..)]`.
+fn named_derives(attrs: &[Attr]) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in attrs {
+        let list = match a {
+            Attr::Oxie { name, args: Some(args), .. } if name == "derive" => args.as_str(),
+            Attr::Raw(s) => match s.trim().strip_prefix("derive(").and_then(|x| x.strip_suffix(')')) {
+                Some(list) => list,
+                None => continue,
+            },
+            _ => continue,
+        };
+        out.extend(list.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()));
+    }
+    out
 }
 
 fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {

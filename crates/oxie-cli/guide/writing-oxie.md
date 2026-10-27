@@ -137,11 +137,14 @@ fun main() {
   names for `i32`, `i64` and `f64`.
 * **Values have one owner.** Assigning a `String`, list or class value, or passing it to an
   `own` parameter, moves it, and the old variable can't be used afterwards. Write parameters as
-  values (`name: String`, `items: [Item]`, `prices: [String: f64]`, `user: User`): they are
-  borrowed (`&str`, `&[Item]`, ...; Oxie writes the `&` at the call), so callers keep theirs.
+  values (`name: String`, `items: [Item]`, `prices: [String: f64]`, `user: User`, `x: T`,
+  `shape: Shape`, `nick: String?`): they are borrowed (`&str`, `&[Item]`, `&T`, ...; Oxie
+  writes the `&` at the call), so callers keep theirs. Only `Copy` values (numbers, `Copy` data
+  classes and enums) and `shared` handles are passed as they are.
   A function that keeps one (stores it in a field or list, returns it, gives it to an `own`
-  parameter) says so: `fun add(own item: Item) = items.push(item)`. Without `own` that is an
-  error whose fix adds it; text it keeps is copied instead. One that changes the caller's value
+  parameter or a constructor) says so: `fun add(own item: Item) = items.push(item)`, and in a
+  generic class `fun push(own x: T) = items.push(x)`. Without `own` that is an error whose fix
+  adds it; text it keeps (also `String?`) is copied instead. One that changes the caller's value
   takes `&mut T`. Older Oxie decided from the body whether a parameter was borrowed and never
   needed `own`: add it where the compiler asks. A `for (x in xs)`
   over a local list that is used afterwards borrows it, so `x` is a reference; when the body

@@ -12,15 +12,15 @@ class Pairs(items: [(String, i32)]) : Store {
 
 class Stack<T> {
     var items: [T] = []
-    fun push(x: T) = items.push(x)
+    fun push(own x: T) = items.push(x)
     fun pop(): T? = items.pop()
 }
 
 data class User(name: String)
 
-fun <T: Clone> twice(x: T): [T] = vec[x.clone(), x]
+fun <T: Clone> twice(own x: T): [T] = vec[x.clone(), x]
 
-fun <T> keep(x: T, ok: bool): T? = if (ok) x else null
+fun <T> keep(own x: T, ok: bool): T? = if (ok) x else null
 
 fun main() {
     val u: User? = User("ann")

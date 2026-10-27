@@ -3,7 +3,7 @@
 import std::collections::HashSet
 
 fun show<T>(x: T): String = "<$x>"
-fun larger<T>(a: T, b: T): T = if (a > b) a else b
+fun larger<T>(own a: T, own b: T): T = if (a > b) a else b
 fun sum_all<T>(xs: &[T], zero: T): T {
     var total = zero
     for (x in xs) total = total + *x

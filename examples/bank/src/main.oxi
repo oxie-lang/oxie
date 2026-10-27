@@ -50,7 +50,7 @@ class Bank {
     var accounts: [String: Account] = [:]
     var log: [String] = []
 
-    fun open(id: String, owner: String, policy: MonthlyPolicy) {
+    fun open(id: String, owner: String, own policy: MonthlyPolicy) {
         accounts[id.clone()] = Account(id, owner, policy = policy)
     }
 

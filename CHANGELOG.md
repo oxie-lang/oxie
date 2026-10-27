@@ -14,7 +14,13 @@ signature alone says whether a call keeps the caller's value.
   another `own` parameter or a constructor, takes a field out of it, uses it in a lambda that
   outlives the call) is now an error that offers two fixes: write `own` before the parameter
   (`fun add(own item: Item)`), which moves the caller's value as before, or keep a copy. Text
-  is the exception: a `String` parameter that a function keeps is copied, as any `&str` is.
+  is the exception: a `String` or `String?` parameter that a function keeps is copied, as any
+  `&str` is.
+* Enums, interface values, type parameters and optionals are borrowed too, where they used to
+  be taken: `e: Expr` is `&Expr`, `s: Shape` `&dyn Shape`, `x: T` `&T` and `u: User?`
+  `Option<&User>`. A generic class that stores what it is given takes it:
+  `fun push(own x: T) = items.push(x)`. `Copy` enums, type parameters that must be `Copy`
+  (`fun sum<T>(a: T, b: T) = a + b`) and function types stay values.
 * A function that changes a borrowed parameter is an error whose fixes are `&mut T` and `own`.
 * `pub` functions and methods of a library, methods called where Oxie can't tell their type,
   functions used as values (`xs.map(greet)`, which now lend through a lambda) and functions that
@@ -33,6 +39,10 @@ signature alone says whether a call keeps the caller's value.
   an owned copy (`to_string()`, `to_vec()`, `to_path_buf()`); `names.contains(&who)` with
   borrowed text compares one element at a time, as `who in names` does.
 * A moved-value error for an `own` parameter that the function only reads offers to drop `own`.
+* An optional argument is lent as it is: `greet(nick)` passes `nick.as_deref()` to a `String?`
+  parameter, a value is passed as `Some(&x)` and `null` as `None`.
+* A class or enum that derives `Copy` itself (`@derive(Clone, Copy)`) is passed as a copy, like
+  one Oxie derives `Copy` for.
 
 ## 0.5.0 - 2026-10-27
 

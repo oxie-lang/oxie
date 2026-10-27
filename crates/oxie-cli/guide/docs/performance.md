@@ -17,7 +17,9 @@ Rust: the Oxie compiler produces ordinary Rust source, and `rustc`/LLVM compile 
   plain structs, enums are Rust enums, generics are monomorphized.
 * **Allocation only where you'd allocate anyway.** The implicit conversions Oxie adds where Rust
   would reject the code (a `&str` passed as a `String`, a lambda stored in a field) allocate
-  exactly like the `.to_string()` / `Box::new` you would otherwise write.
+  exactly like the `.to_string()` / `Box::new` you would otherwise write. A function that keeps
+  a borrowed `String` or `String?` parameter copies it the same way; in a hot path, take it with
+  `own` to move it instead.
 * **Shared objects cost what they say.** A `shared class` is an `Rc<RefCell<..>>` (`@sync`:
   `Arc<Mutex<..>>`) handle, so each method call or field access checks its borrow (or takes the
   lock, and notes it so that a method reaching its own object again panics instead of

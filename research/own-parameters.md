@@ -299,3 +299,62 @@ value (tests/diagnostics 11, the language server tests 4, the error examples in 
 Not done in phase 1: optionals, type parameters, interface values, enums and tuples are still
 taken by value; editor grammars (`own` isn't highlighted); `oxie migrate`; the lifetime fix;
 the Kuana acceptance test.
+
+## Phase 2, as built
+
+On the same branch, optionals, type parameters, interface values and enums are borrowed unless
+they say `own`:
+
+* An enum (not `Copy`, without lifetimes or type parameters) is lent as `&E`, a value of an
+  interface of the crate as `&dyn I`, a type parameter as `&T`, and an optional of any lent kind
+  as `Option<&T>` (`Option<&str>` for `String?`, `Option<&[T]>` for `[T]?`).
+* A type parameter stays a value when it must be `Copy`, by a bound written or inferred from the
+  body (`a + b` makes `bounds.rs` infer `Add<Output = T> + Copy`), or is a function
+  (`F: Fn(&str) -> usize`): lending a function works, but rustc then can't infer a lambda's
+  parameter types (E0282 in the coverage test of higher-ranked bounds).
+* An interface value is `&dyn Shape`, not `&impl Shape` as the table above says. Interface values
+  are boxed in lists, fields and variables (`Box<dyn Shape>`), and `&impl Shape` (implicitly
+  `Sized`) can't take `&**boxed`. Calls pass `&**s`, `&shapes[0]` or `&Square(..)`.
+* An optional argument is passed with `as_ref()` (`as_deref()` for text, lists, paths and boxed
+  recursive fields), a value as `Some(&x)` (`Some(x)` when it is a reference already), a literal
+  as `Some("cy")`, `null` as `None`.
+* **Optional text is copied** when a function keeps it, as text is (decision 1, extended):
+  `nick = n` stores `n.map(str::to_string)`, so a nullable setter, as common in Kotlin as
+  `names.push(name)`, needs no `own`. Without it, `fun set(n: String)` would work and
+  `fun set(n: String?)` would be an error. Other optionals are an error when kept.
+* An enum or class that derives `Copy` itself (`@derive(Clone, Copy)`, as from-rust writes) is
+  copied; phase 1 only knew the derives Oxie adds (`Crate::named_derives`).
+* The keep analysis follows the value further: through `?:` (both sides), `!!`, branches and
+  list, set, map, tuple and pair literals (`[x]`), into a data class's `copy(y = o)` and an
+  enum's case (`Expr.Neg(e)`), and under another name (`val v = u`, the `other ->` of a
+  `when (u)`). These were rustc type mismatches before, at the right line but in Rust terms
+  (`Option<Named>: From<&mut &Named>`). The copy fix is offered only where `.clone()` makes one:
+  not for an optional (it would copy the reference), an interface value or a box.
+* from-rust writes `own` for by-value `Option`, `Box` (not boxed functions), generic, and
+  non-`Copy` struct and enum parameters of functions and inherent methods.
+
+**What it took**, on top of phase 1:
+
+| | `own` added |
+|---|---|
+| examples/ | 1 (bank: `open` stores a policy, an interface value) |
+| bench/ | 0 |
+| evals reference solutions | 1 (generic-stack: `push(own item: T)`) |
+| tests/coverage | 1 |
+| tests/e2e | 24, in 12 programs |
+| tests/emit | 1 |
+| doc examples | 0 (one lost a `.clone()` that lending made needless) |
+
+The 24 in tests/e2e by kind: 16 type parameters (generic containers, and `larger(a, b)` that
+returns one of them), 5 interface values, 2 enums (simplifiers that return their argument), 1
+optional (a function that changes and returns it). By what the function does: 14 store the
+value (`push`, `insert`, a field), 8 return it (4 directly, one each as the default of `?:`, in
+a list, under another name and as a `when` arm's binding), 1 gives it to `copy(..)` and 1 to a
+function-typed field. Each keeps the value; none needed `own` for another reason.
+
+The cost is in generic code: a container's adders and a function that returns one of its
+arguments (`fun larger<T>(own a: T, own b: T): T`) say `own`, where Rust writes `T` and Kotlin
+nothing. The error names the fix, and writing-oxie.md shows `fun push(own x: T)`.
+
+Not done in phase 2: tuples are still values; editor grammars; `oxie migrate`; the lifetime
+fix; the Kuana acceptance test; the evals (they cost money: ask first).

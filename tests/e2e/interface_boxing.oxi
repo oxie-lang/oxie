@@ -19,14 +19,14 @@ class Holder(var other: Shape, var main_shape: Shape?) {
     val plugins: Vec<Plugin> = vec[]
     val by_name: HashMap<String, Plugin> = HashMap.new()
     fun add_doubler() = plugins.push(Doubler())
-    fun add(p: Plugin) = plugins.push(p)
-    fun name(n: &str, p: Plugin) { by_name.insert(n.to_string(), p) }
-    fun replace(s: Shape) { other = s }
+    fun add(own p: Plugin) = plugins.push(p)
+    fun name(n: &str, own p: Plugin) { by_name.insert(n.to_string(), p) }
+    fun replace(own s: Shape) { other = s }
 }
 
 class Scene {
     val shapes: Vec<Shape> = vec[]
-    fun add(s: Shape) = shapes.push(s)
+    fun add(own s: Shape) = shapes.push(s)
     fun total(): f64 = shapes.iter().map { it.area() }.sum()
 }
 

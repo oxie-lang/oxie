@@ -29,7 +29,7 @@ class Counter(var count: i32 = 0, step: i32 = 1) {
 }
 
 class Stack<T>(items: Vec<T>) {
-    fun push(item: T) {
+    fun push(own item: T) {
         items.push(item)
     }
 

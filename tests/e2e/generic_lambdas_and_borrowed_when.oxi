@@ -12,7 +12,7 @@ class Bag<T>(var items: [T] = []) {
 }
 
 class Mapper<T>(f: (T) -> T) {
-    fun run(x: T): T = (f)(x)
+    fun run(own x: T): T = (f)(x)
 }
 
 enum State { Idle, Failed(reason: String) }

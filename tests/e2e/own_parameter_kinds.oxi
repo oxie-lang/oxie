@@ -1,0 +1,122 @@
+// Optionals, type parameters, interface values and enums are borrowed unless they say `own`,
+// like text, lists and classes: `T?` is lent as `Option<&T>`, a `T` as `&T` (unless `T` must be
+// `Copy`), an interface value as `&dyn I` and an enum as `&E`. Kept optional text is copied, as
+// kept text is.
+data class User(name: String, age: i32)
+
+interface Shape {
+    fun area(): f64
+    fun name(): String
+}
+
+class Square(side: f64) : Shape {
+    override fun area() = side * side
+    override fun name() = "square"
+}
+
+enum Expr {
+    Num(f64)
+    Neg(Expr)
+    Add(left: Expr, right: Expr)
+}
+
+// a `Copy` enum, also one that says so itself, is copied
+enum Dir { Up, Down }
+
+@no_auto_derive
+@derive(Clone, Copy, Debug, PartialEq)
+enum Light { Red, Green }
+
+// optionals: a `String?` is lent as `Option<&str>`
+fun greet(name: String?) = println("hi ${name ?: "there"}")
+fun count(xs: [i32]?): usize = xs?.len() ?: 0
+fun age_of(u: User?): i32 = u?.age ?: -1
+fun shout(s: String?): String = s?.to_uppercase() ?: "-"
+
+class Profile(var nick: String? = null, var friend: User? = null) {
+    // kept text is copied
+    fun set_nick(n: String?) { nick = n }
+    // a `User?` is taken
+    fun set_friend(own u: User?) { friend = u }
+}
+
+// type parameters; `+` needs `Copy`, so `sum` takes its values
+fun show<T>(x: T): String = "<$x>"
+fun same<T>(a: T, b: T): bool = a == b
+fun sum<T>(a: T, b: T): T = a + b
+fun wrap_list<T>(own x: T): [T] = vec[x]
+
+class Stack<T> {
+    var items: [T] = []
+    fun push(own x: T) = items.push(x)
+    fun has(x: T): bool = x in items
+}
+
+// interface values, lent as `&dyn Shape`
+fun describe(s: Shape): String = "${s.name()} ${s.area()}"
+fun keep(own s: Shape, all: &mut [Shape]) = all.push(s)
+
+// enums
+fun eval(e: Expr): f64 = when (e) {
+    Num(n) -> n
+    Neg(x) -> -eval(x)
+    Add(l, r) -> eval(l) + eval(r)
+}
+fun negate(own e: Expr): Expr = Expr.Neg(e)
+// `other` is `e`: returning it keeps it
+fun simplify(own e: Expr): Expr = when (e) {
+    Neg(x) -> when (x) {
+        Neg(y) -> simplify(y)
+        other -> Expr.Neg(simplify(other))
+    }
+    other -> other
+}
+fun flip(d: Dir): Dir = when (d) {
+    Up -> Dir.Down
+    Down -> Dir.Up
+}
+fun next(l: Light): Light = when (l) {
+    Light.Red -> Light.Green
+    other -> other
+}
+
+fun main() {
+    val nick: String? = Some("ada".to_string())
+    val plain = "bob".to_string()
+    greet(nick)
+    greet(plain)
+    greet("cy")
+    greet(null)
+    println("$nick $plain")
+    val xs: [i32]? = Some(vec[1, 2, 3])
+    println("${count(xs)} ${count(null)}")
+    val ada = User("Ada", 36)
+    println("${age_of(ada)} ${age_of(null)} ${ada.name}")
+    val maybes: [String?] = [Some("a".to_string()), null]
+    println(maybes.iter().map(shout).to_list())
+    var p = Profile()
+    p.set_nick(nick)
+    p.set_friend(ada)
+    println("${p.nick} ${p.friend?.name} $nick")
+
+    val word = "w".to_string()
+    println("${show(word)} ${show(5)} ${same(word, "w".to_string())} ${sum(2, 3)} $word")
+    println(wrap_list("a".to_string()))
+    var stack = Stack<String>()
+    stack.push(word.clone())
+    println("${stack.has(word)} ${stack.items.len()}")
+
+    val sq = Square(2.0)
+    println(describe(sq))
+    var shapes: [Shape] = [Square(1.0)]
+    keep(Square(3.0), shapes)
+    for (s in shapes) println(describe(s))
+    println(describe(shapes[0]))
+
+    val e = Expr.Add(Expr.Num(1.0), Expr.Neg(Expr.Num(3.0)))
+    println("${eval(e)} ${eval(e)} ${eval(negate(e))}")
+    println(eval(simplify(Expr.Neg(Expr.Neg(Expr.Num(4.0))))))
+    val d = Dir.Up
+    val light = Light.Red
+    println("${flip(d) == Dir.Down} ${flip(d) == Dir.Up} ${next(light):?} ${next(next(light)):?} ${light:?}")
+}

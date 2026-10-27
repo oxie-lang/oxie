@@ -539,8 +539,9 @@ can't change its length.
 What Oxie removes is the bookkeeping around it:
 
 * a parameter is borrowed unless it says `own`: a `String` parameter is `&str` in the generated
-  Rust, a list `&[T]`, a map or set `&HashMap<K, V>`, a `PathBuf` `&Path`, and a class or
-  `Box<T>` parameter `&T` (below), so `greet(name)` lends `name` instead of giving it away;
+  Rust, a list `&[T]`, a map or set `&HashMap<K, V>`, a `PathBuf` `&Path`, a class, enum,
+  `Box<T>` or type parameter `&T`, an interface value `&dyn Shape`, and an optional of these
+  `Option<&T>` (below), so `greet(name)` lends `name` instead of giving it away;
 * arguments for `&T` and `&mut T` parameters of Oxie functions are borrowed for you (writing
   `&v` yourself works too);
 * lifetimes are filled in when Rust can't infer them (a function returning a reference gets one
@@ -595,10 +596,49 @@ error: `add` can't keep `u`: it is borrowed
   = fix: keep a copy of `u`: `fun add(u: User) = members.push(u.clone())`
 ```
 
+The same goes for every kind of value but `Copy` ones: enums, interface values, type parameters
+and optionals are borrowed too, so a generic class that stores what it is given takes it:
+
+```oxie
+interface Shape {
+    fun area(): f64
+}
+
+class Square(side: f64) : Shape {
+    override fun area() = side * side
+}
+
+class Stack<T> {
+    var items: [T] = []
+
+    // fn push(&mut self, x: T)
+    fun push(own x: T) = items.push(x)
+    // fn has(&self, x: &T) -> bool
+    fun has(x: T): bool = x in items
+}
+
+// fn describe(s: &dyn Shape) -> String
+fun describe(s: Shape): String = "area ${s.area()}"
+
+// fn greet(name: Option<&str>), called as greet(nick.as_deref())
+fun greet(name: String?) = println("hi ${name ?: "there"}")
+
+fun main() {
+    var words = Stack<String>()
+    val word = "kiwi".to_string()
+    words.push(word.clone())
+    println(words.has(word))
+    println(describe(Square(2.0)))
+    val nick: String? = null
+    greet(nick)
+}
+```
+
 Text is the exception: a function that keeps borrowed text copies it, as Oxie copies any `&str`
-where a `String` is needed (`names.push(name)` pushes `name.to_string()`); `own name: String`
-moves it instead. A function that changes a borrowed parameter is an error too, whose fixes are
-`&mut` (change the caller's value) and `own` (change a value of its own).
+where a `String` is needed (`names.push(name)` pushes `name.to_string()`), and optional text
+(`String?`) too; `own name: String` moves it instead. A function that changes a borrowed
+parameter is an error too, whose fixes are `&mut` (change the caller's value) and `own` (change
+a value of its own).
 
 Rust rejects `self.items.push(self.next_id())` when `next_id` changes `self`: it borrows
 `items` for the call before it runs the argument. Oxie computes such an argument first, as you

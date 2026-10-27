@@ -45,8 +45,8 @@ compiles to Rust. This page maps what you know to Oxie, and lists the Rust ideas
 These come from Rust and are what makes Oxie as fast as Rust.
 
 **Values have one owner.** Assigning a `String`, list or class instance *moves* it; the old
-variable can't be used afterwards. A parameter is borrowed unless it says `own`
-(`names: [String]` becomes `&[String]`), so `show(names)` lends `names` and the caller keeps
+variable can't be used afterwards. A parameter is borrowed unless it says `own` or is `Copy`
+(`names: [String]` becomes `&[String]`, `x: T` `&T`), so `show(names)` lends `names` and the caller keeps
 it; a function that keeps a parameter (stores or returns it) takes it with `own`, and one that
 changes the caller's value takes a reference (`&mut T`), and Oxie lends the argument for you. A
 `for` loop over a list you use again afterwards borrows it too. Call `.clone()` when you really

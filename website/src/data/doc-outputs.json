@@ -161,6 +161,11 @@
   },
   {
     "file": "docs/guide.md",
+    "output": "true\narea 4\nhi there\n",
+    "source": "interface Shape {\n    fun area(): f64\n}\n\nclass Square(side: f64) : Shape {\n    override fun area() = side * side\n}\n\nclass Stack<T> {\n    var items: [T] = []\n\n    // fn push(&mut self, x: T)\n    fun push(own x: T) = items.push(x)\n    // fn has(&self, x: &T) -> bool\n    fun has(x: T): bool = x in items\n}\n\n// fn describe(s: &dyn Shape) -> String\nfun describe(s: Shape): String = \"area ${s.area()}\"\n\n// fn greet(name: Option<&str>), called as greet(nick.as_deref())\nfun greet(name: String?) = println(\"hi ${name ?: \"there\"}\")\n\nfun main() {\n    var words = Stack<String>()\n    val word = \"kiwi\".to_string()\n    words.push(word.clone())\n    println(words.has(word))\n    println(describe(Square(2.0)))\n    val nick: String? = null\n    greet(nick)\n}\n"
+  },
+  {
+    "file": "docs/guide.md",
     "output": "[1, 2]\n",
     "source": "class Ids {\n    var items: [usize] = []\n    var next: usize = 0\n\n    fun next_id(): usize {\n        next += 1\n        return next\n    }\n\n    // let next_id = self.next_id(); self.items.push(next_id);\n    fun add() = items.push(next_id())\n}\n\nfun main() {\n    var ids = Ids()\n    ids.add()\n    ids.add()\n    println(ids.items)\n}\n"
   },
@@ -211,8 +216,8 @@
   },
   {
     "file": "docs/reference.md",
-    "output": "hello ADA\na ?\n",
-    "source": "fun initial(name: String?): char {\n    if (name == null) return '?'\n    name.chars().next().unwrap_or('?')     // `name` is a String here\n}\n\nfun main() {\n    val nick: String? = \"ada\"\n    if (nick != null && nick.len() > 2) println(\"hello ${nick.to_uppercase()}\")\n    println(\"${initial(nick.clone())} ${initial(null)}\")\n}\n"
+    "output": "hello ADA\na ? ada\n",
+    "source": "fun initial(name: String?): char {\n    if (name == null) return '?'\n    name.chars().next().unwrap_or('?')     // `name` is the text here\n}\n\nfun main() {\n    val nick: String? = \"ada\"\n    if (nick != null && nick.len() > 2) println(\"hello ${nick.to_uppercase()}\")\n    println(\"${initial(nick)} ${initial(null)} $nick\")\n}\n"
   },
   {
     "file": "docs/reference.md",

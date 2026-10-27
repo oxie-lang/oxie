@@ -15,7 +15,7 @@ fun shift(start: Point?): Point? {
     return p
 }
 
-fun rename(start: Named?): Named? {
+fun rename(own start: Named?): Named? {
     val n = start
     if (n == null) return null
     n.name = n.name + "!"
@@ -24,9 +24,9 @@ fun rename(start: Named?): Named? {
 
 // `replace` and `take` of a `T?` field give the old value; `clone()` and `$v` add bounds
 class Slot<T>(var value: T? = null) {
-    fun put(v: T): T? = value.replace(v)
+    fun put(own v: T): T? = value.replace(v)
     fun take(): T? = value.take()
-    fun get_or(d: T): T = value.clone() ?: d
+    fun get_or(own d: T): T = value.clone() ?: d
     fun describe(): String = if (val v = &value) "set to $v" else "empty"
 }
 

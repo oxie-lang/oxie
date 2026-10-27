@@ -6,7 +6,7 @@ import std.collections.{BTreeMap, HashSet}
 data class User(name: String, email: String?)
 
 class Stack<T>(var items: [T] = []) {
-    fun push(x: T) = items.push(x)
+    fun push(own x: T) = items.push(x)
     override fun toString() = "stack $items"
 }
 

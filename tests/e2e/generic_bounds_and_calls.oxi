@@ -30,7 +30,7 @@ class Pair<A, B>(first: A, second: B) {
 class Cache<K, V> {
     var map: [K: V] = [:]
     var hits = 0
-    fun get_or(k: K, f: () -> V): V {
+    fun get_or(own k: K, f: () -> V): V {
         if (val v = map.get(&k)) {
             hits += 1
             return v.clone()
@@ -54,7 +54,7 @@ fun <T> first_copy(xs: &[T]): T? {
 
 class Memo<K, V> {
     var map: [K: V] = [:]
-    fun get_or(k: K, f: (K) -> V): V {
+    fun get_or(own k: K, f: (K) -> V): V {
         if (val v = map.get(&k)) return v.clone()
         val v = f(k.clone())
         map.insert(k, v.clone())

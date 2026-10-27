@@ -11,7 +11,7 @@ fun eval(e: &Expr): f64 = when (e) {
     Add(l, r) -> eval(l) + eval(r)
 }
 
-fun simplify(e: Expr): Expr = when (e) {
+fun simplify(own e: Expr): Expr = when (e) {
     Neg(x) -> when (x) {
         Neg(y) -> simplify(y)
         other -> Expr.Neg(simplify(other))
