@@ -434,6 +434,11 @@ pub struct Lowerer<'a> {
     pub source_words: Option<HashSet<String>>,
     /// The std items generated code names through `use` lines at the top of the file.
     std_uses: RefCell<BTreeSet<String>>,
+    /// `infer_type`'s results while one outermost inference runs, which can't change the scopes:
+    /// a chain of calls infers each receiver once, not once per way of looking at it. Keyed by
+    /// the node's address and span; emptied when the outermost inference returns.
+    pub(crate) infer_cache: RefCell<HashMap<(usize, u32, u32), Option<Type>>>,
+    pub(crate) infer_depth: std::cell::Cell<u32>,
     /// How deep the lowering is in `mod` and `object` blocks, which the file's `use` lines don't
     /// reach.
     inline_depth: usize,
@@ -478,7 +483,8 @@ fn captures_borrow(ret: String, f: &FunDecl, self_ref: bool) -> String {
     if !returns_impl || !ret.starts_with("impl ") || ret.contains('\'') || ret.contains("use<") {
         return ret;
     }
-    let ref_params = f.params.iter().filter(|p| matches!(p.ty, Type::Ref { lifetime: None, .. })).count();
+    // `'_` is the one lifetime of the parameters; a `&'static str` beside an `&Theme` is one more
+    let ref_params = f.params.iter().filter(|p| matches!(p.ty, Type::Ref { .. })).count();
     if self_ref || ref_params == 1 {
         format!("{} + '_", ret)
     } else {
@@ -694,6 +700,8 @@ impl<'a> Lowerer<'a> {
             unresolved: HashSet::new(),
             source_words: None,
             std_uses: RefCell::new(BTreeSet::new()),
+            infer_cache: RefCell::new(HashMap::new()),
+            infer_depth: std::cell::Cell::new(0),
             inline_depth: 0,
             calls: HashSet::new(),
             crate_calls: None,
@@ -1753,20 +1761,27 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn resolve_variant_path(&self, segs: &[String]) -> (String, Option<VariantShape>) {
         if segs.len() == 1 {
             let n = &segs[0];
-            // a case of the matched value's enum, whatever else the name means
+            // a case of the matched value's enum, whatever else the name means (as it is when
+            // the module imports the cases themselves: `import super::TabSlot::*`)
             if let Some(en) = self.pat_enum() {
                 if let Some(shape) = en.variant(n) {
+                    if self.cases_imported(&en.name) {
+                        return (esc(n), Some(shape.clone()));
+                    }
                     return (format!("{}::{}", en.name, esc(n)), Some(shape.clone()));
                 }
             }
             if !self.k.is_class_name(n) && !self.is_local(n) {
                 if let Some(en) = self.variant_enum(n) {
                     let shape = en.variant(n).cloned();
+                    if self.cases_imported(&en.name) {
+                        return (esc(n), shape);
+                    }
                     return (format!("{}::{}", en.name, n), shape);
                 }
                 // a constant of the class or companion object being lowered (a bare name would
-                // be a new binding)
-                if self.class.as_ref().is_some_and(|c| c.consts.contains(n)) {
+                // be a new binding); `None` and the like are the optional's and the result's
+                if self.class.as_ref().is_some_and(|c| c.consts.contains(n)) && !matches!(n.as_str(), "None" | "Some" | "Ok" | "Err") {
                     return (format!("Self::{}", esc(n)), None);
                 }
             }
@@ -1784,6 +1799,12 @@ impl<'a> Lowerer<'a> {
             path = segs.join("::");
         }
         (path, shape)
+    }
+
+    /// Does this module import the cases of the enum `name` with a glob (`import super::Kind::*`)?
+    fn cases_imported(&self, name: &str) -> bool {
+        self.k.globs.get(&self.module).is_some_and(|gs| gs.iter().any(|g| g.last().is_some_and(|l| l == name)))
+            || self.local_imports.iter().any(|(n, p)| n == "*" && p.last().is_some_and(|l| l == name))
     }
 
     pub(crate) fn join_path(&self, segs: &[String]) -> String {

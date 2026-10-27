@@ -1473,7 +1473,7 @@ impl<'a> Lowerer<'a> {
                 self.e.w("*");
                 self.expr(e, P_UNARY);
             }
-            Type::Path { .. } if self.copy_ref_local(e, ty) => {
+            Type::Path { .. } if self.copy_ref_local(e, ty) || pos == TyPos::Param && self.foreign_ref_local(e, ty) => {
                 self.e.w("*");
                 self.expr(e, P_UNARY);
             }
@@ -1528,7 +1528,11 @@ impl<'a> Lowerer<'a> {
                 }
             }
             // also a constructor's (`View(nums)` with `class View(data: &[i32])`)
-            Type::Ref { mutable, inner, .. } if matches!(pos, TyPos::Param | TyPos::Field) && (self.auto_borrow(e, *mutable) || !mutable && self.lend_to_slice(e, inner)) => {
+            // a stored reference (a field) borrows a variable or field; a call's result would be a
+            // temporary gone at the end of the statement (`ids: Box.leak(xs)` is already one)
+            Type::Ref { mutable, inner, .. }
+                if (pos == TyPos::Param || pos == TyPos::Field && (self.is_place(e) || is_collection_lit(e) || is_literal(e))) && (self.auto_borrow(e, *mutable) || !mutable && self.lend_to_slice(e, inner)) =>
+            {
                 self.e.mark(e.span);
                 self.e.w(if *mutable { "&mut " } else { "&" });
                 if !(is_collection_lit(e) && self.borrowed_lit(e, inner)) {
@@ -3612,6 +3616,22 @@ impl<'a> Lowerer<'a> {
         }
         let params = f.params.iter().map(|p| LambdaParam { pat: p.pat.clone(), ty: Some(p.ty.clone()) }).collect();
         Some(Expr::new(ExprKind::Lambda { params, ret: f.ret.clone(), body: Box::new(body), is_move: false, implicit_it: false, is_async: false }, f.name_span))
+    }
+
+    /// A local bound to a reference to a value of another crate's type `t` (`position` in
+    /// `Some(position)` of a `when` that matches a field by reference), for a parameter that
+    /// takes the value: `*position` copies it when the type is `Copy`, as a match by value would.
+    fn foreign_ref_local(&self, e: &Expr, t: &Type) -> bool {
+        let Some(n) = e.ident() else { return false };
+        let Some(Some(Type::Ref { inner, .. })) = self.local(n) else { return false };
+        let Some(name) = t.last_name() else { return false };
+        // an Oxie class of that name with another number of type arguments isn't this type
+        let args = match t {
+            Type::Path { segs, .. } => segs.last().and_then(|s| s.generics.as_ref()).map_or(0, |g| g.len()),
+            _ => 0,
+        };
+        let oxie = self.class_info(name).is_some_and(|c| c.type_params == args) || self.enum_info(name).is_some();
+        inner.last_name() == Some(name) && !oxie && !crate::lower::PRIMITIVES.contains(&name) && !matches!(name, "String" | "Vec" | "HashMap" | "HashSet" | "Box" | "Rc" | "Arc")
     }
 
     /// A local bound to a reference to a `Copy` value of type `t` (`&mut Point` for `Point`).
@@ -5910,6 +5930,12 @@ impl<'a> Lowerer<'a> {
         while let Some(Type::Ref { inner, .. }) = owner {
             owner = Some(inner);
         }
+        // `Some(d)` of an optional: the value, a reference to it when the match borrows
+        if let ([some], [(None, Pat::Ident { name, sub: None, by_ref: false, .. })], Some(inner)) = (path, elems.as_slice(), owner.and_then(option_inner)) {
+            if some == "Some" && inner != Type::Infer {
+                return vec![(name.clone(), if by_ref { Type::Ref { lifetime: None, mutable: false, inner: Box::new(inner) } } else { inner })];
+            }
+        }
         if let Some(t) = owner.filter(|t| is_box(t)) {
             owner = match t {
                 Type::Path { segs, .. } => match segs[0].generics.as_deref() {
@@ -6288,9 +6314,16 @@ impl<'a> Lowerer<'a> {
         }
         if args.len() == 1 && matches!(args[0].value.kind, ExprKind::Lambda { .. }) {
             self.next_lambda_elem = elem;
-            // these take a lambda that gives an optional
+            // these take a lambda that gives an optional: one with a `null` branch gives
+            // `Some(..)` in the others (a body without one already is an optional)
             if matches!(name, "filter_map" | "find_map" | "map_while") {
-                self.next_lambda_ret = Some(Type::Option(Box::new(Type::Infer)));
+                if let ExprKind::Lambda { body, .. } = &args[0].value.kind {
+                    let mut tails = Vec::new();
+                    value_tails(body, &mut tails);
+                    if tails.iter().any(|t| matches!(t.kind, ExprKind::Null)) {
+                        self.next_lambda_ret = Some(Type::Option(Box::new(Type::Infer)));
+                    }
+                }
             }
         }
         self.arg_list(&args, None, TyPos::Param, span);
@@ -6687,7 +6720,8 @@ impl<'a> Lowerer<'a> {
                 match name.as_str() {
                     "len" | "count" | "capacity" => Some(Type::simple("usize")),
                     "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "replace" | "join" | "concat" | "trim_string" => Some(Type::simple("String")),
-                    "trim" | "trim_start" | "trim_end" | "as_str" => Some(str_ref()),
+                    "trim" | "trim_start" | "trim_end" => Some(str_ref()),
+                    "as_str" if rt.as_ref().is_some_and(crate::infer::is_text) => Some(str_ref()),
                     "is_empty" | "contains" | "contains_key" | "starts_with" | "ends_with" | "is_some" | "is_none" | "is_ok" | "is_err" => Some(Type::simple("bool")),
                     "let" => None,
                     "clone" | "to_vec" if args.is_empty() => rt.map(|t| match t {

@@ -762,17 +762,19 @@ pub fn reused_loop_iters(outer: Vec<String>, body: &Block) -> std::collections::
                 }
                 For { pat, iter, body, .. } => {
                     self.expr(iter);
+                    // the body's uses of a name the loop variable shadows (`for (x in x)`) are
+                    // the element's, not the list's
+                    let mut names = Vec::new();
+                    pat.bindings(&mut names);
                     if let Some(n) = iter.ident() {
-                        self.check(n, None, iter.span.start, x.span.end);
+                        self.check(n, None, iter.span.start, x.span.end, names.iter().any(|b| b == n));
                     }
                     // a field of a variable (`t.members`): a later use of another field doesn't count
                     if let Field { recv, name, safe: false } = &iter.kind {
                         if let Some(n) = recv.ident() {
-                            self.check(n, Some(name), iter.span.start, x.span.end);
+                            self.check(n, Some(name), iter.span.start, x.span.end, names.iter().any(|b| b == n));
                         }
                     }
-                    let mut names = Vec::new();
-                    pat.bindings(&mut names);
                     self.block(body, true, names);
                 }
                 Lambda { params, body, .. } => {
@@ -827,14 +829,14 @@ pub fn reused_loop_iters(outer: Vec<String>, body: &Block) -> std::collections::
             false
         }
         /// A loop at `[_, end)` iterating over `name`: is the variable used again?
-        fn check(&mut self, name: &str, field: Option<&str>, start: u32, end: u32) {
+        fn check(&mut self, name: &str, field: Option<&str>, start: u32, end: u32, shadowed: bool) {
             let Some(d) = self.scopes.iter().rposition(|s| s.names.iter().any(|n| n == name)) else { return };
             let in_loop = self.scopes[d + 1..].iter().any(|s| s.is_loop);
             let scope_end = self.scopes[d].end;
             let other_field = |p: &u32| field.is_some_and(|f| self.fields.get(p).is_some_and(|g| g != f));
             let later = self.uses.iter().filter(|(n, p)| n == name && *p >= end && *p < scope_end && !other_field(p)).map(|(_, p)| *p).min();
             // the loop's own body uses it too (`for (x in xs) if (x == xs[0])`)
-            let inside = self.uses.iter().filter(|(n, p)| n == name && *p > start && *p < end && !other_field(p)).map(|(_, p)| *p).min();
+            let inside = self.uses.iter().filter(|(n, p)| !shadowed && n == name && *p > start && *p < end && !other_field(p)).map(|(_, p)| *p).min();
             if in_loop || later.is_some() || inside.is_some() {
                 self.found.insert(start, later.or(inside));
             }

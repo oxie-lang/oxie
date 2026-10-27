@@ -65,7 +65,20 @@ pub(crate) fn has_infer(t: &Type) -> bool {
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn infer_type(&self, e: &Expr) -> Option<Type> {
-        self.infer(e, false)
+        let key = (e as *const Expr as usize, e.span.start, e.span.end);
+        if let Some(t) = self.infer_cache.borrow().get(&key) {
+            return t.clone();
+        }
+        let depth = self.infer_depth.get();
+        self.infer_depth.set(depth + 1);
+        let t = self.infer(e, false);
+        self.infer_depth.set(depth);
+        if depth == 0 {
+            self.infer_cache.borrow_mut().clear();
+        } else {
+            self.infer_cache.borrow_mut().insert(key, t.clone());
+        }
+        t
     }
 
     /// The class or enum a type names, as a path for `class_at`: its name, or for a name several
@@ -105,7 +118,6 @@ impl<'a> Lowerer<'a> {
         (!c.has_generics).then(|| self.named_ty(path))
     }
 
-    /// `through_try`: the expression is the operand of `?`, so a throwing call yields its value type.
     /// The type of an `if` or `when` whose branches give tuples, some with `null` in a part.
     pub(crate) fn tuple_with_null_parts(&self, e: &Expr) -> Option<Type> {
         let mut tails = Vec::new();
@@ -132,6 +144,7 @@ impl<'a> Lowerer<'a> {
         Some(Type::Option(Box::new(Type::Ref { lifetime: None, mutable, inner: Box::new(t) })))
     }
 
+    /// `through_try`: the expression is the operand of `?`, so a throwing call yields its value type.
     fn infer(&self, e: &Expr, through_try: bool) -> Option<Type> {
         use ExprKind::*;
         // `r?.m()` on a `Result` is Rust's `?` then the call
@@ -366,7 +379,9 @@ impl<'a> Lowerer<'a> {
                     "replace" | "take" if args.len() <= 1 && self.infer_type(recv).is_some_and(|t| matches!(t, Type::Option(_)) || t.single_name() == Some("Option")) => self.infer_type(recv),
                     "to_string" | "to_uppercase" | "to_lowercase" | "to_owned" | "repeat" | "join" | "concat" | "replace" | "trim_string" => Some(ty("String")),
                     // a part of text
-                    "trim" | "trim_start" | "trim_end" | "as_str" if args.is_empty() => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(ty("str")) }),
+                    "trim" | "trim_start" | "trim_end" if args.is_empty() => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(ty("str")) }),
+                    // a `String`'s (a JSON value's `as_str` gives an optional)
+                    "as_str" if args.is_empty() && self.infer_type(recv).as_ref().is_some_and(is_text) => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(ty("str")) }),
                     "is_empty" | "contains" | "contains_key" | "starts_with" | "ends_with" | "is_some" | "is_none" | "is_ok" | "is_err" | "any" | "all"
                     | "is_alphabetic" | "is_numeric" | "is_alphanumeric" | "is_whitespace" | "is_digit" | "eq" | "ne" | "is_nan" => Some(ty("bool")),
                     // Oxie's list operations on a list give a new list; those that keep the
@@ -724,6 +739,14 @@ fn text_item(e: &Expr) -> Option<Type> {
         "char_indices" if args.is_empty() => Some(Type::Tuple(vec![ty("usize"), ty("char")])),
         "lines" | "split_whitespace" if args.is_empty() => Some(Type::Ref { lifetime: None, mutable: false, inner: Box::new(ty("str")) }),
         _ => None,
+    }
+}
+
+/// Text: a `String`, `str` or a reference to one.
+pub(crate) fn is_text(t: &Type) -> bool {
+    match t {
+        Type::Ref { inner, .. } => is_text(inner),
+        t => matches!(t.single_name(), Some("String" | "str")),
     }
 }
 

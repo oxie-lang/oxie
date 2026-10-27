@@ -1,0 +1,78 @@
+// Forms that code translated from Rust uses, which a change in the lowering must keep working.
+
+import std.time.Duration
+
+// a lambda for `filter_map` that already gives an optional, of a type Oxie doesn't know
+fun digits(s: &str): u32 = s.chars().filter_map { it.to_digit(10) }.sum::<u32>()
+
+class Written(id: u64)
+
+class Doc(var saves: u64 = 0) {
+    fun saved(written: Written): u64 {
+        saves += 1
+        written.id + saves
+    }
+}
+
+class Store {
+    var docs: [Doc] = [Doc()]
+    // the loop variable `written` hides the list it goes over
+    fun background_saved(written: [(usize, Written)]): [u64] {
+        var out = vec[]
+        for ((doc, written) in written) {
+            val d = &mut docs[doc]
+            out.push(d.saved(written))
+        }
+        out
+    }
+}
+
+// a `&'static str` beside another reference: the result borrows neither
+fun label(text: &'static str, prefix: &str): impl std.fmt.Display = "$prefix$text"
+
+class Highlight(n: u32) {
+    const None: u32 = 0
+    // `None` of the optional, not the class's constant
+    static fun at(text: &str): u32 = when (text.rfind('.')) {
+        Some(dot) -> dot as u32
+        None -> Highlight.None
+    }
+}
+
+data class Event(name: String, delay: Duration?)
+
+fun wait_ms(d: Duration): u128 = d.as_millis()
+
+// a field of a borrowed value is matched by reference; its `Copy` value is passed on
+fun delay_of(e: &Event): u128 = when (e.delay) {
+    Some(d) -> wait_ms(d)
+    None -> 0
+}
+
+class Ids(ids: &'static [u32])
+
+enum Slot { Fixed(w: f32), Hidden }
+
+fun fit(): [Slot] = vec[Slot.Fixed(2.0), Slot.Hidden, Slot.Fixed(3.5)]
+
+mod checks {
+    // the cases of `Slot` are imported by themselves, not `Slot`
+    import super::{Slot::*, fit}
+
+    fun total(): f32 = fit().iter().map { s ->
+        when (s) {
+            Fixed(w) -> *w
+            else -> 0.0
+        }
+    }.sum()
+}
+
+fun main() {
+    println("${digits("a1b2c3")} ${label("x", ">")}")
+    var store = Store()
+    println("${store.background_saved(vec[(0, Written(5)), (0, Written(7))]):?}")
+    println("${Highlight.at("a.b.c")} ${Highlight.at("abc")}")
+    println("${delay_of(&Event("e".to_string(), Some(Duration.from_millis(250))))} ${delay_of(&Event("f".to_string(), null))}")
+    val held = Ids(Box.leak(vec[1u32, 2, 3].into_boxed_slice()))
+    println("${held.ids.len()} ${checks.total()}")
+}
