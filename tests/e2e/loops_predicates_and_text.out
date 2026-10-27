@@ -1,0 +1,5 @@
+[Item { name: "pen", qty: 11 }, Item { name: "ink", qty: 12 }] [Counter { n: 2 }, Counter { n: 3 }] ["ann:15", "bob:17"]
+[1, 2, 9]
+1 3 2
+{"a": 1} abc [9, 3] A? [ab    ]
+Ok(()) Err("not positive: -7")

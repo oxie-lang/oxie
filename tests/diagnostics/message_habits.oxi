@@ -1,0 +1,32 @@
+// Mistakes whose messages say what to write instead.
+interface Shape {
+    fun area(): f64
+    fun name(): String
+}
+
+class Sq(s: f64) : Shape {
+    // error: 7: implement it: `override fun name(): String = todo!()`
+    override fun area(): f64 = s * s
+}
+
+fun label(cmd: String): i32 = when (cmd) {
+    // error: 12: this `when` doesn't handle the values its arms don't name
+    "go" -> 1
+    "stop" -> 2
+}
+
+fun main() {
+    val n: i32 = 3
+    val price = 2.5
+    println(n * price)
+    // error: 21: numbers don't convert by themselves
+    val xs = [1, 2, 3]
+    xs.push(4)
+    // error: 24: is an array, whose length is fixed
+    // error: 24: fix: declare `xs` with `var`: `var xs = [1, 2, 3]`
+    var ys: [i32] = [3, 1]
+    val sorted = ys.sort()
+    println(sorted)
+    // error: 29: this value is `()`
+    println("${Sq(1.0).area()} ${label("go")}")
+}

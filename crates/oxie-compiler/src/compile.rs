@@ -155,9 +155,10 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
         sema::collect(&units, &opts.crate_name, opts.extern_crates.clone(), has_lib)
     };
     let mut k = collect(&parsed);
-    sema::ext_receivers(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
-    // builder methods that return `this` take `self`; sema again for their receivers
-    if sema::by_value_receivers(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k) {
+    let changing_exts = sema::ext_receivers(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k);
+    // builder methods that return `this` take `self`; sema again for their receivers (and for the
+    // extension functions that change theirs)
+    if sema::by_value_receivers(&mut parsed.iter_mut().map(|p| (p.module.as_slice(), &mut p.file)).collect::<Vec<_>>(), &k) || changing_exts {
         k = collect(&parsed);
     }
     // what takes the receivers: methods that take only the fields they use, and class and `Box`

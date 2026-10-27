@@ -44,23 +44,33 @@ pub fn grow_lists(items: &mut [Item]) {
 
 /// The block and every block inside it.
 fn in_block(b: &mut Block) {
-    lists(b);
-    walk_block_mut(b, &mut nested);
+    in_block_with(b, None);
 }
 
 fn in_expr(e: &mut Expr) {
-    walk_expr_mut(e, &mut nested);
+    in_expr_with(e, None);
+}
+
+/// The same, with the list parameters of the crate's functions: an array passed to one is a
+/// list too (`add(a)` with `fun add(v: &mut [i32]) = v.push(9)`).
+fn in_block_with(b: &mut Block, params: Option<&ListParams>) {
+    lists(b, params);
+    walk_block_mut(b, &mut |e| nested(e, params));
+}
+
+fn in_expr_with(e: &mut Expr, params: Option<&ListParams>) {
+    walk_expr_mut(e, &mut |x| nested(x, params));
 }
 
 /// The blocks an expression holds itself (deeper ones are reached by the walk).
-fn nested(e: &mut Expr) -> bool {
+fn nested(e: &mut Expr, params: Option<&ListParams>) -> bool {
     use ExprKind::*;
     match &mut e.kind {
-        Block(b) | Unsafe(b) | ConstBlock(b) | LabeledBlock { block: b, .. } | Loop { body: b, .. } | Async { block: b, .. } | While { body: b, .. } | DoWhile { body: b, .. } | For { body: b, .. } | If { then: b, .. } => lists(b),
+        Block(b) | Unsafe(b) | ConstBlock(b) | LabeledBlock { block: b, .. } | Loop { body: b, .. } | Async { block: b, .. } | While { body: b, .. } | DoWhile { body: b, .. } | For { body: b, .. } | If { then: b, .. } => lists(b, params),
         TryCatch { body, catch } => {
-            lists(body);
+            lists(body, params);
             if let Some(c) = catch {
-                lists(&mut c.body);
+                lists(&mut c.body, params);
             }
         }
         _ => {}
@@ -68,12 +78,14 @@ fn nested(e: &mut Expr) -> bool {
     true
 }
 
-/// Turns the array literal of each `var` of the block that a later statement grows into a list.
-fn lists(b: &mut Block) {
+/// Turns the array literal of each `var` of the block that a later statement grows (or passes
+/// to a list parameter) into a list.
+fn lists(b: &mut Block, params: Option<&ListParams>) {
     for i in 0..b.stmts.len() {
         let (head, rest) = b.stmts.split_at_mut(i + 1);
         let Stmt::Let { pat: Pat::Ident { name, mutable: true, .. }, ty: None, init: Some(init), .. } = &mut head[i] else { continue };
-        if !matches!(init.kind, ExprKind::Array(_) | ExprKind::ArrayRepeat(..)) || !rest.iter().any(|s| grows(s, name)) {
+        let grown = |s: &Stmt| grows(s, name) || params.is_some_and(|p| any_in_stmt(s, &|e| passes_on(e, name, p)));
+        if !matches!(init.kind, ExprKind::Array(_) | ExprKind::ArrayRepeat(..)) || !rest.iter().any(grown) {
             continue;
         }
         let span = init.span;
@@ -108,6 +120,14 @@ pub fn grow_params(files: &mut [&mut File]) {
             each_fun_mut(&mut f.items, &mut |fun| changed |= grown_params(fun, &lists));
         }
         if !changed {
+            // the arrays passed to those parameters are lists too
+            for f in files.iter_mut() {
+                each_fun_mut(&mut f.items, &mut |fun| match &mut fun.body {
+                    Some(FunBody::Block(b)) => in_block_with(b, Some(&lists)),
+                    Some(FunBody::Expr(e)) => in_expr_with(e, Some(&lists)),
+                    None => {}
+                });
+            }
             break;
         }
     }

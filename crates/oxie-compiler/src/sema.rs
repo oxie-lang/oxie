@@ -200,6 +200,8 @@ pub struct Crate {
     pub ext_throws: HashSet<String>,
     /// The extension functions by name: the type each extends, and its signature.
     pub ext_funs: HashMap<String, Vec<(Type, FunInfo)>>,
+    /// Extension functions that change their receiver (`&mut self`), with its type's name.
+    pub changing_exts: HashSet<(String, String)>,
     /// Type names modules declare in Rust, which Oxie can't see into: in `rust { }` blocks
     /// (`struct Newline;`) and item macros (`actions!(editor, [Newline])`).
     pub rust_types: HashSet<(Vec<String>, String)>,
@@ -838,8 +840,8 @@ pub fn by_value_receivers(files: &mut [(&[String], &mut File)], k: &Crate) -> bo
 /// assigns its fields, calls a method of it that does (`&mut self` methods of an Oxie class, a
 /// mutating std method like `push` on any other type), or takes `&mut` of a field. Runs after
 /// receiver inference (`k`), which tells what the class's methods take.
-pub fn ext_receivers(files: &mut [(&[String], &mut File)], k: &Crate) {
-    fn go(items: &mut [Item], module: &[String], k: &Crate) {
+pub fn ext_receivers(files: &mut [(&[String], &mut File)], k: &Crate) -> bool {
+    fn go(items: &mut [Item], module: &[String], k: &Crate, changed: &mut bool) {
         for it in items {
             match &mut it.kind {
                 ItemKind::Fun(f) if f.receiver.is_some() && f.self_param.is_none() && !f.mods.is_mut && !f.mods.is_static => {
@@ -852,19 +854,22 @@ pub fn ext_receivers(files: &mut [(&[String], &mut File)], k: &Crate) {
                     };
                     if analyze_fun(f, &fields, &methods).mutates_self {
                         f.mods.is_mut = true;
+                        *changed = true;
                     }
                 }
                 ItemKind::Mod { name, items } | ItemKind::Object { name, items } => {
                     let inner: Vec<String> = module.iter().cloned().chain([name.clone()]).collect();
-                    go(items, &inner, k);
+                    go(items, &inner, k, changed);
                 }
                 _ => {}
             }
         }
     }
+    let mut changed = false;
     for (module, f) in files.iter_mut() {
-        go(&mut f.items, module, k);
+        go(&mut f.items, module, k, &mut changed);
     }
+    changed
 }
 
 /// Classes and enums whose fields hold references get a lifetime parameter: `class Parser(input: &str)`
@@ -1495,6 +1500,9 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                     k.ext_throws.insert(f.name.clone());
                 }
                 if let Some(recv) = &f.receiver {
+                    if f.mods.is_mut || matches!(f.self_param, Some(SelfParam::RefMut)) {
+                        k.changing_exts.insert((recv.single_name().unwrap_or_default().to_string(), f.name.clone()));
+                    }
                     let info = FunInfo { module: module.to_vec(), params: params_info(f), throws: !matches!(f.throws, Throws::No), ret: known_ret(f), raw: false, generic_ret: false, type_names: type_param_names(&f.generics) };
                     k.ext_funs.entry(f.name.clone()).or_default().push((recv.clone(), info));
                 }

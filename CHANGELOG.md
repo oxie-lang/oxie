@@ -70,6 +70,21 @@ Those are fixed below; the silent ones first.
   other trailing lambdas after a capitalized name, `#![..]` before a file's `//!` docs, and
   fill characters in format specs (`"${n: >5}"`, `"${n:*^7}"`).
 
+* After `is Shape.Circle` (a `when` arm on a variable, or `if (s is Shape.Circle)`), `s.radius`
+  reads that case's field, as Kotlin's smart cast does.
+* Objects hold objects, classes and enums: `Defaults.Colors.BG`, `Shapes.Circle(1.0)`.
+* A local `fun` that uses the variables or fields around it is a closure (Rust's nested `fn`
+  can't see them).
+* A `for_each` statement whose lambda throws is the `for` loop it stands for, so the error leaves
+  the function, as with Kotlin's inline `forEach`.
+* `x!!` on a value that can't be null is a warning, as in Kotlin, and does nothing.
+* `a += b` on a class with `operator fun plus` and no `plusAssign` is `a = a + b`, and an operator
+  taking `&T` (`operator fun times(o: &Matrix)`) lends its right side: `a * b` is `a * &b`.
+* `fun f() = a?.b` without a declared type is optional for its callers; one that calls a method
+  giving nothing (`maybe?.inc()`) is a statement.
+* `s += 'c'` appends the character, a format spec may name a field (`"${name:<width$}"`), and
+  `std.collections.HashMap()` is `HashMap::new()`.
+
 ### Fixes
 
 * Only the last of several `init` blocks ran.
@@ -155,6 +170,42 @@ Those are fixed below; the silent ones first.
   types with an interface's `new` stay structs; one TODO line per reason above methods kept as
   Rust; it no longer crashes on items `prettyplease` can't print (`safe fn` in an `unsafe extern`
   block).
+* Null safety: a `Copy` value changed after a null check (also after `if (x == null) return`) is
+  changed in place; `x != null && val n = ..` in a let chain unwraps `x`; `when (val c = opt)`
+  unwraps `c` in the `else` after a `null` arm; a null check unwraps a local holding `map.get(k)`,
+  `pop()` and the like; `if (val r = &mut opt)` knows what `r` is; a statement `when` on an
+  optional number needs no `else`; `?:` after a lookup of numbers gives the number, between two
+  results tries the second, and takes any `&str` as its text default; `opt?` in a function giving
+  a `T?` is the value; a `T?` (or `&x`) passed to a `&T?` parameter is lent, and a tuple branch
+  with a `null` part makes that part optional.
+* `?.` chains: `?.` after `chars()`, `iter()` or `split()` reads as `.`; a call inside one converts
+  text arguments (`log?.push("x")`); `?.field` of a call's result takes the field; an iterator's
+  `find` or `next` gives owned items after `enumerate()` or `map { }`; `x?.let { "a" }` may ignore
+  its value; a throwing call at the end of a chain over results passes its error on.
+* Generics: bounds are inferred for map values and loops over maps, values a `() -> T` parameter
+  gives, locals declared `[T]`, `T?` fields, copies of a `[T]`, `xs.first()` after a null check,
+  and arithmetic of `T`s; a method of a generic class takes its parameters with the receiver's
+  type arguments; `Option.replace` and `take` keep their type.
+* Ownership: a loop borrows the list mutably when the body passes the element to a `&mut`
+  parameter, changes it with an extension function or calls a method that changes one of its
+  fields; an array passed to a function that grows it is a list; `x > best!!` compares without
+  taking the value; `first_word(c: &mut Cursor): Word` borrows the text, not the cursor, for as
+  long as the result lives; arguments that read a field before a call that changes `this` see the
+  old value, as in Kotlin; `when (c) { in vowels -> }` lends `vowels`.
+* `this = x` in a method that takes `&mut self`, `copy(x = ..)` without `this`, `to_string()` in a
+  type with its own `toString`, `*this` in an extension of a number, `(x, y)` destructuring of data
+  classes in `for` loops and lambdas, an interface value for a `Shape?` field, a class imported
+  under another name (`import shapes.Circle as C`), `import util` in the crate root, a field named
+  like a function, an error class or enum with its own `toString`, `try`/`catch` and `if`/`when`
+  values that need a conversion, `fun f() = expr` bodies over text iterators, array literals'
+  `map`, `if (val Case(n) = xs.last_mut())`, and `.context()` in a function that throws
+  `anyhow::Error` all failed to build.
+* Messages say what to write instead for Kotlin's `vararg`, `indices`, `toDouble()` on a number,
+  `componentN`, `List`/`Map`/`Set`, `maxOf`, `require`, `compareTo`/`get`/`set` operators,
+  `Box(x)`, a `String` constant, a growing `val` array, `()` from `sort()`, numbers of two types,
+  a missing interface method, a `when` on text without `else`, `null` returned from a function that
+  isn't optional, a `T?` used as a `T`, a throwing call printed without `?`, a parse error `?`
+  can't convert, and a result borrowed from a parameter the function owns.
 
 ## 0.4.1 - 2026-10-26
 

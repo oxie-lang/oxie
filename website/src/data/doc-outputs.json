@@ -31,6 +31,11 @@
   },
   {
     "file": "docs/errors.md",
+    "output": "Err(\"negative: -2\")\n",
+    "source": "fun check(x: i32) throws {\n    if (x < 0) throw \"negative: $x\"\n}\n\nfun check_all(xs: [i32]) throws {\n    xs.for_each { check(*it) }           // for it in xs.iter() { check(*it)?; }\n}\n\nfun main() {\n    println(\"${check_all([1, -2]):?}\")\n}\n"
+  },
+  {
+    "file": "docs/errors.md",
     "output": "port 8080\nerror: missing setting 'port'\nerror: invalid digit found in string\nerror: port = 99999 is larger than 65535\n",
     "source": "import std.num.ParseIntError\n\nerror enum ConfigError {\n    Missing(key: String) = \"missing setting '$key'\"\n    OutOfRange(key: String, value: i64, max: i64) = \"$key = $value is larger than $max\"\n    BadNumber(ParseIntError)                       // wraps another error\n}\n\nfun read_port(text: String): u16 throws ConfigError {\n    if (text.is_empty()) throw ConfigError.Missing(\"port\")\n    val n: i64 = text.parse()?                      // ParseIntError converts via From\n    if (n > 65535) throw ConfigError.OutOfRange(\"port\", n, 65535)\n    n as u16\n}\n\nfun main() {\n    for (input in listOf(\"8080\", \"\", \"x\", \"99999\")) {\n        when (val r = read_port(input)) {\n            Ok(port) -> println(\"port $port\")\n            Err(e) -> println(\"error: $e\")\n        }\n    }\n}\n"
   },

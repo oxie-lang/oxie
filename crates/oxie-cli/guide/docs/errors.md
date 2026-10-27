@@ -59,6 +59,27 @@ The same goes for Rust calls known to return a `Result`, such as `fs.write(path,
 dropped. In a function that doesn't throw, such a statement drops the error, and the compiler
 warns about it.
 
+A lambda is a function of its own, so a call that fails inside one can't pass its error out of
+the function around it. A `for_each` statement is the exception, as Kotlin's inline `forEach` is:
+when its lambda throws, it is the `for` loop it stands for, and the error leaves the function:
+
+```oxie
+fun check(x: i32) throws {
+    if (x < 0) throw "negative: $x"
+}
+
+fun check_all(xs: [i32]) throws {
+    xs.for_each { check(*it) }           // for it in xs.iter() { check(*it)?; }
+}
+
+fun main() {
+    println("${check_all([1, -2]):?}")
+}
+```
+
+In other lambdas (`map { }`, `filter { }`) use a `for` loop, or collect the results:
+`xs.iter().map { it.parse::<i32>() }.collect::<Result<Vec<_>, _>>()?`.
+
 ## Error types
 
 `error enum` declares an error type with a message per case. Oxie implements `Display`,

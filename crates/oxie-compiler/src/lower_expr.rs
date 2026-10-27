@@ -1099,7 +1099,10 @@ impl<'a> Lowerer<'a> {
             Some(_) => None,
             None => self.k.traits.get(n).filter(|_| self.is_trait_name(n)).map(|t| &t.methods),
         };
-        methods.into_iter().flatten().filter(|(_, m)| m.recv == crate::sema::Recv::RefMut).map(|(n, _)| n.clone()).collect()
+        let mut out: std::collections::HashSet<String> = methods.into_iter().flatten().filter(|(_, m)| m.recv == crate::sema::Recv::RefMut).map(|(n, _)| n.clone()).collect();
+        // and extension functions that change it (`fun Counter.bump() { n += 1 }`)
+        out.extend(self.k.changing_exts.iter().filter(|(t, _)| t == n).map(|(_, f)| f.clone()));
+        out
     }
 
     /// Is a collection element of type `t` bound by value in a loop that borrows the collection?
@@ -1560,7 +1563,9 @@ impl<'a> Lowerer<'a> {
                     self.e.w("))");
                 }
                 // `&x` of a value (not a `T?`) for a `&T?`: `Some(&x)`
-                ExprKind::Unary(UnOp::Ref | UnOp::RefMut, x) if matches!(&**inner, Type::Ref { .. }) && !self.is_option_expr(x) && !matches!(x.kind, ExprKind::Null) && (self.is_value_like(x) || self.infer_type(x).is_some()) => {
+                ExprKind::Unary(UnOp::Ref | UnOp::RefMut, x)
+                    if matches!(&**inner, Type::Ref { .. }) && !self.is_option_expr(x) && !matches!(x.kind, ExprKind::Null) && (self.is_value_like(x) || matches!(x.kind, ExprKind::Index(..)) || self.infer_type(x).is_some()) =>
+                {
                     self.e.w("Some(");
                     self.expr(e, P_LOWEST);
                     self.e.w(")");
@@ -2438,7 +2443,21 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn expr_inner(&mut self, e: &Expr) {
         use ExprKind::*;
-        // `x!!.len()` reads through the value: `x.as_ref().unwrap().len()`
+        // `x!!.len()` reads through the value: `x.as_ref().unwrap().len()`; with an `x` that
+        // can't be null, the `!!` does nothing
+        if let MethodCall { recv, safe: false, .. } = &e.kind {
+            if let Unwrap(x) = &recv.kind {
+                if self.never_null(x) {
+                    let name = x.ident().map(|n| format!("`{}`", n)).unwrap_or_else(|| "this value".into());
+                    self.diags.push(crate::diag::Diag::warning(recv.span, format!("{} can't be null, so `!!` does nothing here", name)).with_help("leave the `!!` out: only a `T?` can be null"));
+                    let mut e = e.clone();
+                    if let MethodCall { recv, .. } = &mut e.kind {
+                        **recv = (**x).clone();
+                    }
+                    return self.expr_inner(&e);
+                }
+            }
+        }
         if let MethodCall { recv, name, safe: false, .. } = &e.kind {
             if let Some(r) = self.unwrap_for_call(recv, name) {
                 let mut e = e.clone();
@@ -2510,6 +2529,8 @@ impl<'a> Lowerer<'a> {
                 let n = self.class.as_ref().map(|c| c.self_name.clone()).unwrap_or_else(|| "self".into());
                 self.e.w(&n);
             }
+            // `*this` in `fun i32.positive()`, which takes the number by value
+            Unary(UnOp::Deref, x) if matches!(x.kind, SelfValue) && self.this_by_value => self.expr(x, P_UNARY),
             Unary(op, x) => {
                 let s = match op {
                     UnOp::Neg => "-",
@@ -2586,6 +2607,13 @@ impl<'a> Lowerer<'a> {
             Assign(op, target, value) if has_safe_link(target) && matches!(self.resolve_question_dots(target).kind, Field { safe: true, .. }) => {
                 let target = self.resolve_question_dots(target);
                 self.safe_assign(*op, &target, value);
+            }
+            // `s += 'c'` appends the character
+            Assign(Some(BinOp::Add), target, value) if self.is_char(value) && self.infer_type(target).is_some_and(|t| t.is_string()) => {
+                self.expr(target, P_POSTFIX);
+                self.e.w(".push(");
+                self.expr(value, P_LOWEST);
+                self.e.w(")");
             }
             // `a += b` on a class with `operator fun plus` and no `plusAssign`: `a = a + b`, as
             // Kotlin reads it
@@ -2685,6 +2713,12 @@ impl<'a> Lowerer<'a> {
                     self.expr(x, P_POSTFIX);
                     self.e.w("?");
                 }
+            }
+            // `name!!` on a value that can't be null: Kotlin's warning, and nothing to unwrap
+            Unwrap(x) if self.never_null(x) => {
+                let name = x.ident().map(|n| format!("`{}`", n)).unwrap_or_else(|| "this value".into());
+                self.diags.push(crate::diag::Diag::warning(e.span, format!("{} can't be null, so `!!` does nothing here", name)).with_help("leave the `!!` out: only a `T?` can be null"));
+                self.expr(x, P_POSTFIX);
             }
             Unwrap(x) => {
                 self.expr(x, P_POSTFIX);
@@ -2859,7 +2893,8 @@ impl<'a> Lowerer<'a> {
                     if plain(pat) || matches!(pat, Pat::Tuple(ps) if ps.iter().all(plain)) {
                         pat.bindings(&mut names);
                     }
-                    names.iter().any(|n| visit::writes_through(body, n, &changes))
+                    let elem = self.elem_type(iter);
+                    names.iter().any(|n| visit::writes_through(body, n, &changes) || self.changes_element(body, n, elem.as_ref()))
                 };
                 // a list field of a shared object whose elements the body changes: changed in
                 // place, with the object locked while the loop runs (its getter gives a copy)
@@ -3215,6 +3250,20 @@ impl<'a> Lowerer<'a> {
         plain.iter().any(|n| c.methods.contains_key(*n)) && !assign.iter().any(|n| c.methods.contains_key(*n))
     }
 
+    /// A variable or field whose type Oxie knows and that can't be null: text, a number, a
+    /// list, a map, an Oxie class or enum (not a `T?`, a `Result`, or a type of another crate).
+    fn never_null(&self, x: &Expr) -> bool {
+        if !self.is_place(x) || !matches!(x.kind, ExprKind::Path { .. } | ExprKind::Field { .. }) {
+            return false;
+        }
+        let Some(mut t) = self.infer_type(x) else { return false };
+        while let Type::Ref { inner, .. } = t {
+            t = *inner;
+        }
+        let Some(n) = t.single_name() else { return false };
+        crate::lower::PRIMITIVES.contains(&n) || matches!(n, "String" | "str" | "Vec" | "HashMap" | "HashSet") || self.class_info(n).is_some() || self.enum_info(n).is_some()
+    }
+
     /// `x!!` of a variable or field holding a value that isn't `Copy`: the place.
     fn unwrap_place<'e>(&self, e: &'e Expr) -> Option<&'e Expr> {
         let ExprKind::Unwrap(x) = &strip_paren(e).kind else { return None };
@@ -3475,6 +3524,48 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Does a loop body change its element `x` (of type `elem`) in a way `writes_through` can't
+    /// see: pass it to a `&mut` parameter (`restock(item)`), or call a method that changes a
+    /// field of it (`p.stats.heal()`)?
+    fn changes_element(&self, body: &Block, x: &str, elem: Option<&Type>) -> bool {
+        let field_ty = |path: &[&String]| -> Option<Type> {
+            let mut t = elem?.clone();
+            for f in path {
+                while let Type::Ref { inner, .. } = t {
+                    t = *inner;
+                }
+                t = self.class_info(t.single_name()?)?.fields.iter().find(|fi| &fi.name == *f)?.ty.clone();
+            }
+            Some(t)
+        };
+        let mut found = false;
+        visit::walk_block(body, &mut |e| {
+            match &e.kind {
+                ExprKind::Call { callee, args } => {
+                    if let Some(f) = callee.ident().filter(|n| !self.is_local(n)).and_then(|n| self.fun_info(n)) {
+                        found |= args.iter().zip(&f.params).any(|(a, p)| a.name.is_none() && a.value.ident() == Some(x) && matches!(p.ty, Type::Ref { mutable: true, .. }));
+                    }
+                }
+                ExprKind::MethodCall { recv, name, safe: false, .. } => {
+                    // the fields from `x` to the receiver: `p.stats` is `[stats]`
+                    let mut path = Vec::new();
+                    let mut cur = &**recv;
+                    while let ExprKind::Field { recv: r, name: f, safe: false } = &cur.kind {
+                        path.push(f);
+                        cur = r;
+                    }
+                    if cur.ident() == Some(x) && !path.is_empty() {
+                        path.reverse();
+                        found |= field_ty(&path).is_some_and(|t| self.changing_methods(Some(&t)).contains(name));
+                    }
+                }
+                _ => {}
+            }
+            !found
+        });
+        found
+    }
+
     /// `a?.m()` where `m` gives nothing (an Oxie method without a result, or `push`, `clear`,
     /// ... of a std collection): Kotlin's `Unit?`.
     pub(crate) fn safe_call_gives_unit(&self, e: &Expr) -> bool {
@@ -3677,7 +3768,12 @@ impl<'a> Lowerer<'a> {
             t = *inner;
         }
         let Type::Path { segs, .. } = &t else { return None };
-        let [seg] = segs.as_slice() else { return None };
+        // `HashMap<K, V>`, also written through its module (`std.collections.HashMap<K, V>`)
+        let seg = match segs.as_slice() {
+            [seg] => seg,
+            [first, .., seg] if matches!(first.name.as_str(), "std" | "collections") && !self.k.is_user_type(&seg.name) => seg,
+            _ => return None,
+        };
         if !matches!(seg.name.as_str(), "HashMap" | "BTreeMap") {
             return None;
         }
@@ -4695,7 +4791,10 @@ impl<'a> Lowerer<'a> {
             Contains::Text => {
                 self.expr(coll, P_POSTFIX);
                 self.e.w(".contains(");
-                if !is_string_lit(coll) && !self.is_char(item) {
+                // `it in "aeiou"` with `it` a borrowed `char` of a predicate: the `char`
+                if self.is_ref_lambda_param(item) && !self.is_str_var(item) {
+                    self.read_value(item);
+                } else if !is_string_lit(coll) && !self.is_char(item) {
                     self.e.w("&");
                     self.expr(item, P_UNARY);
                 } else {
@@ -4773,7 +4872,18 @@ impl<'a> Lowerer<'a> {
                 let name = segs[0].clone();
                 if self.is_local(&name) {
                     self.e.w(&esc(&name));
-                    self.arg_list(args, None, TyPos::Param, span);
+                    // a function in a variable or parameter (`pred: (&str) -> bool`): its
+                    // parameters lend and convert the arguments, as a function's do
+                    let fn_params = match self.local(&name) {
+                        Some(Some(Type::Fn { params, .. })) if params.len() == args.len() && args.iter().all(|a| a.name.is_none()) => Some(
+                            params
+                                .iter()
+                                .map(|t| crate::sema::ParamInfo { name: None, ty: t.clone(), default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false, stored: false })
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    };
+                    self.arg_list(args, fn_params.as_deref(), TyPos::Param, span);
                     return;
                 }
                 if let Some((_, params)) = self.local_funs.iter().rev().find(|(n, _)| *n == name).cloned() {
@@ -4986,6 +5096,13 @@ impl<'a> Lowerer<'a> {
             path.push_str(&self.generic_args_text(g));
         }
         self.e.w(&path);
+        // `std.collections.HashMap()`: a type of another crate made without arguments, as
+        // `HashMap()` is
+        let last = &segs[n - 1];
+        if args.is_empty() && n >= 2 && self.k.is_type_name(last) && !self.k.is_user_type(last) && last.chars().any(|c| c.is_lowercase()) && self.variant_enum(last).is_none() {
+            self.e.w("::new()");
+            return;
+        }
         self.arg_list(args, None, TyPos::Param, span);
     }
 
@@ -5642,6 +5759,17 @@ impl<'a> Lowerer<'a> {
         let mut pieces: Vec<(String, Option<Span>)> = Vec::new();
         // each argument, and whether it is an optional printed as its value or `null`
         let mut args: Vec<(&Expr, bool)> = Vec::new();
+        // fields a spec names for its width or precision (`${name:<width$}`): passed by name
+        let mut named: Vec<String> = Vec::new();
+        for p in parts {
+            if let TemplatePart::Expr(_, Some(spec)) = p {
+                for w in spec.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).filter_map(|w| w.strip_suffix('$')) {
+                    if !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()) && !self.is_local(w) && self.implicit_field(w).is_some() && !named.iter().any(|n| n == w) {
+                        named.push(w.to_string());
+                    }
+                }
+            }
+        }
         for p in parts {
             match p {
                 TemplatePart::Lit(s) => pieces.push((escape_braces(s), None)),
@@ -5702,6 +5830,10 @@ impl<'a> Lowerer<'a> {
             } else {
                 self.expr(a, P_LOWEST);
             }
+        }
+        for n in named {
+            let f = self.implicit_field(&n).unwrap();
+            self.e.w(&format!(", {} = {}", n, f));
         }
     }
 
@@ -5988,6 +6120,29 @@ impl<'a> Lowerer<'a> {
                 self.path_call(&p, generics, args, span);
                 return;
             }
+        }
+        // `xs.clone()` of a parameter Oxie lent (`&[T]`, `&str`): a copy of what it lends
+        if name == "clone" && args.is_empty() && recv.ident().is_some_and(|n| self.lent.iter().any(|l| l == n)) {
+            let copy = match self.infer_type(recv) {
+                Some(Type::Ref { inner, .. }) if matches!(*inner, Type::Slice(_)) => Some("to_vec"),
+                Some(Type::Ref { inner, .. }) if inner.single_name() == Some("str") => Some("to_string"),
+                _ => None,
+            };
+            if let Some(c) = copy {
+                self.expr(recv, P_POSTFIX);
+                self.e.w(&format!(".{}()", c));
+                return;
+            }
+        }
+        // `.context("...")` in a function that throws `anyhow::Error`: anyhow's, whatever else is
+        // in scope
+        if self.anyhow_fn && matches!(name, "context" | "with_context") && args.len() == 1 && generics.is_none() {
+            self.e.w(&format!("anyhow::Context::{}(", name));
+            self.expr(recv, P_LOWEST);
+            self.e.w(", ");
+            self.expr(&args[0].value, P_LOWEST);
+            self.e.w(")");
+            return;
         }
         // data class copy(field = value)
         if name == "copy" && !args.is_empty() && args.iter().all(|a| a.name.is_some()) && self.copy_by_constructor(recv, args, span) {
@@ -7251,6 +7406,26 @@ impl<'a> Lowerer<'a> {
         self.e.w(";");
         self.e.nl();
         self.push_scope();
+        // `when (val c = opt) { null -> ..; else -> c.f() }`: in `else`, `c` is the value
+        let null_arm = arms.iter().any(|a| a.guard.is_none() && a.conds.iter().any(|c| matches!(c, WhenCond::Pat(Pat::Null))));
+        let unwrapped: Option<Vec<WhenArm>> = match (b, ty.as_ref().and_then(option_inner)) {
+            (Pat::Ident { name, sub: None, .. }, Some(_)) if null_arm => Some(
+                arms.iter()
+                    .map(|a| {
+                        let mut a = a.clone();
+                        let mut used = Vec::new();
+                        visit::idents_in(&a.body, &mut used);
+                        if a.guard.is_none() && matches!(a.conds.as_slice(), [WhenCond::Else]) && used.contains(name) && !uses_as_optional(&a.body, name) {
+                            let inner = Pat::Ident { name: name.clone(), by_ref: false, mutable: false, sub: None, span: a.span };
+                            a.conds = vec![WhenCond::Pat(Pat::TupleStruct { path: vec!["Some".into()], elems: vec![inner], span: a.span })];
+                        }
+                        a
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        let arms = unwrapped.as_deref().unwrap_or(arms);
         self.bind_pat(b, ty);
         let var = Expr::new(ExprKind::Path { segs: vec![match b { Pat::Ident { name, .. } => name.clone(), _ => "_".into() }], generics: None, global: false }, span);
         self.when_expr(Some(&var), arms, rust_match, mode, span);
@@ -7976,6 +8151,12 @@ impl<'a> Lowerer<'a> {
                     if let (true, Pat::Ident { name, sub: None, .. }) = (ref_params, &p.pat) {
                         self.lambda_params.push((depth, name.clone()));
                     }
+                    // `(_, v) -> v > 100`: the parts of a borrowed element are borrowed too
+                    if let (true, Pat::Tuple(_)) = (ref_params, &p.pat) {
+                        let mut names = Vec::new();
+                        p.pat.bindings(&mut names);
+                        self.lambda_params.extend(names.into_iter().map(|n| (depth, n)));
+                    }
                 }
             }
             let hint = if i == 0 && matches!(p.pat, Pat::Ident { .. }) { elem.clone() } else { None };
@@ -8007,6 +8188,8 @@ impl<'a> Lowerer<'a> {
             match &body.kind {
                 ExprKind::Block(b) => self.block_value(b, &target),
                 _ if moving => self.block_value(&as_block, &target),
+                // `flags.count { it }`: the `bool` behind the borrowed element
+                _ if ref_params && self.is_ref_lambda_param(strip_paren(body)) => self.read_value(strip_paren(body)),
                 _ => {
                     if ret.is_some() {
                         self.tail(body, &target);

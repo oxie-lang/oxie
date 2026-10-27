@@ -107,6 +107,12 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
             }
             imports(d, &lines);
         }
+        // `n * price` with an `i32` and an `f64`
+        "E0277" if is_mixed_numbers(&d.message) => {
+            let (a, b) = mixed_numbers(&d.message).unwrap();
+            d.notes.retain(|n| !n.contains("is not implemented for") && !n.contains("following other types implement"));
+            d.notes.push(help(&format!("numbers don't convert by themselves: make both the same type with `as` (`x as {}`, or `y as {}`).", b, a)));
+        }
         "E0277" => trait_missing(d, sources, &lines, &names),
         "E0308" => mismatched(d, src, &lines),
         "E0615" => getter_call(d, &lines, &first),
@@ -124,6 +130,41 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
             d.notes.retain(|n| !n.contains("does not implement") && !n.contains("note: an implementation of"));
             d.notes.push(help("unwrap it first: give a default with `?:` (`(n ?: 0) + 1`), check it with `if (n != null)` (which unwraps `n` in the block), or use `n!!`, which fails when it is null."));
         }
+        // `s.parse()?` in a function that throws an `error enum` without a way from the parse
+        // error into it: rustc fixes the parse's error type to the function's
+        "E0271" if d.message.contains("as FromStr>::Err ==") => {
+            let label = d.label.clone().unwrap_or_default();
+            if let (Some(to), Some(from)) = (between(&label, "expected `", "`"), between(&label, "found `", "`")) {
+                rewrite(d, format!("the `{}` that `parse()` fails with doesn't convert into `{}`", from, to));
+                d.notes.push(help(&format!(
+                    "`?` converts an error with `From`, which `{}` gets for each type exactly one of its cases holds (or the case marked `@from`). Convert it yourself (`.map_err {{ {}.Case(it) }}?`), mark one case `@from`, or declare plain `throws`.",
+                    to, to
+                )));
+            }
+        }
+        // `fun name_of(u: User): &str = &u.name`: the function owns `u`, so its result can't
+        // borrow from it
+        "E0515" if d.message.contains("reference to local data `") || d.message.contains("value referencing local data `") => {
+            let local = between(&d.message, "local data `", "`").unwrap_or_default();
+            let root = local.split(['.', '[']).next().unwrap_or("").to_string();
+            if let Some((l, col, fname, _)) = param_decl(&lines, &root, d.line) {
+                let ty: String = lines.get(l as usize).map(|t| t.chars().skip(col as usize).take_while(|c| *c != ',' && *c != ')').collect()).unwrap_or_default();
+                rewrite(d, format!("`{}` gives a reference into `{}`, which it owns and drops when it returns", fname, root));
+                d.notes.push(help(&format!("take `{}` by reference (`{}: &{}`), so the result can borrow from the caller's value.", root, root, ty.trim())));
+                d.fixes.push(Fix { title: format!("take `{}` by reference", root), edits: vec![edit(l, col, col, "&")] });
+            }
+        }
+        // a class that doesn't implement every method of its interface: the help in Oxie's syntax
+        "E0046" => {
+            for n in d.notes.iter_mut() {
+                if let Some(code) = between(n, "implement the missing item: `", "`") {
+                    if let Some(oxie) = rust_fn_to_oxie(&code) {
+                        *n = help(&format!("implement it: `{}`", oxie));
+                    }
+                }
+            }
+            d.suggestions.clear();
+        }
         "E0609" => no_field(d, &lines, &first),
         "E0004" => {
             let missing = d.message.strip_prefix("non-exhaustive patterns: ").map(oxie_terms).unwrap_or_default();
@@ -132,8 +173,13 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
             rewrite(d, format!("this `when` doesn't handle {}", missing.trim_end_matches(" not covered")));
             d.label = d.label.take().map(|l| oxie_terms(&l).replace("`None`", "`null`"));
             d.notes.retain(|n| !n.contains("wildcard pattern") && !n.contains("`Option<"));
+            let missing_any = matches!(missing.trim_end_matches(" not covered"), "`&_`" | "`_`" | "`&&_`");
             if missing.trim_end_matches(" not covered") == "`null`" {
                 d.notes.push(help("the value is optional: add a `null ->` arm for when there is none, or an `else ->` arm."));
+            } else if missing_any {
+                // text, numbers: the arms can't list every value
+                rewrite(d, "this `when` doesn't handle the values its arms don't name".into());
+                d.notes.push(help("a `when` that gives a value must handle every value: add an `else ->` arm."));
             } else {
                 d.notes.push(help("add an arm for each case it doesn't handle, or an `else ->` arm for all of them."));
             }
@@ -405,9 +451,22 @@ fn move_lambda(sources: &Sources, file: &Path, lines: &[&str], line: u32, col: u
     let here = sources.file(file)?;
     let at = byte_offset(&here.text, line, col) as u32;
     let mut found = None;
+    // lambdas a thread runs, which Oxie makes `move`
+    let mut spawned = Vec::new();
     oxie_compiler::visit::walk_items(&here.ast().items, &mut |e| {
-        if let ExprKind::Lambda { is_move: true, params, body, .. } = &e.kind {
-            if e.span.start == at {
+        let spawn_args = match &e.kind {
+            ExprKind::MethodCall { name, args, .. } if name == "spawn" => Some(args),
+            ExprKind::Call { callee, args } if matches!(&callee.kind, ExprKind::Path { segs, .. } if segs.last().is_some_and(|s| s == "spawn")) => Some(args),
+            _ => None,
+        };
+        if let Some(args) = spawn_args {
+            spawned.extend(args.iter().filter(|a| matches!(a.value.kind, ExprKind::Lambda { .. })).map(|a| a.value.span.start));
+        }
+        true
+    });
+    oxie_compiler::visit::walk_items(&here.ast().items, &mut |e| {
+        if let ExprKind::Lambda { is_move, params, body, .. } = &e.kind {
+            if e.span.start == at && (*is_move || spawned.contains(&at)) {
                 found = Some((params.is_empty(), body.span));
             }
         }
@@ -1270,6 +1329,36 @@ const KOTLIN_METHODS: &[(&str, &str)] = &[
     ("associateBy", "associate_by"),
 ];
 
+/// rustc's `fn name(&self) -> String { todo!() }` as Oxie: `override fun name(): String = todo!()`.
+fn rust_fn_to_oxie(code: &str) -> Option<String> {
+    let rest = code.strip_prefix("fn ")?;
+    let (name, rest) = rest.split_once('(')?;
+    let (params, rest) = rest.split_once(')')?;
+    let params: Vec<String> = params.split(',').map(str::trim).filter(|p| !p.is_empty() && !p.contains("self")).map(|p| p.replace("::", ".")).collect();
+    let ret = rest.split_once("->").map(|(_, r)| r.split('{').next().unwrap_or("").trim().replace("::", ".")).filter(|r| !r.is_empty());
+    Some(format!("override fun {}({}){} = todo!()", name, params.join(", "), ret.map(|r| format!(": {}", r)).unwrap_or_default()))
+}
+
+/// rustc's "cannot multiply `i32` by `{float}`": the two number types.
+fn mixed_numbers(message: &str) -> Option<(String, String)> {
+    let ticks: Vec<&str> = message.split('`').collect();
+    let (a, b) = (ticks.get(1)?, ticks.get(3)?);
+    let number = |t: &str| matches!(t, "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64" | "{integer}" | "{float}");
+    if !(message.starts_with("cannot add") || message.starts_with("cannot subtract") || message.starts_with("cannot multiply") || message.starts_with("cannot divide") || message.starts_with("cannot calculate the remainder")) || !number(a) || !number(b) {
+        return None;
+    }
+    let concrete = |t: &str| match t {
+        "{integer}" => "i32".to_string(),
+        "{float}" => "f64".to_string(),
+        t => t.to_string(),
+    };
+    Some((concrete(a), concrete(b)))
+}
+
+fn is_mixed_numbers(message: &str) -> bool {
+    mixed_numbers(message).is_some()
+}
+
 /// What Oxie has for a function or type of Kotlin's standard library.
 fn kotlin_name(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -1393,6 +1482,18 @@ fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str
             }
             return;
         }
+    }
+    // `val xs = [1, 2, 3]` then `xs.push(4)`: an array can't grow; a `var` that grows is a list
+    if d.message.contains("found for array `[") && matches!(method, "push" | "pop" | "insert" | "remove" | "clear" | "extend" | "truncate" | "retain" | "append") {
+        let line = lines.get(d.line as usize).copied().unwrap_or("");
+        let before: String = line.chars().take(d.col.saturating_sub(1) as usize).collect();
+        let recv: String = before.chars().rev().take_while(|c| is_ident_char(*c)).collect::<Vec<_>>().into_iter().rev().collect();
+        d.notes.push(help(&format!("`{}` is an array, whose length is fixed. A `var` that the code grows is a list (`Vec`): declare it `var {} = [...]`, or `vec[...]` for a list from the start.", recv, recv)));
+        // the `val` that declares it
+        if let Some((l, at)) = (0..d.line).rev().find_map(|l| lines.get(l as usize).and_then(|t| t.find(&format!("val {} =", recv)).map(|i| (l, t[..i].chars().count() as u32)))) {
+            d.fixes.push(Fix { title: format!("declare `{}` with `var`", recv), edits: vec![edit(l, at, at + 3, "var")] });
+        }
+        return;
     }
     if method.starts_with("component") && method[9..].chars().all(|c| c.is_ascii_digit()) && method.len() > 9 {
         d.notes.push(help("a data class destructures by its fields in constructor order: `val (a, b) = d`, or read the field itself (`d.x`)."));
@@ -1826,6 +1927,12 @@ fn trait_missing(d: &mut MappedDiag, sources: &Sources, lines: &[&str], names: &
         let shown = ty.replace("Box<dyn std::error::Error + Send + Sync>", "AnyError");
         rewrite(d, if in_template { format!("`{}` has no text form for `$` templates", shown) } else { format!("`{}` has no text form to print", shown) });
         d.label = d.label.as_ref().map(|l| l.replace("Box<dyn std::error::Error + Send + Sync>", "AnyError"));
+        // `val sorted = xs.sort()`: a call that changes its receiver gives nothing
+        if ty == "()" {
+            d.notes.retain(|n| !n.contains("in format strings"));
+            d.notes.push(help("this value is `()`, which a call that gives nothing returns: `xs.sort()` sorts `xs` in place (print `xs` after it), while `xs.sorted()` gives a sorted copy."));
+            return;
+        }
         // a throwing call printed: its `Result`, unless `?` passes the error on
         if base == "Result" {
             let chars: Vec<char> = line.chars().collect();

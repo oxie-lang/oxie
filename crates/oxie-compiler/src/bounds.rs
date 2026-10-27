@@ -267,7 +267,7 @@ fn opt(e: &Expr, names: &Names) -> Option<String> {
 fn coll(e: &Expr, names: &Names) -> Option<String> {
     match &e.kind {
         ExprKind::Paren(x) | ExprKind::Unary(UnOp::Ref, x) | ExprKind::Unary(UnOp::RefMut, x) => coll(x, names),
-        ExprKind::MethodCall { recv, name, .. } if matches!(name.as_str(), "iter" | "into_iter" | "iter_mut") => coll(recv, names),
+        ExprKind::MethodCall { recv, name, .. } if matches!(name.as_str(), "iter" | "into_iter" | "iter_mut" | "clone" | "to_vec") => coll(recv, names),
         _ => match names.get(e.ident()?) {
             Some(Kind::Coll(t)) => Some(t.clone()),
             _ => None,
@@ -616,6 +616,8 @@ mod tests {
         assert_eq!(bounds_of("fun f<T>(xs: &[T], x: &T): bool = xs.contains(x)"), "T: PartialEq");
         assert_eq!(bounds_of("fun f<T>(xs: &[T]): Option<&T> = xs.iter().max()"), "T: Ord");
         assert_eq!(bounds_of("fun f<K, V>(m: &mut HashMap<K, V>, k: K, v: V) { m.insert(k, v) }"), "K: Eq + Hash");
+        // a copy of a list of `T`s, sorted with a comparison of its elements
+        assert_eq!(bounds_of("fun f<T>(xs: [T]): [T] { var v = xs.clone()\n v.sort_by { a, b -> b.partial_cmp(a).unwrap() }\n v }"), "T: Clone + PartialOrd");
         // an optional `T`: cloned, printed, or unwrapped by `if (val v = x)`
         assert_eq!(bounds_of("fun f<T>(x: T?, d: T): T = x.clone() ?: d"), "T: Clone");
         assert_eq!(bounds_of("fun f<T>(x: &T?): String = \"got $x\""), "T: Display");

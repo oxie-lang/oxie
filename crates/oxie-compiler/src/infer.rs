@@ -154,7 +154,11 @@ impl<'a> Lowerer<'a> {
             }
         }
         match &e.kind {
-            Try(x) => self.infer(x, true),
+            // `opt?` is the value inside (in a function giving a `T?`)
+            Try(x) => match self.infer(x, true) {
+                Some(Type::Option(t)) => Some(*t).filter(|t| *t != Type::Infer),
+                t => t,
+            },
             // `x!!`: the value
             Unwrap(x) => match self.infer_type(x)? {
                 Type::Option(t) => Some(*t).filter(|t| *t != Type::Infer),

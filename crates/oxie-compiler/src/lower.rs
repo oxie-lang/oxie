@@ -382,6 +382,11 @@ pub struct Lowerer<'a> {
     pub(crate) this_recv: Option<HashSet<u32>>,
     /// The method being lowered takes `&self` or `&mut self` (`this = x` is `*self = x`).
     pub(crate) this_by_ref: bool,
+    /// The function being lowered throws `anyhow::Error`: `.context()` is anyhow's.
+    pub(crate) anyhow_fn: bool,
+    /// The extension function being lowered takes its number by value (`fun i32.twice()`):
+    /// `*this` is `self`.
+    pub(crate) this_by_value: bool,
     /// A parameter `write_params` adds after the declared ones.
     pub(crate) extra_param: Option<String>,
     /// The handle type (`Counter<T>`) of the shared class being lowered.
@@ -670,6 +675,8 @@ impl<'a> Lowerer<'a> {
             needs_this: HashSet::new(),
             this_recv: None,
             this_by_ref: false,
+            anyhow_fn: false,
+            this_by_value: false,
             extra_param: None,
             shared_handle_ty: None,
             self_by_value: false,
@@ -2310,6 +2317,9 @@ impl<'a> Lowerer<'a> {
         self.fns.push(FnCtx { throws, ret: ret.clone(), is_lambda: false, tries: Vec::new(), text_break: None, unboxed_ret });
         self.fn_generics.push(f.generics.clone());
         let by_value = std::mem::replace(&mut self.self_by_value, matches!(f.self_param, Some(SelfParam::Value { .. })));
+        // a function that throws anyhow's error takes anyhow's `context`
+        let anyhow = matches!(&f.throws, Throws::Ty(t) if matches!(t, Type::Path { segs, .. } if segs.first().is_some_and(|s| s.name == "anyhow")));
+        let saved_anyhow = std::mem::replace(&mut self.anyhow_fn, anyhow);
         let lent_here = f.params.iter().enumerate().filter(|(i, _)| self.param_notes.get(&(f.name_span, *i)).is_some_and(|n| n.borrowed)).filter_map(|(_, p)| p.name().map(str::to_string)).collect();
         let lent = std::mem::replace(&mut self.lent, lent_here);
         match body {
@@ -2320,6 +2330,7 @@ impl<'a> Lowerer<'a> {
                 if ret.is_none() && !throws && self.safe_call_gives_unit(e) {
                     let b = Block { stmts: vec![Stmt::Expr { expr: e.clone(), semi: true }], span: e.span };
                     self.fn_block(&b, None, false);
+                    self.anyhow_fn = saved_anyhow;
                     self.self_by_value = by_value;
                     self.lent = lent;
                     self.fn_generics.pop();
@@ -2338,6 +2349,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+        self.anyhow_fn = saved_anyhow;
         self.self_by_value = by_value;
         self.lent = lent;
         self.fn_generics.pop();
@@ -2404,6 +2416,8 @@ impl<'a> Lowerer<'a> {
         let header = self.fn_header(f);
         self.push_scope();
         let self_ref = recv.starts_with('&');
+        let saved_by_ref = std::mem::replace(&mut self.this_by_ref, self_ref);
+        let saved_by_value = std::mem::replace(&mut self.this_by_value, recv == "self" || recv == "mut self");
         let params = self.params_text(f, Some(recv));
         let ret = self.ret_type(f, TyPos::Ret).map(|r| captures_borrow(r, f, self_ref));
         let sig = format!(
@@ -2460,6 +2474,8 @@ impl<'a> Lowerer<'a> {
             self.error(f.name_span, "extension functions need a body");
         }
         self.class = saved_class;
+        self.this_by_ref = saved_by_ref;
+        self.this_by_value = saved_by_value;
         self.pop_scope();
         self.e.dedent();
         self.e.nl();

@@ -674,7 +674,8 @@ the declared type of a variable, field, parameter or return value:
   When `b` is optional too, `a ?: b` is optional (`a.or(b)`, `a.or_else(|| f())` for a call),
   so `a ?: b ?: 0` tries each in turn.
 * `x!!` — unwrap. On a variable or field followed by a method call (`name!!.len()`) it unwraps
-  a reference (`name.as_ref().unwrap()`), so `name` stays usable.
+  a reference (`name.as_ref().unwrap()`), so `name` stays usable, and so does a comparison
+  (`x > best!!`). On a value that can't be null it does nothing, with a warning, as in Kotlin.
 * `if (val v = opt) { }` / `while (val v = opt)` — `if let Some(v)` / `while let Some(v)`;
   with a pattern (`if (val Ok(v) = r)`) the pattern is used as written, except a tuple of names,
   which unwraps an optional pair (`if (val (k, v) = split(s))`); a tuple with a case or a literal

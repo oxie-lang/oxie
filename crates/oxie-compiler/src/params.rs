@@ -349,6 +349,7 @@ impl<'a> Types<'a> {
 type FunId = (usize, u32);
 
 /// A top-level function or a method, with the module inside the file that declares it.
+#[derive(Clone)]
 struct Fun<'a> {
     file: usize,
     module: Vec<String>,
@@ -638,6 +639,9 @@ impl<'a> Analysis<'a> {
                         owned.entry(owner).or_default().entry(f.decl.name.as_str()).or_insert((f.id(), f.decl));
                     }
                 }
+                // and the top-level functions again, which may pass a value to a method lent
+                // only now (`fun welcome(g: Greeter, name: String) = g.greet(name)`)
+                out.extend(tops.iter().cloned());
                 out
             }
             _ => tops,
@@ -698,7 +702,6 @@ impl<'a> Analysis<'a> {
                     let public = fun.item.vis == Vis::Public || fun.item.vis == Vis::Default && owner_pub;
                     !fixed && (lend_pub || !public) && !m.unresolved.contains(&f.name) && !raw.contains(&f.name)
                 }
-                (Stage::Methods(_), None) => false,
                 _ => (lend_pub || fun.item.vis != Vis::Public) && decls.contains_key(f.name.as_str()) && !through_path.contains(&f.name) && !raw.contains(&f.name) && f.name != "main",
             } && !as_value.contains(&f.name)
                 && f.receiver.is_none()
@@ -754,6 +757,11 @@ impl<'a> Analysis<'a> {
     fn lends(&self, c: &Cand, callee: &str, pos: usize, arg: &Arg) -> bool {
         let own = c.owner.as_ref().and_then(|o| self.owned.get(o)).and_then(|ms| ms.get(callee));
         let Some(&(id, d)) = own.or_else(|| self.decls.get(callee)) else { return false };
+        self.lends_to(id, d, pos, arg)
+    }
+
+    /// Does an argument at `pos` (or named) of a call to `d` only lend the value?
+    fn lends_to(&self, id: FunId, d: &FunDecl, pos: usize, arg: &Arg) -> bool {
         let i = match &arg.name {
             Some(n) => match d.params.iter().position(|p| p.name() == Some(n.as_str())) {
                 Some(i) => i,
@@ -791,11 +799,30 @@ impl<'a> Analysis<'a> {
             let is_p = |x: &Expr| x.ident() == Some(name);
             // the parameter, or a field chain of it (`u.address.city`), read where it is
             let read_at = |x: &Expr, whole: bool| if whole && is_p(x) { Some(x.span.start) } else { chain_root(x, name) };
+            // a lambda that a constructor stores, or one put into a field or returned: it outlives
+            // the call, so what it uses must be owned (`Button(name, { "clicked $name" })`)
+            let stored: Vec<&Expr> = match &e.kind {
+                ExprKind::Call { callee, args } if matches!(&callee.kind, ExprKind::Path { segs, .. } if segs.last().is_some_and(|n| crate::parser::is_type_like(n))) => {
+                    args.iter().map(|a| &a.value).filter(|v| matches!(v.kind, ExprKind::Lambda { .. })).collect()
+                }
+                ExprKind::Assign(_, target, value) if matches!(target.kind, ExprKind::Field { .. }) && matches!(value.kind, ExprKind::Lambda { .. }) => vec![&**value],
+                ExprKind::Return(Some(value)) if matches!(value.kind, ExprKind::Lambda { .. }) => vec![&**value],
+                _ => Vec::new(),
+            };
+            for l in stored {
+                walk_expr(l, &mut |x| {
+                    if is_p(x) {
+                        captured.push(l.span.start);
+                    }
+                    true
+                });
+            }
             match &e.kind {
                 ExprKind::Path { .. } if is_p(e) => uses.push(e.span.start),
                 // `Self { name, .. }` moves the parameter into the struct
                 ExprKind::StructLit { fields, .. } if fields.iter().any(|(f, v)| v.is_none() && f == name) => uses.push(e.span.start),
-                ExprKind::MethodCall { recv, name: m, .. } if is_p(recv) && (reads.contains(&m.as_str()) || self.reads_value(c, m)) => {
+                // a copy of lent text or a lent list is `to_string()` or `to_vec()`, which reads it
+                ExprKind::MethodCall { recv, name: m, args, .. } if is_p(recv) && (reads.contains(&m.as_str()) || self.reads_value(c, m) || m == "clone" && args.is_empty() && matches!(c.kind, Kind::Str | Kind::Vec)) => {
                     ok.insert(recv.span.start);
                 }
                 ExprKind::MethodCall { recv, name: m, args, .. } => {
@@ -807,6 +834,22 @@ impl<'a> Analysis<'a> {
                         for (pos, a) in args.iter().enumerate() {
                             if self.lends(c, m, pos, a) {
                                 ok.extend(read_at(&a.value, true));
+                            }
+                        }
+                    }
+                    // `g.greet(name)` with `g` a parameter of an Oxie class: that class's method
+                    if let Some(owner) = recv.ident().and_then(|r| c.fun.params.iter().find(|p| p.name() == Some(r))).and_then(|p| {
+                        let mut t = &p.ty;
+                        while let Type::Ref { inner, .. } = t {
+                            t = inner;
+                        }
+                        t.single_name().map(|n| crate::sema::scoped_key(&c.module, n))
+                    }) {
+                        if let Some(&(id, d)) = self.owned.get(&owner).and_then(|ms| ms.get(m.as_str())) {
+                            for (pos, a) in args.iter().enumerate() {
+                                if self.lends_to(id, d, pos, a) {
+                                    ok.extend(read_at(&a.value, true));
+                                }
                             }
                         }
                     }
@@ -827,6 +870,17 @@ impl<'a> Analysis<'a> {
                 ExprKind::Call { callee, args } if callee.ident().is_some_and(|f| PRINTS.contains(&f) && !self.decls.contains_key(f)) => {
                     for a in args {
                         ok.extend(read_at(&a.value, true));
+                    }
+                }
+                // `pred(x)` with a parameter `pred: (&str) -> bool`, which takes a reference
+                ExprKind::Call { callee, args } if callee.ident().is_some_and(|f| c.fun.params.iter().any(|p| p.name() == Some(f) && matches!(p.ty, Type::Fn { .. }))) => {
+                    let f = callee.ident().unwrap();
+                    if let Some(Type::Fn { params, .. }) = c.fun.params.iter().find(|p| p.name() == Some(f)).map(|p| &p.ty) {
+                        for (a, t) in args.iter().zip(params) {
+                            if matches!(t, Type::Ref { mutable: false, .. }) {
+                                ok.extend(read_at(&a.value, true));
+                            }
+                        }
                     }
                 }
                 ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, a, b) => {
@@ -885,6 +939,7 @@ impl<'a> Analysis<'a> {
                         true
                     });
                 }
+
                 ExprKind::Async { block, .. } => {
                     walk_block(block, &mut |x| {
                         if is_p(x) {

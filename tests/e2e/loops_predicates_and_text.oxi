@@ -1,0 +1,65 @@
+// Loops that change their elements through calls, predicates over borrowed elements, and text.
+
+data class Item(name: String, var qty: i32)
+data class Counter(var n: i32)
+class Stats(var hp: i32) {
+    fun heal() { hp += 10 }
+}
+class Player(name: String, var stats: Stats)
+class Table(width: usize) {
+    fun row(name: &str): String = "[${name:<width$}]"
+}
+
+fun restock(item: &mut Item) {
+    item.qty += 10
+}
+
+fun Counter.bump() {
+    n += 1
+}
+
+fun i32.ensure_positive() throws {
+    if (*this <= 0) throw "not positive: $this"
+}
+
+fun add(v: &mut [i32]) = v.push(9)
+
+fun <T> top_n(xs: [T], n: usize): [T] {
+    var v = xs.clone()
+    v.sort_by { a, b -> b.partial_cmp(a).unwrap() }
+    v.truncate(n)
+    v
+}
+
+fun initial(s: &str): char = when (val c = s.chars().next()) {
+    null -> '?'
+    else -> c.to_ascii_uppercase()
+}
+
+fun main() {
+    // the loop borrows the list mutably when the body changes the element
+    var items = vec[Item("pen", 1), Item("ink", 2)]
+    for (item in items) restock(item)
+    var cs = vec[Counter(1), Counter(2)]
+    for (c in cs) c.bump()
+    var team = vec[Player("ann", Stats(5)), Player("bob", Stats(7))]
+    for (p in team) p.stats.heal()
+    println("${items:?} ${cs:?} ${team.map { "${it.name}:${it.stats.hp}" }}")
+
+    // an array passed to a function that grows it is a list
+    var a = [1, 2]
+    add(a)
+    println(a)
+
+    // predicates get references to the elements
+    val scores: [String: i32] = ["ann": 120, "bob": 80]
+    val flags = vec[true, false, true]
+    println("${scores.iter().filter { (_, v) -> v > 100 }.count()} ${"banana".chars().filter { it in "aeiou" }.count()} ${flags.count { it }}")
+
+    var m: std.collections.HashMap<String, i32> = std.collections.HashMap()
+    m["a"] = 1
+    var s = String.from("ab")
+    s += 'c'
+    println("$m $s ${top_n(vec[3, 9, 1], 2):?} ${initial("ada")}${initial("")} ${Table(6).row("ab")}")
+    println("${5.ensure_positive():?} ${(-7).ensure_positive():?}")
+}

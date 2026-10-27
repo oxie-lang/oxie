@@ -1,0 +1,40 @@
+// Parameters lent through methods, function parameters and copies, so callers keep their values.
+
+class Greeter(greeting: String) {
+    fun greet(name: String): String = "$greeting, $name"
+}
+
+// `name` goes to a method that lends it, so `welcome` lends it too
+fun welcome(g: Greeter, name: String): String = g.greet(name)
+
+// the elements go to a function parameter that takes `&str`
+fun count_matching(xs: [String], pred: (&str) -> bool): usize {
+    var n = 0
+    for (x in xs) if (pred(x)) n += 1
+    n
+}
+
+// a copy of a lent list is `to_vec()`
+fun with_total(xs: [i32]): [i32] {
+    var out = xs.clone()
+    out.push(xs.iter().sum())
+    out
+}
+
+fun shout(s: String): String {
+    var t = s.clone()
+    t.push('!')
+    t
+}
+
+fun main() {
+    val g = Greeter("hi")
+    val name = String.from("ada")
+    println("${welcome(g, name)} $name")
+    val words: [String] = ["apple", "avocado", "kiwi"]
+    println("${count_matching(words) { it.starts_with("a") }} ${words.len()}")
+    val v = vec[1, 2]
+    println("${with_total(v)} $v")
+    val s = "hey".to_string()
+    println("${shout(s)} $s")
+}
