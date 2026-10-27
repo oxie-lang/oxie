@@ -2315,6 +2315,17 @@ impl<'a> Lowerer<'a> {
         match body {
             FunBody::Block(b) => self.fn_block(b, ret.as_ref(), throws),
             FunBody::Expr(e) => {
+                // `fun bump() = maybe?.inc()` with a method that gives nothing: Kotlin's `Unit?`,
+                // a statement here
+                if ret.is_none() && !throws && self.safe_call_gives_unit(e) {
+                    let b = Block { stmts: vec![Stmt::Expr { expr: e.clone(), semi: true }], span: e.span };
+                    self.fn_block(&b, None, false);
+                    self.self_by_value = by_value;
+                    self.lent = lent;
+                    self.fn_generics.pop();
+                    self.fns.pop();
+                    return;
+                }
                 let b = Block { stmts: vec![Stmt::Expr { expr: e.clone(), semi: false }], span: e.span };
                 // the value of `= expr` without a return type (`items.push(x)`) must be `()`:
                 // anything else is an error asking for the type, never dropped
@@ -3385,7 +3396,22 @@ impl<'a> Lowerer<'a> {
 
     fn operator_impl(&mut self, m: &Item, f: &FunDecl, g: &str, self_ty: &str, wc: &str) {
         let Some((tr, method, is_assign, is_unary)) = operator_trait(&f.name) else {
-            self.error(f.name_span, format!("unknown operator function `{}`", f.name));
+            // Kotlin's other operator functions, and what Oxie has for them
+            let help = match f.name.as_str() {
+                "compareTo" => Some("`<` and `>` come from `PartialOrd`: list it after the class (`data class Version(major: i32, minor: i32) : PartialEq, PartialOrd`) to compare the fields in order, or implement `fun partial_cmp(other: &Version): Ordering?` in `impl PartialOrd for Version { }`"),
+                "get" | "set" => Some("indexing (`a[i]`) is Rust's `Index` and `IndexMut`: `impl Index<usize> for Grid { type Output = i32; fun index(i: usize): &i32 = &cells[i] }`"),
+                "contains" => Some("`x in v` calls `v.contains(x)` already: declare it as a plain method, without `operator`"),
+                "invoke" => Some("call a function stored in a field with `(obj.f)(x)`, or name the method and call it"),
+                "inc" | "dec" => Some("Oxie has no `++` and `--`: write `x += 1`"),
+                "iterator" => Some("`for (x in v)` goes through `IntoIterator`: implement it, or loop over `v.items`"),
+                "rangeTo" => Some("ranges are Rust's: `a..b`, `a..=b`"),
+                _ => None,
+            };
+            let mut d = Diag::error(f.name_span, format!("unknown operator function `{}`", f.name));
+            if let Some(h) = help {
+                d = d.with_help(h);
+            }
+            self.diags.push(d);
             return;
         };
         let rhs = f.params.first().map(|p| self.ty(&p.ty, TyPos::Generic));

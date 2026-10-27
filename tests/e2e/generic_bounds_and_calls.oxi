@@ -1,0 +1,104 @@
+// Bounds Oxie infers for generic functions and classes, and more operators and calls.
+
+import std.collections.HashMap
+
+fun <T> biggest(xs: [T]): T? {
+    var best: T? = null
+    for (x in xs) {
+        if (best == null || x > best!!) best = x.clone()
+    }
+    best
+}
+
+fun <T> describe_all(xs: [T]): String = xs.iter().map { "<$it>" }.collect::<Vec<_>>().join(",")
+
+fun <T> sum_pairs(a: T, b: T, c: T): T = a + b + c
+
+fun <K, V> invert(m: [K: V]): [V: K] {
+    var out = HashMap()
+    for ((k, v) in m) out.insert(v.clone(), k.clone())
+    out
+}
+
+fun <T> count_eq(xs: [T], x: T): usize = xs.iter().filter { *it == x }.count()
+
+class Pair<A, B>(first: A, second: B) {
+    fun swap(): Pair<B, A> = Pair(second.clone(), first.clone())
+    fun show(): String = "($first, $second)"
+}
+
+class Cache<K, V> {
+    var map: [K: V] = [:]
+    var hits = 0
+    fun get_or(k: K, f: () -> V): V {
+        if (val v = map.get(&k)) {
+            hits += 1
+            return v.clone()
+        }
+        val v = f()
+        map.insert(k, v.clone())
+        v
+    }
+}
+
+fun <T> twice(make: () -> T): (T, T) {
+    val v = make()
+    (v.clone(), v)
+}
+
+fun <T> first_copy(xs: &[T]): T? {
+    val f = xs.first()
+    if (f == null) return null
+    Some(f.clone())
+}
+
+class Memo<K, V> {
+    var map: [K: V] = [:]
+    fun get_or(k: K, f: (K) -> V): V {
+        if (val v = map.get(&k)) return v.clone()
+        val v = f(k.clone())
+        map.insert(k, v.clone())
+        v
+    }
+}
+
+data class V2(x: i32, y: i32) {
+    operator fun plus(o: V2): V2 = V2(x + o.x, y + o.y)
+}
+
+class Counter(var n: i32 = 0) {
+    fun inc() { n += 1 }
+}
+
+class Owner(var maybe: Counter? = Counter()) {
+    fun bump_maybe() = maybe?.inc()
+}
+
+enum Color {
+    Red, Green
+    fun describe(): String = "color ${to_string()}"
+    override fun toString() = when (this) { Red -> "R"; Green -> "G" }
+}
+
+fun main() {
+    println("${biggest([3, 9, 2]):?}")
+    println(biggest(["b".to_string(), "z".to_string(), "a".to_string()]) ?: "none")
+    println(describe_all([1.5, 2.5]))
+    println("${sum_pairs(1, 2, 3)} ${sum_pairs(1.5, 2.0, 0.25)}")
+    val m: [String: i32] = ["a": 1]
+    println(invert(m))
+    println(count_eq([1, 2, 1, 1], 1))
+    val p = Pair(1, "x")
+    println("${p.show()} ${p.swap().show()}")
+    var cache = Cache<i32, String>()
+    println("${cache.get_or(1) { "one".to_string() }} ${cache.get_or(1) { "uno".to_string() }} ${cache.hits}")
+    println("${twice { 5 }:?} ${first_copy([1, 2]):?}")
+    var memo = Memo<i32, String>()
+    println("${memo.get_or(2) { "v$it" }} ${memo.get_or(2) { "other" }}")
+    var a = V2(1, 1)
+    a += V2(2, 3)
+    println("${a:?}")
+    var o = Owner()
+    o.bump_maybe()
+    println("${o.maybe?.n} ${Color.Green.describe()} ${Color.Red}")
+}

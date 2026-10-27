@@ -2587,6 +2587,13 @@ impl<'a> Lowerer<'a> {
                 let target = self.resolve_question_dots(target);
                 self.safe_assign(*op, &target, value);
             }
+            // `a += b` on a class with `operator fun plus` and no `plusAssign`: `a = a + b`, as
+            // Kotlin reads it
+            Assign(Some(op), target, value) if self.assign_through_operator(*op, target) => {
+                self.expr(target, P_LOWEST + 1);
+                self.e.w(" = ");
+                self.binary(*op, target, value, false);
+            }
             Assign(op, target, value) => {
                 let target_ty = self.assign_target_type(target);
                 // `this = Green` in a method taking `&mut self` replaces the value behind it
@@ -3133,6 +3140,23 @@ impl<'a> Lowerer<'a> {
     fn binary(&mut self, op: BinOp, l: &Expr, r: &Expr, before_lt: bool) {
         let p = op.prec();
         let cmp = p == 5;
+        // `x > best!!` compares the value inside, without taking it out of `best`
+        if cmp && [l, r].iter().any(|x| self.unwrap_place(x).is_some()) {
+            for (i, x) in [l, r].into_iter().enumerate() {
+                if i == 1 {
+                    self.e.w(&format!(" {} ", op.as_str()));
+                }
+                match self.unwrap_place(x) {
+                    Some(place) => {
+                        self.e.w("*");
+                        self.expr(place, P_POSTFIX);
+                        self.e.w(".as_ref().unwrap()");
+                    }
+                    None => self.operand(x, if i == 0 { p + 1 } else { p + 1 }, i == 0 && matches!(op, BinOp::Lt | BinOp::Shl) || i == 1 && before_lt),
+                }
+            }
+            return;
+        }
         let lp = if cmp { p + 1 } else { p };
         let by_value = matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem);
         // text compares as `&str`, whatever the references around the parameter
@@ -3170,6 +3194,36 @@ impl<'a> Lowerer<'a> {
             self.expr(r, P_UNARY);
         } else {
             self.operand(r, p + 1, before_lt);
+        }
+    }
+
+    /// Does `target op= v` go through `op`, for a class with that operator and not its
+    /// assigning form (`plus` without `plusAssign`)?
+    fn assign_through_operator(&self, op: BinOp, target: &Expr) -> bool {
+        let (plain, assign): (&[&str], &[&str]) = match op {
+            BinOp::Add => (&["plus", "add"], &["plusAssign", "add_assign"]),
+            BinOp::Sub => (&["minus", "sub"], &["minusAssign", "sub_assign"]),
+            BinOp::Mul => (&["times", "mul"], &["timesAssign", "mul_assign"]),
+            BinOp::Div => (&["div"], &["divAssign", "div_assign"]),
+            BinOp::Rem => (&["rem", "mod"], &["remAssign", "rem_assign"]),
+            _ => return false,
+        };
+        if !self.is_place(target) {
+            return false;
+        }
+        let Some(c) = self.assign_target_type(target).or_else(|| self.infer_type(target)).and_then(|t| self.type_owner(&t)).and_then(|o| self.class_at(&o)) else { return false };
+        plain.iter().any(|n| c.methods.contains_key(*n)) && !assign.iter().any(|n| c.methods.contains_key(*n))
+    }
+
+    /// `x!!` of a variable or field holding a value that isn't `Copy`: the place.
+    fn unwrap_place<'e>(&self, e: &'e Expr) -> Option<&'e Expr> {
+        let ExprKind::Unwrap(x) = &strip_paren(e).kind else { return None };
+        if !self.is_place(x) {
+            return None;
+        }
+        match self.infer_type(x) {
+            Some(Type::Option(t)) if self.copy_elem(&t) || matches!(*t, Type::Ref { .. }) => None,
+            _ => Some(x),
         }
     }
 
@@ -3419,6 +3473,21 @@ impl<'a> Lowerer<'a> {
             Type::Infer => self.class_info(&c.name)?.fields.iter().find(|f| f.name == name)?.default.as_ref().and_then(infer_field_type),
             t => Some(t.clone()),
         }
+    }
+
+    /// `a?.m()` where `m` gives nothing (an Oxie method without a result, or `push`, `clear`,
+    /// ... of a std collection): Kotlin's `Unit?`.
+    pub(crate) fn safe_call_gives_unit(&self, e: &Expr) -> bool {
+        let ExprKind::MethodCall { recv, name, .. } = &e.kind else { return false };
+        if !has_safe_link(e) {
+            return false;
+        }
+        if matches!(name.as_str(), "push" | "push_str" | "push_back" | "push_front" | "clear" | "sort" | "sort_by" | "reverse" | "extend" | "truncate" | "retain") {
+            return true;
+        }
+        let Some(owner) = self.link_recv_type(recv, true).and_then(|t| self.type_owner(&t)) else { return false };
+        let m = self.class_at(&owner).and_then(|c| c.methods.get(name)).or_else(|| self.enum_at(&owner).and_then(|en| en.methods.get(name)));
+        m.is_some_and(|m| m.ret.is_none() && !m.throws)
     }
 
     /// A local `fun` that reads a variable of the function around it, a field or `this`: the
@@ -4740,6 +4809,11 @@ impl<'a> Lowerer<'a> {
                         self.arg_list(&args, Some(&params), TyPos::Param, span);
                         return;
                     }
+                    // `to_string()` in a type with its own `toString` is `this`'s
+                    if args.is_empty() && matches!(name.as_str(), "to_string" | "toString") && !c.is_static && (c.methods.contains_key("toString") || c.methods.contains_key("to_string")) {
+                        self.e.w(&format!("{}.to_string()", c.self_name));
+                        return;
+                    }
                     // `copy(x = 1)` in a data class is `this.copy(x = 1)`
                     if name == "copy" && !c.is_static && self.class_info(&c.name).is_some_and(|ci| ci.is_data) && !self.k.is_fun_name(&name) {
                         let this = Expr::new(ExprKind::SelfValue, callee.span);
@@ -5082,6 +5156,19 @@ impl<'a> Lowerer<'a> {
         // (`|it: _|`), and a stored one is still boxed
         if matches!(a.kind, ExprKind::Lambda { .. }) && type_mentions(&p.ty, &p.generics) {
             let ty = crate::infer::subst(&p.ty, &p.generics, &[]);
+            // `{ "other" }` for a `(K) -> V` still takes the argument: `|_| "other"`
+            let ignoring;
+            let a = match (&ty, &a.kind) {
+                (Type::Fn { params: fps, .. }, ExprKind::Lambda { params, body, .. }) if params.is_empty() && !fps.is_empty() && !visit::uses_it(body) => {
+                    let mut l = a.clone();
+                    if let ExprKind::Lambda { params, .. } = &mut l.kind {
+                        params.extend(fps.iter().map(|_| LambdaParam { pat: Pat::Wild, ty: None }));
+                    }
+                    ignoring = l;
+                    &ignoring
+                }
+                _ => a,
+            };
             match &ty {
                 Type::Fn { .. } if matches!(pos, TyPos::Field) => self.coerce(a, &ty, pos),
                 // the result's form is still known (`T?`: a `null` branch makes the other `Some`)
@@ -5942,7 +6029,19 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("::{}", gt));
                 }
                 self.home = home;
-                self.arg_list(args, Some(&m.params), TyPos::Param, span);
+                // a generic class's method: its type parameters are the receiver's arguments
+                // (`(K) -> V` of a `Memo<i32, String>` takes an `i32`, gives a `String`)
+                let mut params = m.params.clone();
+                if let (Some(c), Some(rt)) = (owner.as_ref().and_then(|o| self.class_at(o)), recv_ty.as_ref()) {
+                    let targs = crate::infer::type_args(rt);
+                    if c.has_generics && !targs.is_empty() && targs.len() == c.type_names.len() && !targs.iter().any(crate::infer::has_infer) {
+                        for p in &mut params {
+                            p.ty = crate::infer::subst(&p.ty, &c.type_names, &targs);
+                            p.generics.retain(|g| !c.type_names.contains(g));
+                        }
+                    }
+                }
+                self.arg_list(args, Some(&params), TyPos::Param, span);
                 return;
             }
             if self.may_reach_oxie(recv_ty.as_ref()) {

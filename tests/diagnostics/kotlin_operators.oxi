@@ -1,0 +1,10 @@
+// Kotlin's operator functions that Rust spells as traits.
+data class Version(major: i32, minor: i32) {
+    operator fun compareTo(o: Version): i32 = major - o.major
+    // error: 3: unknown operator function `compareTo`
+    // error: 3: `<` and `>` come from `PartialOrd`
+}
+
+fun main() {
+    println(Version(1, 2))
+}

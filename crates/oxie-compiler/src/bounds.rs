@@ -36,6 +36,10 @@ enum Kind {
     Keys(String),
     /// An optional value of the type parameter (`T?`).
     Opt(String),
+    /// A map, with the type parameters of its keys and values (`[K: V]`).
+    Map(Option<String>, Option<String>),
+    /// A function giving a value of the type parameter (`() -> T`).
+    FnRet(String),
 }
 
 type Names = HashMap<String, Kind>;
@@ -47,6 +51,8 @@ type Cases = HashMap<String, Vec<Option<Kind>>>;
 struct Cx<'a> {
     sets: &'a HashSet<String>,
     cases: &'a Cases,
+    /// The type parameters (for the types locals declare).
+    tnames: HashSet<String>,
 }
 /// Type parameter -> bounds in the order found (deduplicated by name).
 type Found = BTreeMap<String, Vec<(&'static str, Type)>>;
@@ -85,7 +91,7 @@ pub fn with_inferred_bounds(f: &FunDecl, outer: &[GenericParam], fields: &[(Stri
     if let Some(FunBody::Block(b)) = &f.body {
         collect_sets(b, &mut sets);
     }
-    let cx = Cx { sets: &sets, cases: &cases };
+    let cx = Cx { sets: &sets, cases: &cases, tnames: tnames.clone() };
     match &f.body {
         Some(FunBody::Block(b)) => scan_block(b, &names, &cx, &mut found),
         Some(FunBody::Expr(e)) => scan(e, &names, &cx, &mut found),
@@ -142,11 +148,26 @@ fn kind_of(t: &Type, tnames: &HashSet<String>) -> Option<Kind> {
             Some(Kind::Elem(n)) => Some(Kind::Coll(n)),
             _ => None,
         },
-        Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "HashMap" | "HashSet") => match segs[0].generics.as_deref() {
-            Some([GenericArg::Type(key), ..]) => match kind_of(key, tnames) {
+        Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "HashSet" | "BTreeSet") => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(key)]) => match kind_of(key, tnames) {
                 Some(Kind::Elem(n)) => Some(Kind::Keys(n)),
                 _ => None,
             },
+            _ => None,
+        },
+        Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "HashMap" | "BTreeMap") => match segs[0].generics.as_deref() {
+            Some([GenericArg::Type(key), GenericArg::Type(val)]) => {
+                let param = |t: &Type| match kind_of(t, tnames) {
+                    Some(Kind::Elem(n)) => Some(n),
+                    _ => None,
+                };
+                let (k, v) = (param(key), param(val));
+                (k.is_some() || v.is_some()).then_some(Kind::Map(k, v))
+            }
+            _ => None,
+        },
+        Type::Fn { ret, .. } => match kind_of(ret, tnames) {
+            Some(Kind::Elem(n)) => Some(Kind::FnRet(n)),
             _ => None,
         },
         Type::Path { segs, .. } if segs.len() == 1 && matches!(segs[0].name.as_str(), "Vec" | "VecDeque" | "List" | "MutableList") => {
@@ -187,10 +208,29 @@ fn display(found: &mut Found, t: &str) {
 fn elem(e: &Expr, names: &Names) -> Option<String> {
     match &e.kind {
         ExprKind::Paren(x) | ExprKind::Unary(UnOp::Deref, x) | ExprKind::Unary(UnOp::Ref, x) => elem(x, names),
-        ExprKind::Index(c, _) => coll(c, names),
+        ExprKind::Index(c, _) => coll(c, names).or_else(|| match names.get(c.ident()?) {
+            Some(Kind::Map(_, Some(v))) => Some(v.clone()),
+            _ => None,
+        }),
         ExprKind::MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "clone" | "to_owned") => elem(recv, names),
         // `value!!` of a `T?`
         ExprKind::Unwrap(x) => opt(x, names),
+        // `make()` with `make: () -> T`
+        ExprKind::Call { callee, .. } => match names.get(callee.ident()?) {
+            Some(Kind::FnRet(t)) => Some(t.clone()),
+            _ => None,
+        },
+        // `a * b` of two `T`s is a `T` (its `Mul` gives `Output = T`)
+        ExprKind::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, a, b) => {
+            let side = |x: &Expr| elem(x, names).or_else(|| match &x.kind {
+                ExprKind::Field { name, .. } => match names.get(name) {
+                    Some(Kind::Elem(t)) => Some(t.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            side(a).filter(|t| side(b).as_ref() == Some(t))
+        }
         ExprKind::MethodCall { recv, name, args, .. } if args.is_empty() && name == "unwrap" => opt(recv, names),
         _ => match names.get(e.ident()?) {
             Some(Kind::Elem(t)) => Some(t.clone()),
@@ -204,6 +244,14 @@ fn opt(e: &Expr, names: &Names) -> Option<String> {
     match &e.kind {
         ExprKind::Paren(x) | ExprKind::Unary(UnOp::Ref, x) | ExprKind::Unary(UnOp::RefMut, x) => opt(x, names),
         ExprKind::MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "as_ref" | "as_mut" | "clone") => opt(recv, names),
+        // `m.get(k)` of a `[K: V]`, `xs.first()` of a `[T]`
+        ExprKind::MethodCall { recv, name, .. } if matches!(name.as_str(), "get" | "get_mut" | "remove") && matches!(recv.ident().and_then(|r| names.get(r)), Some(Kind::Map(_, Some(_)))) => {
+            match names.get(recv.ident()?) {
+                Some(Kind::Map(_, Some(v))) => Some(v.clone()),
+                _ => None,
+            }
+        }
+        ExprKind::MethodCall { recv, name, .. } if matches!(name.as_str(), "first" | "last" | "get" | "pop" | "first_mut" | "last_mut") => coll(recv, names),
         ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => match names.get(name) {
             Some(Kind::Opt(t)) => Some(t.clone()),
             _ => None,
@@ -259,7 +307,7 @@ fn scan_block(b: &Block, names: &Names, cx: &Cx, found: &mut Found) {
     let mut names = names.clone();
     for s in &b.stmts {
         match s {
-            Stmt::Let { pat, init, .. } => {
+            Stmt::Let { pat, init, ty, .. } => {
                 if let Some(e) = init {
                     scan(e, &names, cx, found);
                 }
@@ -268,11 +316,16 @@ fn scan_block(b: &Block, names: &Names, cx: &Cx, found: &mut Found) {
                 for n in bound {
                     names.remove(&n);
                 }
-                if let (Pat::Ident { name, .. }, Some(e)) = (pat, init) {
+                if let (Pat::Ident { name, .. }, Some(t)) = (pat, ty.as_ref().and_then(|t| kind_of(t, &cx.tnames))) {
+                    // `var out: [T] = []`
+                    names.insert(name.clone(), t);
+                } else if let (Pat::Ident { name, .. }, Some(e)) = (pat, init) {
                     if let Some(t) = elem(e, &names) {
                         names.insert(name.clone(), Kind::Elem(t));
                     } else if let Some(t) = coll(e, &names) {
                         names.insert(name.clone(), Kind::Coll(t));
+                    } else if let Some(t) = opt(e, &names) {
+                        names.insert(name.clone(), Kind::Opt(t));
                     }
                 }
             }
@@ -410,7 +463,7 @@ fn scan(e: &Expr, names: &Names, cx: &Cx, found: &mut Found) {
                     }
                 }
                 // a map or set field keyed by `K`
-                if let (true, Some(Kind::Keys(t))) = (hash_op, recv.ident().and_then(|r| names.get(r))) {
+                if let (true, Some(Kind::Keys(t) | Kind::Map(Some(t), _))) = (hash_op, recv.ident().and_then(|r| names.get(r))) {
                     add(found, t, "Eq", path(&["std", "cmp", "Eq"]));
                     add(found, t, "Hash", path(&["std", "hash", "Hash"]));
                 }
@@ -460,6 +513,14 @@ fn scan(e: &Expr, names: &Names, cx: &Cx, found: &mut Found) {
                 }
                 if let (Some(t), Pat::Ident { name, .. }) = (coll(iter, names), pat) {
                     inner.insert(name.clone(), Kind::Elem(t));
+                }
+                // `for ((k, v) in m)` over a `[K: V]`
+                if let (Some(Kind::Map(k, v)), Pat::Tuple(ps)) = (iter.ident().and_then(|i| names.get(i)), pat) {
+                    for (p, t) in ps.iter().zip([k, v]) {
+                        if let (Pat::Ident { name, .. }, Some(t)) = (p, t) {
+                            inner.insert(name.clone(), Kind::Elem(t.clone()));
+                        }
+                    }
                 }
                 scan_block(body, &inner, cx, found);
                 return false;

@@ -641,7 +641,7 @@ fn generic_result(f: &crate::sema::FunInfo) -> Option<Type> {
 }
 
 /// The type arguments of a type (`[String]` of `Stack<String>`), through references.
-fn type_args(t: &Type) -> Vec<Type> {
+pub(crate) fn type_args(t: &Type) -> Vec<Type> {
     match t {
         Type::Ref { inner, .. } => type_args(inner),
         Type::Path { segs, .. } => segs.last().and_then(|s| s.generics.as_deref()).unwrap_or_default().iter().filter_map(|g| if let GenericArg::Type(t) = g { Some(t.clone()) } else { None }).collect(),

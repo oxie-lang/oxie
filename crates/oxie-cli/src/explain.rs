@@ -93,6 +93,14 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
                 d.fixes.push(Fix { title: format!("use `{}.new(...)`", name), edits: vec![edit(d.line, end, end, ".new")] });
             }
         }
+        // Kotlin's functions and collection types that Oxie spells another way
+        "E0425" | "E0412" if kotlin_name(&last_segment(&first)).is_some() => {
+            let name = last_segment(&first);
+            rewrite(d, format!("`{}` is Kotlin's", name));
+            d.fixes.clear();
+            d.notes.retain(|n| !n.contains("similarly named") && !n.contains("consider importing") && !n.contains("a local variable with a similar name"));
+            d.notes.push(help(kotlin_name(&name).unwrap()));
+        }
         "E0433" | "E0412" | "E0425" | "E0422" | "E0423" | "E0531" | "E0532" => {
             if d.message.contains("undeclared") || d.message.starts_with("cannot find") {
                 rewrite(d, format!("`{}` isn't defined or imported here", last_segment(&first)));
@@ -1226,6 +1234,7 @@ const KOTLIN_METHODS: &[(&str, &str)] = &[
     ("endsWith", "ends_with"),
     ("removeAt", "remove"),
     ("indexOf", "find"),
+    ("withIndex", "iter().enumerate"),
     ("toList", "to_vec"),
     ("toMutableList", "to_vec"),
     ("toString", "to_string"),
@@ -1261,6 +1270,26 @@ const KOTLIN_METHODS: &[(&str, &str)] = &[
     ("associateBy", "associate_by"),
 ];
 
+/// What Oxie has for a function or type of Kotlin's standard library.
+fn kotlin_name(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "maxOf" => "the larger of two values is `a.max(b)`; of a list's elements, `xs.iter().max()` or `xs.max_of { it.x }`.",
+        "minOf" => "the smaller of two values is `a.min(b)`; of a list's elements, `xs.iter().min()` or `xs.min_of { it.x }`.",
+        "require" | "check" => "write `assert!(cond, \"message\")`, which panics, or `if (!cond) throw \"message\"` in a function that `throws`.",
+        "error" => "write `panic!(\"message\")`, or `throw \"message\"` in a function that `throws`.",
+        "TODO" => "write `todo!()`.",
+        "repeat" => "write `for (i in 0 until n) { ... }`.",
+        "List" | "MutableList" | "ArrayList" => "a list is `[T]` (Rust's `Vec<T>`): `xs: [i32]`.",
+        "Map" | "MutableMap" => "a map is `[K: V]` (Rust's `HashMap<K, V>`): `m: [String: i32]`.",
+        "Set" | "MutableSet" => "a set is Rust's `HashSet<T>` (`import std.collections.HashSet`).",
+        "Array" | "IntArray" => "an array is `[T; N]`, or a list `[T]` when its length changes.",
+        "Pair" => "a pair is a tuple: `(a, b)`, read with `.0` and `.1` or `val (a, b) = p`.",
+        "Any" => "Oxie has no `Any`: use a type parameter (`<T>`), an interface, or an enum of the cases.",
+        "Unit" => "Kotlin's `Unit` is `()`, or leave the return type out.",
+        _ => return None,
+    })
+}
+
 /// Kotlin's `xs.size` and `s.length` (rustc: "no field `size` on type `Vec<i32>`"): Rust's is
 /// the method `len()`. rustc's span starts at the value; it moves to the field.
 fn no_field(d: &mut MappedDiag, lines: &[&str], field: &str) {
@@ -1288,6 +1317,19 @@ fn no_field(d: &mut MappedDiag, lines: &[&str], field: &str) {
             }
             return;
         }
+    }
+    // Kotlin's `xs.indices` and `xs.lastIndex`
+    if matches!(field, "indices" | "lastIndex") {
+        let recv: String = at.map(|i| chars[..i].iter().rev().take_while(|c| is_ident_char(**c) || **c == '.').collect::<Vec<_>>().into_iter().rev().collect()).unwrap_or_default();
+        let recv = recv.trim_start_matches('.').to_string();
+        d.notes.retain(|n| !n.contains("available field"));
+        let (what, with) = if field == "indices" { ("the indices are a range", format!("0 until {}.len()", recv)) } else { ("the last index is", format!("{}.len() - 1", recv)) };
+        d.notes.push(help(&format!("{}: `{}`.", what, with)));
+        if let (Some(i), false) = (at, recv.is_empty()) {
+            let start = (i - recv.chars().count()) as u32;
+            d.fixes.push(Fix { title: format!("use `{}`", with), edits: vec![edit(d.line, start, (i + dot.len()) as u32, &with)] });
+        }
+        return;
     }
     if matches!(field, "size" | "length" | "count") {
         d.notes.retain(|n| !n.contains("available field"));
@@ -1328,6 +1370,34 @@ fn no_method(d: &mut MappedDiag, sources: &Sources, lines: &[&str], method: &str
         }
     }
     opposite_name(d, sources, method);
+    // `x.toDouble()` on a number: a cast, not text parsing
+    let number = |t: &str| matches!(t, "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64" | "{integer}" | "{float}");
+    let cast = match method {
+        "toInt" => Some("i32"),
+        "toLong" => Some("i64"),
+        "toDouble" => Some("f64"),
+        "toFloat" => Some("f32"),
+        "toShort" => Some("i16"),
+        "toByte" => Some("i8"),
+        _ => None,
+    };
+    if let (Some(to), Some(ty)) = (cast, between(&d.message, "found for type `", "`")) {
+        if number(&ty) {
+            d.notes.retain(|n| !n.contains("similar name") && !n.contains("you might have meant"));
+            d.notes.push(help(&format!("numbers convert with `as`: `x as {}`.", to)));
+            let line = lines.get(d.line as usize).copied().unwrap_or("");
+            let after: String = line.chars().skip(d.col as usize + method.chars().count()).take(2).collect();
+            if word_at(line, d.col as usize) == Some(method) && after == "()" && d.col > 0 {
+                let end = d.col + method.chars().count() as u32 + 2;
+                d.fixes.push(Fix { title: format!("use `as {}`", to), edits: vec![edit(d.line, d.col - 1, end, &format!(" as {}", to))] });
+            }
+            return;
+        }
+    }
+    if method.starts_with("component") && method[9..].chars().all(|c| c.is_ascii_digit()) && method.len() > 9 {
+        d.notes.push(help("a data class destructures by its fields in constructor order: `val (a, b) = d`, or read the field itself (`d.x`)."));
+        return;
+    }
     let rust = KOTLIN_METHODS.iter().find(|(k, _)| *k == method).map(|(_, r)| r.to_string()).or_else(|| {
         // only when rustc knows a method by the snake_case name
         let snake = snake_case(method);

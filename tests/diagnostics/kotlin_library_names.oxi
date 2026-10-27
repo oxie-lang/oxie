@@ -1,0 +1,21 @@
+// Kotlin's library names point at what Oxie has.
+data class D(x: i32, y: i32)
+
+fun total(xs: List<i32>): i32 = xs.iter().sum()
+// error: 4: `List` is Kotlin's
+
+fun main() {
+    val xs = vec[1, 2]
+    for (i in xs.indices) print(i)
+    // error: 9: the indices are a range
+    // error: 9: fix: use `0 until xs.len()`: `for (i in 0 until xs.len()) print(i)`
+    val n: i64 = 3
+    val y = n.toDouble()
+    // error: 13: numbers convert with `as`
+    // error: 13: fix: use `as f64`: `val y = n as f64`
+    println(maxOf(1, 2))
+    // error: 16: `maxOf` is Kotlin's
+    println(D(1, 2).component1())
+    // error: 18: a data class destructures by its fields
+    println(y)
+}
