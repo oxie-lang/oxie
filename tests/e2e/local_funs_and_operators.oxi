@@ -1,0 +1,49 @@
+// Local functions that use the variables around them, operators taking references, constants.
+
+class Calc(base: i32) {
+    fun run(xs: [i32]): [i32] {
+        fun adjust(x: i32): i32 = x + base
+        xs.map { adjust(*it) }
+    }
+}
+
+fun greet_all(names: [String], greeting: &str): [String] {
+    fun greet(name: &str): String = "$greeting, $name"
+    names.map { greet(it) }
+}
+
+fun count_calls(): i32 {
+    var calls = 0
+    fun hit() { calls += 1 }
+    hit()
+    hit()
+    calls
+}
+
+class Matrix(n: usize, var data: [f64]) {
+    operator fun times(o: &Matrix): Matrix {
+        var out = vec[0.0; n * n]
+        for (i in 0 until n) for (j in 0 until n) for (k in 0 until n) out[i * n + j] += data[i * n + k] * o.data[k * n + j]
+        Matrix(n, out)
+    }
+    static fun identity(n: usize): Matrix {
+        var d = vec[0.0; n * n]
+        for (i in 0 until n) d[i * n + i] = 1.0
+        Matrix(n, d)
+    }
+}
+
+val EMPTY: [String] = []
+val NUMS: [i32; 3] = [1, 2, 3]
+val GREETING: &str = "hi"
+
+fun main() {
+    println(Calc(10).run(vec[1, 2]))
+    println(greet_all(vec["ada".to_string()], "hi"))
+    println(count_calls())
+    val a = Matrix(2, vec[1.0, 2.0, 3.0, 4.0])
+    val i = Matrix.identity(2)
+    val p = a * i
+    println(p.data)
+    println("${i.data.len()} ${EMPTY.len()} ${NUMS[1]} $GREETING")
+}

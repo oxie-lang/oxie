@@ -380,6 +380,8 @@ pub struct Lowerer<'a> {
     /// While lowering such a method: the span starts of the `this` used as receivers, which
     /// stay `self`; any other `this` is `__this.clone()`.
     pub(crate) this_recv: Option<HashSet<u32>>,
+    /// The method being lowered takes `&self` or `&mut self` (`this = x` is `*self = x`).
+    pub(crate) this_by_ref: bool,
     /// A parameter `write_params` adds after the declared ones.
     pub(crate) extra_param: Option<String>,
     /// The handle type (`Counter<T>`) of the shared class being lowered.
@@ -667,6 +669,7 @@ impl<'a> Lowerer<'a> {
             trait_impl: false,
             needs_this: HashSet::new(),
             this_recv: None,
+            this_by_ref: false,
             extra_param: None,
             shared_handle_ty: None,
             self_by_value: false,
@@ -763,6 +766,13 @@ impl<'a> Lowerer<'a> {
         let depth = self.scopes.len() - 1;
         self.optional_locals.retain(|(d, n)| (*d, n.as_str()) != (depth, name));
         self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
+    }
+    /// Forgets `name` in the innermost scope: a local function lowered as a closure is still
+    /// called as a function (with its parameters' conversions).
+    pub(crate) fn unbind_name(&mut self, name: &str) {
+        if let Some(s) = self.scopes.last_mut() {
+            s.remove(name);
+        }
     }
     pub(crate) fn bind_pat(&mut self, p: &Pat, ty: Option<Type>) {
         if let Pat::Ident { name, sub: None, .. } = p {
@@ -1688,9 +1698,9 @@ impl<'a> Lowerer<'a> {
                 let mut parts: Vec<String> = fields
                     .iter()
                     .map(|(n, sub)| match sub {
-                        // `Point { x, mut y }`
-                        Some(Pat::Ident { name, by_ref: false, mutable, sub: None, .. }) if name == n => {
-                            format!("{}{}", if *mutable { "mut " } else { "" }, esc(n))
+                        // `Point { x, mut y, ref z }`
+                        Some(Pat::Ident { name, by_ref, mutable, sub: None, .. }) if name == n => {
+                            format!("{}{}{}", if *by_ref { "ref " } else { "" }, if *mutable { "mut " } else { "" }, esc(n))
                         }
                         Some(sp) => format!("{}: {}", esc(n), self.pat_typed(sp, field_ty(n))),
                         None => esc(n),
@@ -1825,6 +1835,10 @@ impl<'a> Lowerer<'a> {
             ItemKind::Impl(imp) => self.impl_decl(it, imp),
             ItemKind::Import(i) => {
                 self.note_import(&i.tree);
+                // `import util` in the crate root: its `mod util;` already names the module there
+                if self.module.is_empty() && matches!(&i.tree, UseTree::Path { segments, alias: None } if segments.len() == 1 && self.k.modules.contains(&segments[0])) {
+                    return;
+                }
                 self.docs(&it.docs);
                 self.attrs(&it.attrs, &[]);
                 let vis = match it.vis {
@@ -1842,7 +1856,17 @@ impl<'a> Lowerer<'a> {
                 self.docs(&it.docs);
                 self.attrs(&it.attrs, &[]);
                 let vis = self.vis_of(&it.vis, ctx, Some(&c.name));
-                let at_run_time = c.value.as_ref().and_then(|v| self.run_time_part(v));
+                // a list literal for a list type (`[String]`) is a `vec!`, which allocates
+                let list_lit = matches!((&c.ty, c.value.as_ref().map(|v| &v.kind)), (Some(t), Some(ExprKind::Array(xs))) if !xs.is_empty() && crate::infer::list_elem(t).is_some() && !matches!(t, Type::Array(..)));
+                let at_run_time = match c.value.as_ref() {
+                    Some(v) if list_lit => Some((v.span, "a list literal for a `[T]` makes a `vec!`, which allocates while the program runs (an array type `[T; N]` would not)".to_string())),
+                    v => v.and_then(|v| self.run_time_part(v)),
+                };
+                // `val GREETING: String = "hi"`: a constant's text is a `&str`
+                let string_lit = matches!((&c.ty, c.value.as_ref().map(|v| &v.kind)), (Some(t), Some(ExprKind::Str(_) | ExprKind::RawStr(_))) if t.is_string());
+                if let (true, Some(v)) = (string_lit && at_run_time.is_none(), &c.value) {
+                    self.error(v.span, format!("`{}` can't be a `String` computed while compiling (a `String` is made while the program runs): declare it `&str` (`val {}: &str = ...`), or leave the type out", c.name, c.name));
+                }
                 if let Some((span, why)) = &at_run_time {
                     let kind = if is_static { "a `static`" } else { "a Rust `const`" };
                     self.error(
@@ -1881,7 +1905,13 @@ impl<'a> Lowerer<'a> {
                 self.e.w(&format!("{}{} {}: {}", vis, kw, c.name, ty));
                 if let Some(v) = &c.value {
                     self.e.w(" = ");
-                    self.expr(v, P_LOWEST);
+                    // `[]` for a list type: `Vec::new()`, which a constant can hold
+                    let empty_list = matches!(&v.kind, ExprKind::Array(xs) if xs.is_empty()) && c.ty.as_ref().is_some_and(|t| crate::infer::list_elem(t).is_some() && !matches!(t, Type::Array(..)));
+                    if empty_list {
+                        self.e.w("Vec::new()");
+                    } else {
+                        self.expr(v, P_LOWEST);
+                    }
                 }
                 self.e.w(";");
                 self.e.nl();
@@ -1930,10 +1960,12 @@ impl<'a> Lowerer<'a> {
                 self.e.w("#[allow(unused_imports)]\nuse super::*;");
                 self.e.nl();
                 self.inline_depth += 1;
+                self.module.push(name.clone());
                 for i in items {
                     self.e.nl();
                     self.item(i, ItemCtx::Object);
                 }
+                self.module.pop();
                 self.inline_depth -= 1;
                 self.e.dedent();
                 self.e.w("}");
@@ -2467,6 +2499,7 @@ impl<'a> Lowerer<'a> {
         let saved_sig = std::mem::replace(&mut self.iface_sig, iface_sig);
         self.push_scope();
         let self_ref = recv_text.as_deref().is_some_and(|r| r.starts_with('&'));
+        let saved_by_ref = std::mem::replace(&mut self.this_by_ref, self_ref);
         let params = self.params_parts(f, recv_text);
         let ret = self.ret_type(f, TyPos::Ret).map(|r| if iface_sig { r } else { captures_borrow(r, f, self_ref) });
         let wc = self.where_clause(&f.generics);
@@ -2504,6 +2537,7 @@ impl<'a> Lowerer<'a> {
             None => self.e.w(";"),
         }
         self.this_recv = saved_this;
+        self.this_by_ref = saved_by_ref;
         if let (Some(c), Some(s)) = (self.class.as_mut(), saved_static) {
             c.is_static = s;
         }
@@ -3171,6 +3205,10 @@ impl<'a> Lowerer<'a> {
                 args.iter().find_map(|a| self.run_time_part(&a.value))
             }
             ExprKind::Paren(x) | ExprKind::Unary(_, x) | ExprKind::Cast(x, _) => self.run_time_part(x),
+            // `"hi " + name`: joining text builds a `String`
+            ExprKind::Binary(BinOp::Add, a, b) if [a, b].iter().any(|x| matches!(x.kind, ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Template(_))) => {
+                Some((e.span, "joining text builds a `String` while the program runs".into()))
+            }
             ExprKind::Binary(_, a, b) => self.run_time_part(a).or_else(|| self.run_time_part(b)),
             ExprKind::Tuple(xs) | ExprKind::Array(xs) => xs.iter().find_map(|x| self.run_time_part(x)),
             ExprKind::StructLit { fields, .. } => fields.iter().find_map(|(_, v)| v.as_ref().and_then(|v| self.run_time_part(v))),
@@ -4161,8 +4199,31 @@ fn ret_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> usize) -> Fun
     let used: Vec<String> = f.generics.params.iter().filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(name.clone()) } else { None }).collect();
     let l = if used.iter().any(|u| u == "a") { "oxie".to_string() } else { "a".to_string() };
     f2.generics.params.insert(0, GenericParam::Lifetime { name: l.clone(), bounds: Vec::new() });
+    fn has_mut_ref(t: &Type) -> bool {
+        match t {
+            Type::Ref { mutable: true, .. } => true,
+            Type::Ref { inner, .. } | Type::Ptr { inner, .. } | Type::Slice(inner) | Type::Array(inner, _) | Type::Option(inner) => has_mut_ref(inner),
+            Type::Tuple(v) | Type::Impl(v) | Type::Dyn(v) | Type::Bounds(v) => v.iter().any(has_mut_ref),
+            Type::Path { segs, .. } => segs.iter().filter_map(|s| s.generics.as_ref()).flatten().any(|g| matches!(g, GenericArg::Type(t) | GenericArg::Binding(_, t) if has_mut_ref(t))),
+            _ => false,
+        }
+    }
+    let ret_mut = has_mut_ref(ret);
     for p in &mut f2.params {
-        set(&mut p.ty, &l, lt);
+        match &mut p.ty {
+            // `c: &mut Cursor` of a type that borrows (`Cursor<'a>`): the result borrows what the
+            // cursor borrows, not the cursor, which `&'a mut Cursor<'a>` would keep borrowed as
+            // long as the result lives
+            Type::Ref { mutable: true, lifetime: None, inner } if !ret_mut && {
+                let mut n = 0;
+                count(inner, &mut n, lt);
+                n > 0
+            } =>
+            {
+                set(inner, &l, lt)
+            }
+            t => set(t, &l, lt),
+        }
     }
     set(f2.ret.as_mut().unwrap(), &l, lt);
     f2

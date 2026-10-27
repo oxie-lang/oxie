@@ -1,0 +1,125 @@
+// `is` checks on enum cases, objects holding objects and types, and more methods and patterns.
+
+enum Event { Click(x: i32, y: i32), Key(name: String), Quit }
+
+// after `is Event.Click`, `e.x` reads the case's field, as Kotlin's smart cast does
+fun describe(e: &Event): String = when (e) {
+    is Event.Click -> if (e.x > 100) "right click at ${e.x},${e.y}" else "left click"
+    is Event.Key -> "key ${e.name} (${e.name.len()} chars)"
+    else -> "quit"
+}
+
+fun shout(e: Event): String {
+    if (e is Event.Key) return e.name.to_uppercase() + " from ${describe(&e)}"
+    return "-"
+}
+
+object Defaults {
+    const WIDTH: u32 = 80
+    object Colors {
+        const BG = "black"
+        fun fg(): &str = "white"
+    }
+    data class Size(w: u32, h: u32)
+    enum Theme { Dark, Light }
+}
+
+enum Light {
+    Red, Green
+    fun advance() {
+        this = when (this) {
+            Red -> Green
+            Green -> Red
+        }
+    }
+}
+
+data class P(x: i32, y: i32) {
+    fun moved(dx: i32): P = copy(x = x + dx)
+}
+
+interface Shape { fun area(): f64 }
+class Sq(s: f64) : Shape { override fun area() = s * s }
+
+class Scene(var main: Shape? = null) {
+    fun set_main(s: Shape) { main = s }
+    fun main_area(): f64 = main?.area() ?: 0.0
+}
+
+class Item(var tag: String? = null)
+
+fun kind(c: char, vowels: [char]): String = when (c) {
+    in vowels -> "vowel"
+    else -> "consonant"
+}
+
+class Cursor(input: &str, var pos: usize = 0) {
+    fun peek(): char? = input[pos..].chars().next()
+    fun next_word(): &str {
+        while (peek() == ' ') pos += 1
+        val start = pos
+        while (pos < input.len() && peek() != ' ') pos += 1
+        &input[start..pos]
+    }
+    fun rest(): &str = &input[pos..]
+}
+
+data class Word(text: &str, start: usize)
+
+// the result borrows the text the cursor reads, not the cursor
+fun first_word(c: &mut Cursor): Word {
+    val start = c.pos
+    Word(c.next_word(), start)
+}
+
+class Counter {
+    var n = 0
+    var out: [String] = []
+    fun bump(): i32 {
+        n += 1
+        return n
+    }
+    // arguments that read `n` before `bump()` changes it see the old value, as in Kotlin
+    fun go() {
+        out.push("$n then ${bump()}")
+        out.push(n.to_string() + "/" + bump().to_string())
+    }
+}
+
+fun main() {
+    for (e in [Event.Click(150, 20), Event.Click(3, 4), Event.Key("enter".to_string()), Event.Quit]) println(describe(e))
+    println("${shout(Event.Key("tab".to_string()))} ${shout(Event.Quit)}")
+
+    println("${Defaults.WIDTH} ${Defaults.Colors.BG}/${Defaults.Colors.fg()} ${Defaults.Size(3, 4):?} ${[Defaults.Theme.Dark, Defaults.Theme.Light]:?}")
+
+    var l = Light.Red
+    l.advance()
+    println("${l:?} ${P(1, 2).moved(10):?}")
+
+    val ps = vec[P(1, 2), P(3, 4)]
+    println(ps.map { (x, y) -> x * y })
+    for ((x, y) in ps) print("${x + y} ")
+    println()
+
+    var sc = Scene()
+    println(sc.main_area())
+    sc.set_main(Sq(2.0))
+    println(sc.main_area())
+
+    var opt: Item? = Item()
+    if (val r = &mut opt) r.tag = "x".to_string()
+    println("${opt?.tag}")
+
+    val v: [char] = ['a', 'e']
+    println("${kind('a', v)} ${kind('b', v)} ${v.len()}")
+
+    var c = Cursor("  hello big   world")
+    val w = c.next_word()
+    println("[$w]")
+    val word = first_word(c)
+    println("${word:?} rest=[${c.rest()}]")
+
+    var counter = Counter()
+    counter.go()
+    println("${counter.out:?}")
+}

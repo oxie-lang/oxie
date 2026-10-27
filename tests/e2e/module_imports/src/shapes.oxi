@@ -1,0 +1,7 @@
+data class Circle(r: f64)
+
+data class Square(side: f64) {
+    fun area(): f64 = side * side
+}
+
+fun unit_circle(): Circle = Circle(1.0)

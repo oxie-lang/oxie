@@ -17,3 +17,6 @@ fun main() {
         println(it)
     }
 }
+
+fun total(vararg xs: i32): i32 = xs
+// error: 21: Oxie has no `vararg`

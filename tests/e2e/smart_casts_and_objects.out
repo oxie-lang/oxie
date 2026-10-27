@@ -1,0 +1,16 @@
+right click at 150,20
+left click
+key enter (5 chars)
+quit
+TAB from key tab (3 chars) -
+80 black/white Size { w: 3, h: 4 } [Dark, Light]
+Green P { x: 11, y: 2 }
+[2, 12]
+3 7 
+0
+4
+x
+vowel consonant 2
+[hello]
+Word { text: "big", start: 7 } rest=[   world]
+["0 then 1", "1/2"]

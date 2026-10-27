@@ -874,6 +874,11 @@ impl<'a> Parser<'a> {
             if self.is_kw("val") {
                 self.bump();
             }
+            if self.is_kw("vararg") && matches!(self.tok_at(1), Tok::Ident(_)) {
+                let sp = self.span();
+                self.bump();
+                self.diags.push(Diag::error(sp, "Oxie has no `vararg`").with_help("take a list (`xs: [i32]`) and pass one: `sum([1, 2, 3])`"));
+            }
             let mut pat = self.pattern_no_or()?;
             if self.eat_kw("var") {
                 pat = self.pattern_no_or()?;

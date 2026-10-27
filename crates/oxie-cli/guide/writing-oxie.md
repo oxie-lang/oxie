@@ -130,6 +130,8 @@ fun main() {
   (`xs.map { }`, not `xs.iter().map { }`) or `collect()` first:
   `"b a".split(' ').to_list().sorted()`. `is_not_empty()` is only for lists; for text
   write `!s.is_empty()`. You implement `toString()`, but you call `to_string()`.
+* **Rust's types are made with their functions.** `HashMap()` and other calls without arguments
+  become `new()`, but `Box(x)`, `Rc(x)` or `RefCell(x)` don't: write `Box.new(x)`.
 * **Numbers don't convert by themselves.** `i32 * f64` is an error: write `n as f64`.
   `len()` is a `usize`; a list can be indexed with any integer type. Integer division truncates. `Int`, `Long` and `Double` are
   names for `i32`, `i64` and `f64`.
@@ -155,7 +157,9 @@ fun main() {
   Share behavior with interfaces (they can have default methods) and composition; use an
   `enum` with data where Kotlin would use a sealed class (`enum class` is accepted as `enum`).
   Interfaces have no properties: declare `fun name(): String` and implement it with
-  `override fun name() = name.clone()`. There are no type tests (`is Int`): match on an enum. Constructor parameters are fields
+  `override fun name() = name.clone()`. There are no type tests (`is Int`): match on an enum. After `is Shape.Circle` (a `when`
+  arm on a variable, or `if (s is Shape.Circle)`), `s.radius` reads that case's field, as a
+  Kotlin smart cast does. Constructor parameters are fields
   (no `val`/`var` needed), there are no getters or setters, and `this.` is only needed when a
   parameter has the field's name. A method hides a function of the module with its name:
   call that function as `self::name(x)`.
@@ -180,7 +184,9 @@ fun main() {
   f()` passes the variable named `log` where the call is (a local, a parameter, a lambda's
   parameter or the caller's own context), or one given by name, `f(log = &mut other)`.
 * **Lambdas** are Rust closures. `return` in a lambda returns from the lambda, not from the
-  enclosing function. In predicates (`filter`, `find`, `any`, `count`, ...) the element is a
+  enclosing function, and `?` inside a `map { }` lambda can't pass an error out of the function
+  (use a `for` loop). A `for_each { }` statement whose lambda throws is the loop it stands for,
+  so its error does leave the function. In predicates (`filter`, `find`, `any`, `count`, ...) the element is a
   reference: comparing it with a literal reads through it (`filter { it > 2 }`), but to pass
   it on write `*it` or `it.clone()`. When the compiler can't tell a parameter's type
   ("type annotations needed", as with `trim_matches { }`), write it:
@@ -189,7 +195,8 @@ fun main() {
   `s += t` appends; a `when` on a `String` matches its text arms (`"go" -> ...`).
   `var s = ""` followed by `s += t`, `s.push(c)` or `s.push_str(t)` is a `String`, and text put
   into a `[String]`, set or map (`names.push("bob")`, `m.insert("k", "v")`) is converted.
-* **Destructuring.** `val (x, y) = point` takes a data class's fields in constructor order, and
+* **Destructuring.** `val (x, y) = point` takes a data class's fields in constructor order (so
+  do `for ((x, y) in points)` and `points.map { (x, y) -> x * y }`), and
   `if (val (k, v) = pair_or_null)` unwraps an optional pair. `val (tx, var rx) = ...` lets only
   `rx` change (write `var`, not Rust's `mut`).
 * **Printing.** `"$x"` and `println(x)` print numbers, text and types with `toString()`; lists,

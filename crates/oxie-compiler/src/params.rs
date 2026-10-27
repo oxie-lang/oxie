@@ -376,7 +376,7 @@ fn top_level_funs<'a>(file: usize, items: &'a [Item], module: &[String], out: &m
     for it in items {
         match &it.kind {
             ItemKind::Fun(f) => out.push(Fun { file, module: module.to_vec(), item: it, decl: f, owner: None }),
-            ItemKind::Mod { name, items } => top_level_funs(file, items, &[module, std::slice::from_ref(name)].concat(), out),
+            ItemKind::Mod { name, items } | ItemKind::Object { name, items } => top_level_funs(file, items, &[module, std::slice::from_ref(name)].concat(), out),
             _ => {}
         }
     }
@@ -412,7 +412,7 @@ fn methods<'a>(file: usize, items: &'a [Item], module: &[String], k: &Crate, out
                 let trait_impl = i.trait_.is_some();
                 members(file, &i.members, module, (name, false), &|_| trait_impl, out);
             }
-            ItemKind::Mod { name, items } => methods(file, items, &[module, std::slice::from_ref(name)].concat(), k, out),
+            ItemKind::Mod { name, items } | ItemKind::Object { name, items } => methods(file, items, &[module, std::slice::from_ref(name)].concat(), k, out),
             _ => {}
         }
     }
@@ -837,6 +837,14 @@ impl<'a> Analysis<'a> {
                 ExprKind::In { coll, item, .. } => {
                     ok.extend(read_at(coll, whole_reads));
                     ok.extend(chain_root(item, name));
+                }
+                // `when (c) { in vowels -> .. }` looks in the collection, as `c in vowels` does
+                ExprKind::When { arms, .. } => {
+                    for c in arms.iter().flat_map(|a| &a.conds) {
+                        if let WhenCond::In { expr, .. } = c {
+                            ok.extend(read_at(expr, whole_reads));
+                        }
+                    }
                 }
                 ExprKind::Index(a, _) => {
                     ok.extend(read_at(a, whole_reads));

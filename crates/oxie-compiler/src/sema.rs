@@ -277,8 +277,16 @@ impl Crate {
         }
         self.enums.get(name)
     }
+    /// The path `import shapes.Circle as C` gives `C` in `module`, for a name imported under
+    /// another name.
+    fn alias_path(&self, name: &str, module: &[String]) -> Option<&Vec<String>> {
+        self.imports.get(&(module.to_vec(), name.to_string())).filter(|p| p.last().is_some_and(|l| l != name))
+    }
     /// The class `name` means when written in `module` (see `type_key_in`).
     pub fn class_in(&self, name: &str, module: &[String]) -> Option<&ClassInfo> {
+        if let Some(path) = self.alias_path(name, module) {
+            return self.class_at(path, module);
+        }
         if self.imported_from_outside(name, module) {
             return None;
         }
@@ -288,6 +296,9 @@ impl Crate {
         self.classes.get(&self.type_key_in(name, module)?)
     }
     pub fn enum_in(&self, name: &str, module: &[String]) -> Option<&EnumInfo> {
+        if let Some(path) = self.alias_path(name, module) {
+            return self.enum_at(path, module);
+        }
         if self.imported_from_outside(name, module) {
             return None;
         }
@@ -807,7 +818,7 @@ pub fn by_value_receivers(files: &mut [(&[String], &mut File)], k: &Crate) -> bo
                     }
                     changed |= go(&mut t.members, module, k);
                 }
-                ItemKind::Mod { name, items } => {
+                ItemKind::Mod { name, items } | ItemKind::Object { name, items } => {
                     let inner: Vec<String> = module.iter().cloned().chain([name.clone()]).collect();
                     changed |= go(items, &inner, k);
                 }
@@ -843,7 +854,7 @@ pub fn ext_receivers(files: &mut [(&[String], &mut File)], k: &Crate) {
                         f.mods.is_mut = true;
                     }
                 }
-                ItemKind::Mod { name, items } => {
+                ItemKind::Mod { name, items } | ItemKind::Object { name, items } => {
                     let inner: Vec<String> = module.iter().cloned().chain([name.clone()]).collect();
                     go(items, &inner, k);
                 }
@@ -1004,7 +1015,7 @@ fn compute_derives(k: &mut Crate, units: &[SourceUnit]) {
                     out.push((k.decl_key(module, &t.name), t, &it.attrs));
                     gather(k, module, &t.members, out);
                 }
-                ItemKind::Mod { name, items } => {
+                ItemKind::Mod { name, items } | ItemKind::Object { name, items } => {
                     let mut m = module.to_vec();
                     m.push(name.clone());
                     gather(k, &m, items, out);
@@ -1104,7 +1115,7 @@ fn collect_traits(k: &mut Crate, module: &[String], items: &[Item]) {
                 let forward = forwardable(t);
                 insert_unique(&mut k.traits, &mut k.ambiguous, t.name.clone(), TraitInfo { name: t.name.clone(), module: module.to_vec(), methods, assoc_types: assoc, supertraits, forward, generics });
             }
-            ItemKind::Mod { name, items } => {
+            ItemKind::Mod { name, items } | ItemKind::Object { name, items } => {
                 let mut m = module.to_vec();
                 m.push(name.clone());
                 collect_traits(k, &m, items);
@@ -1586,8 +1597,12 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
             ItemKind::Const(c) | ItemKind::Static(c) => {
                 k.module_values.insert((module.to_vec(), c.name.clone()));
             }
-            ItemKind::Object { name, .. } => {
+            // an object is a module of its own (`Shapes.Circle(1.0)`, `Defaults.Colors.BG`)
+            ItemKind::Object { name, items } => {
                 k.module_values.insert((module.to_vec(), name.clone()));
+                let mut m = module.to_vec();
+                m.push(name.clone());
+                collect_items(k, &m, items);
             }
             _ => {}
         }
@@ -1706,7 +1721,7 @@ fn collect_impls(k: &mut Crate, module: &[String], items: &[Item]) {
                     }
                 }
             }
-            ItemKind::Mod { name, items } => {
+            ItemKind::Mod { name, items } | ItemKind::Object { name, items } => {
                 let mut m = module.to_vec();
                 m.push(name.clone());
                 collect_impls(k, &m, items);
@@ -1809,7 +1824,7 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                         }
                     }
                 }
-                ItemKind::Mod { name, items } => {
+                ItemKind::Mod { name, items } | ItemKind::Object { name, items } => {
                     let mut m = module.to_vec();
                     m.push(name.clone());
                     gather(k, &m, items, out, supers);

@@ -1,0 +1,13 @@
+// Constants are computed while compiling: what they can't hold is explained.
+val GREETING: String = "hi"
+// error: 2: `GREETING` can't be a `String` computed while compiling
+val JOINED: String = "a" + "b"
+// error: 4: joining text builds a `String` while the program runs
+val NAMES: [String] = ["a", "b"]
+// error: 6: a list literal for a `[T]` makes a `vec!`
+val EMPTY: [String] = []
+// not: 8: vec!
+
+fun main() {
+    println("$GREETING $JOINED ${NAMES.len()} ${EMPTY.len()}")
+}

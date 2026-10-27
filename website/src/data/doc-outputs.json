@@ -196,6 +196,11 @@
   },
   {
     "file": "docs/reference.md",
+    "output": "5\nkey enter\nclick at 3,4\n",
+    "source": "enum Event { Click(x: i32, y: i32), Key(name: String), Quit }\n\nfun describe(e: &Event): String = when (e) {\n    is Event.Click -> \"click at ${e.x},${e.y}\"\n    is Event.Key -> \"key ${e.name}\"\n    else -> \"quit\"\n}\n\nfun main() {\n    val e = Event.Key(\"enter\".to_string())\n    if (e is Event.Key) println(e.name.len())\n    println(describe(&e))\n    println(describe(&Event.Click(3, 4)))\n}\n"
+  },
+  {
+    "file": "docs/reference.md",
     "output": "Ada Lovelace, AdaLovelace, startLovelace, Ada Lovelace\n",
     "source": "fun main() {\n    val first: String = \"Ada\"\n    val last: String = \"Lovelace\"\n    val full = first + \" \" + last      // format!(\"{} {}\", first, last)\n    val joined = first + last          // format!(\"{}{}\", first, last)\n    var log: String = \"start\"\n    log += last                        // log += &last\n    println(\"$full, $joined, $log, $first $last\")\n}\n"
   },

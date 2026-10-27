@@ -1,0 +1,11 @@
+// A class imported under another name, and a module imported into the crate root.
+
+import shapes.Circle as C
+import shapes.{Square as Sq, unit_circle}
+import util
+
+fun main() {
+    val c = C(2.0)
+    println("${c.r} ${Sq(3.0).area()} ${unit_circle().r}")
+    println(util.twice(21))
+}

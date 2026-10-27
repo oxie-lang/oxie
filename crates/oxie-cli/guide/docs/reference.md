@@ -74,6 +74,9 @@ fun short(x: i32) = x * 2
   one that gives a value is an error that offers its type, never a value silently dropped.
 * **Block value**: the last expression of a block is its value. In a function returning `()`
   the last expression is a statement.
+* **Local functions**: a `fun` inside a function body is a nested Rust `fn`; one that uses the
+  variables around it, a field or `this` (and isn't generic, recursive or throwing) is a
+  closure instead (`let adjust = |x: i32| -> i32 { x + self.base };`), called the same way.
 * **Default arguments** and **named arguments** (`f(x = 1)`) work for functions, methods and
   constructors declared in Oxie; defaults are filled in at the call site, and one may use the
   parameters before it (`h: i32 = w`). A default means what it means where it is declared:
@@ -354,7 +357,8 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
 * `context(cx: &mut App) class ...` gives each method the contexts it uses — see
   [Context parameters](#context-parameters).
 * `object Name { ... }` is a namespace (a Rust module) of constants and functions:
-  `Name.function()`.
+  `Name.function()`. Objects, classes and enums declared in it are reached through it too:
+  `Defaults.Colors.BG`, `Shapes.Circle(1.0)`.
 * Constants in a class body, its `companion object` or an `impl` block are used without
   `Self.` inside the class (`w * SIZE` → `w * Self::SIZE`).
 * Classes, enums and interfaces declared inside a class body are placed next to the class;
@@ -431,6 +435,10 @@ enum Shape : Display {
   and a bare `Circle` matches any `Circle`. A bare case name is a case of the matched value's
   enum when Oxie knows its type, even if another enum or a class has that name. A capitalized
   name that matches nothing is an error: Oxie has no type tests (`is Int`), so match on an enum.
+* After `is Shape.Circle` (a `when` arm on a variable, or `if (s is Shape.Circle)`), `s.radius`
+  reads the field of that case, as Kotlin's smart cast does: the arm or branch binds the fields
+  it reads (`Shape::Circle { radius, .. }`), by reference when the variable is borrowed or the
+  field isn't `Copy`.
 * `enum class Color { ... }` (Kotlin) is accepted as `enum`.
 * Enums derive `Debug`, `Clone`, `PartialEq` (and `Copy`, `Eq`, `Hash` when possible).
 * `error enum` — see [Errors](#errors).
@@ -444,6 +452,23 @@ enum Shape : Display {
   `match *x` for an owned one), and an owned boxed value where its value is expected is taken
   out (`simplify(*y)`). Lists, maps and boxes already hold their elements on the heap, and a
   `shared class` is a handle, so those need no box.
+
+```oxie
+enum Event { Click(x: i32, y: i32), Key(name: String), Quit }
+
+fun describe(e: &Event): String = when (e) {
+    is Event.Click -> "click at ${e.x},${e.y}"
+    is Event.Key -> "key ${e.name}"
+    else -> "quit"
+}
+
+fun main() {
+    val e = Event.Key("enter".to_string())
+    if (e is Event.Key) println(e.name.len())
+    println(describe(&e))
+    println(describe(&Event.Click(3, 4)))
+}
+```
 
 ## Interfaces and impl blocks
 
@@ -499,7 +524,9 @@ applies to every type that implements it: `impl<T: Shape + ?Sized> ShapeDescribe
 | `shl`, `shr`, `and`, `or`, `xor` | `Shl`, `Shr`, `BitAnd`, `BitOr`, `BitXor` | | | |
 
 Rust names (`add`, `sub`, `mul`, `neg`, `add_assign`, ...) work as well. The parameter type is
-the right-hand side (`impl Mul<f64> for Vec2` for `operator fun times(k: f64)`).
+the right-hand side (`impl Mul<f64> for Vec2` for `operator fun times(k: f64)`); a reference
+parameter (`operator fun times(o: &Matrix)`) lends the right side: `a * b` is `a * &b`. As in
+Rust, the operator takes the left side by value.
 
 ## Statements
 
