@@ -200,6 +200,13 @@ Those are fixed below; the silent ones first.
   values that need a conversion, `fun f() = expr` bodies over text iterators, array literals'
   `map`, `if (val Case(n) = xs.last_mut())`, and `.context()` in a function that throws
   `anyhow::Error` all failed to build.
+* Type inference looked at a call's receiver several times, so a long method chain (a UI builder)
+  took exponential time; `oxie from-rust` hung on such code. Each receiver is inferred once now.
+* A `filter_map` or `find_map` lambda whose body already gives an optional (of a type Oxie doesn't
+  know) was wrapped in `Some`; a loop variable named like its list made the loop borrow the list;
+  `+ '_` was added beside a `&'static` parameter; a class constant named `None` took the
+  optional's `None` arm; cases imported with a glob (`import super::Slot::*`) got a qualified
+  path; a call's result was lent to a reference field (`Box.leak(..)`).
 * Messages say what to write instead for Kotlin's `vararg`, `indices`, `toDouble()` on a number,
   `componentN`, `List`/`Map`/`Set`, `maxOf`, `require`, `compareTo`/`get`/`set` operators,
   `Box(x)`, a `String` constant, a growing `val` array, `()` from `sort()`, numbers of two types,
