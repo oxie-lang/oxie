@@ -69,7 +69,9 @@ fun main() {
     static var CALLS: u32 = 0
     unsafe { CALLS += 1 }
     val p = Pair.new(3)
-    val c = Counter.make(5)
+    // each platform calls the `make` it has
+    @cfg(not(windows)) val c = Counter.make(5)
+    @cfg(windows) val c = Counter.make(2, 3)
     val wrap = std.panic.AssertUnwindSafe { 7 }
     println("${p.a} ${p.b} ${c.twice()} ${Token(1)} ${Unit(()).0:?}")
     println("${name(&Content.Str("a"))} ${name(&Content.Num(2))} ${size(3)} ${size(9)}")

@@ -20,5 +20,6 @@ fun word(): &'static str {
 fun main() {
     val fd = open()
     @cfg(unix) println("${fd.raw}")
+    @cfg(not(unix)) println("${fd.handle}")
     println("${platform().is_ok() || cfg!(not(unix))} ${word()}")
 }
