@@ -1,17 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-10-27
 
 `oxie from-rust` now translates all the Rust it was tested on into Oxie: in 82 crates with
 789,000 lines (serde, syn, clap, futures, rand, regex-syntax, the Kuana editor, Oxie's own
 compiler, ...) it keeps no item or expression in a `rust { }` block, where 0.4.1 kept 1,510 of
 them (58,700 lines). Oxie gained the Rust forms that needed, and fixes for what translating that
-code turned up. Translated whole, the Kuana editor (137 files) builds and passes 436 of its 437
-tests, as before, now without any Rust left in it.
+code turned up. Translated whole, the Kuana editor (137 files) builds and passes 442 of its 443
+tests without any Rust left in it (the other one checks which file a panic names).
 
 A round of bug hunting with several hundred new programs found code that compiled to Rust doing
 something else than the Oxie said, and much valid Oxie that generated Rust that doesn't build.
 Those are fixed below; the silent ones first.
+
+### Upgrading
+
+* Set `oxie-build = "0.5.0"` in the `[build-dependencies]` of each project (`cargo update`
+  doesn't move from 0.4 to 0.5). `oxie` warns when a project builds with another `oxie-build`.
+* The first group of changes below makes code do what the Oxie says where 0.4 did something
+  else: default arguments, the order of named arguments, `when` arms that name a constant or a
+  variable, range bounds, `copy`, loops that change their elements, and a few results. Code that
+  relied on the old behaviour runs differently; read them before upgrading.
+* A lambda Oxie makes `move` that uses a variable changed after it is now an error; the message
+  says to take the value with a capture list. The other forms 0.5 adds were errors in 0.4.
 
 ### Changes
 

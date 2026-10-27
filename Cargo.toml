@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "examples/*", "bench"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/oxie-lang/oxie"
@@ -12,8 +12,8 @@ rust-version = "1.82"
 
 # The crates published to crates.io; a path for building here, a version for crates.io.
 [workspace.dependencies]
-oxie-compiler = { path = "crates/oxie-compiler", version = "0.4.1" }
-oxie-from-rust = { path = "crates/oxie-from-rust", version = "0.4.1" }
+oxie-compiler = { path = "crates/oxie-compiler", version = "0.5.0" }
+oxie-from-rust = { path = "crates/oxie-from-rust", version = "0.5.0" }
 
 [profile.release]
 debug = false
