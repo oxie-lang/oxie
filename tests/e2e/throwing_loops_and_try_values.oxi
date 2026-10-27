@@ -1,0 +1,81 @@
+// `for_each` lambdas that throw, `try`/`catch` values, and more optional values.
+
+import std.collections.HashSet
+
+fun check(x: i32) throws {
+    if (x < 0) throw "negative: $x"
+}
+
+// a `for_each` whose lambda throws is the loop it stands for: the error leaves the function
+fun all_ok(xs: [i32]) throws {
+    xs.for_each { check(*it) }
+    xs.iter().filter { **it > 1 }.for_each { n -> if (*n > 5) throw "too big: $n" }
+    println("ok: $xs")
+}
+
+fun first_number(x: String?): i32 {
+    if (x != null && val n = x.trim().parse<i32>().ok()) return n
+    0
+}
+
+fun status(ok: bool): String {
+    try {
+        if (!ok) throw "bad input"
+        "fine"
+    } catch (e) {
+        "caught: $e"
+    }
+}
+
+fun label(ok: bool): String throws {
+    val l: String = try {
+        if (!ok) throw "no"
+        "yes"
+    } catch (e) {
+        "no: $e"
+    }
+    l
+}
+
+fun name_or(n: String?, d: &str): String = n ?: d
+
+fun shown(n: &String?, d: &str): &str = n ?: d
+
+fun main() {
+    println("${all_ok([1, 2]):?} ${all_ok([1, -2]):?} ${all_ok([1, 9]):?}")
+    try {
+        [3, -4].iter().for_each { check(*it) }
+        println("not here")
+    } catch (e: AnyError) {
+        println("caught: $e")
+    }
+    var total = 0
+    [1, 2, 3].iter().for_each { total += *it }
+    println(total)
+
+    println("${first_number(" 42 ".to_string())} ${first_number("x".to_string())} ${first_number(null)}")
+    println("${status(true)}, ${status(false)}, ${label(true):?}, ${label(false):?}")
+
+    val fallback = "x".repeat(3)
+    val nick: String? = null
+    println("${name_or(null, "anon")} ${name_or("ada".to_string(), &fallback)} ${shown(&nick, &fallback)}")
+
+    // a statement `when` on an optional number needs no `else`
+    val x: i32? = 3
+    when (x) {
+        1 -> println("one")
+        3 -> println("three")
+    }
+    println(x?.let { "present" } ?: "absent")
+
+    var log: [String]? = vec[]
+    log?.push("started")
+    var seen: HashSet<String>? = HashSet()
+    seen?.insert("a")
+    println("${log:?} ${seen:?}")
+
+    val xs: [i32] = [1, 5, 2, 8]
+    val idx = xs.iter().enumerate().find { *it.1 > 4 }?.0
+    val long = ["x", "yyy"].iter().map { it.len() }.find { *it > 1 }
+    println("$idx $long")
+}

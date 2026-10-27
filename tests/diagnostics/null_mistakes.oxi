@@ -1,0 +1,42 @@
+// Using a `T?` as if it were a `T`: each message says the value may be null and how to handle it.
+
+data class User(name: String, nick: String?)
+
+fun greet(name: &str): String = "hi $name"
+
+fun find(id: i32): User? = if (id == 1) User("ada", null) else null
+
+fun age_of(id: i32): u32 {
+    if (id == 1) return 36
+    return null
+    // error: 11: `null` isn't a `u32`: only an optional type (`u32?`) can be null
+    // error: 11: fix: make the result `u32?`: `fun age_of(id: i32): u32? {`
+}
+
+fun get(n: i32): i32 throws {
+    if (n == 0) throw "zero"
+    n
+}
+
+fun show(n: i32) throws {
+    println(get(n))
+    // error: 22: `Result<i32, AnyError>` has no text form to print
+    // error: 22: fix: pass the error on (`?`): `println(get(n)?)`
+}
+
+fun main() {
+    val u = find(1)
+    println(u.name)
+    // error: 29: `u` may be null (`User?`), so it has no field `name` until it is unwrapped
+    // error: 29: fix: read it with `?.`: `println(u?.name)`
+    val n: i32? = 5
+    println(n + 1)
+    // error: 33: this value may be null (`i32?`), so it can't be used in arithmetic or comparisons
+    println(greet(u!!.nick))
+    // error: 35: `u!!.nick` may be null (`String?`), but a `&str` is expected here
+    val b = Box(5)
+    // error: 37: `Box(...)` doesn't make a `Box`: it is a type, not a function
+    // error: 37: fix: use `Box.new(...)`: `val b = Box.new(5)`
+    println("$b ${age_of(1)}")
+    show(1)
+}

@@ -108,6 +108,14 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
             d.notes.retain(|n| !n.contains("does not implement"));
             d.notes.push(help("unwrap it first: inside a function that `throws`, `?` passes the error on (`total()? + 1`); elsewhere give a default with `?:` or handle both cases with `when (val r = ...) { Ok(v) -> ...; Err(e) -> ... }`."));
         }
+        // `n + 1` with an `i32?`
+        "E0369" if names.iter().take(2).any(|t| t.starts_with("Option<")) => {
+            let opt = names.iter().take(2).find(|t| t.starts_with("Option<")).cloned().unwrap_or_default();
+            let inner = opt.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')).unwrap_or("T").to_string();
+            rewrite(d, format!("this value may be null (`{}?`), so it can't be used in arithmetic or comparisons", inner));
+            d.notes.retain(|n| !n.contains("does not implement") && !n.contains("note: an implementation of"));
+            d.notes.push(help("unwrap it first: give a default with `?:` (`(n ?: 0) + 1`), check it with `if (n != null)` (which unwraps `n` in the block), or use `n!!`, which fails when it is null."));
+        }
         "E0609" => no_field(d, &lines, &first),
         "E0004" => {
             let missing = d.message.strip_prefix("non-exhaustive patterns: ").map(oxie_terms).unwrap_or_default();
@@ -1266,6 +1274,21 @@ fn no_field(d: &mut MappedDiag, lines: &[&str], field: &str) {
         d.end_line = d.line;
         d.end_col = (i + dot.len()) as u32;
     }
+    // a field of a `T?`: through `?.`, or after unwrapping it
+    if let Some(ty) = between(&d.message, "on type `Option<", ">`") {
+        let recv: String = at.map(|i| chars[..i].iter().rev().take_while(|c| is_ident_char(**c) || **c == '.').collect::<Vec<_>>().into_iter().rev().collect()).unwrap_or_default();
+        let recv = recv.trim_start_matches('.').to_string();
+        if !recv.is_empty() {
+            rewrite(d, format!("`{}` may be null (`{}?`), so it has no field `{}` until it is unwrapped", recv, ty, field));
+            d.label = Some(format!("`{}` may be null here", recv));
+            d.notes.retain(|n| !n.contains("fields has a field of the same name") && !n.contains("available field"));
+            d.notes.push(help(&format!("`{}?.{}` reads it when there is a value (and gives `null` otherwise), `{}!!.{}` fails when there is none, and `if ({} != null)` unwraps `{}` in its block.", recv, field, recv, field, recv, recv)));
+            if let Some(i) = at {
+                d.fixes.push(Fix { title: "read it with `?.`".into(), edits: vec![edit(d.line, i as u32, i as u32, "?")] });
+            }
+            return;
+        }
+    }
     if matches!(field, "size" | "length" | "count") {
         d.notes.retain(|n| !n.contains("available field"));
         d.notes.push(help(&format!("the number of elements is the method `len()`, not a field `{}`.", field)));
@@ -1950,6 +1973,7 @@ fn mismatched(d: &mut MappedDiag, src: &str, lines: &[&str]) {
         elvis_borrowed_text(d, lines);
     }
     expr_body_value(d, lines);
+    null_mismatch(d, lines);
     // `n ?: "none"` with an `i32?`: the default goes to a runtime helper, which rustc mentions
     if d.rust_message.is_none() {
         if let Some((value, _)) = elvis_default_at(src, d.line, d.col) {
@@ -1957,6 +1981,39 @@ fn mismatched(d: &mut MappedDiag, src: &str, lines: &[&str]) {
             d.notes.retain(|n| !n.contains("the return type of this call") && !n.contains("method defined here") && !n.contains("arguments to this"));
             d.notes.push(help(&format!("`{} ?: default` gives the value in `{}`, or the default when there is none, so both need the same type.", value, value)));
         }
+    }
+}
+
+/// `null` where a type that can't be null is expected (`return null` from a `fun f(): u32`), and
+/// a `T?` where a `T` is (`greet(u.nick)` with `nick: String?`).
+fn null_mismatch(d: &mut MappedDiag, lines: &[&str]) {
+    let Some(label) = d.label.clone() else { return };
+    let (Some(expected), Some(found)) = (between(&label, "expected `", "`"), between(&label, "found `", "`")) else { return };
+    let line = lines.get(d.line as usize).copied().unwrap_or("");
+    let chars: Vec<char> = line.chars().collect();
+    // the value at the span: a name, field chain or `x!!.y` (the span may reach past it)
+    let text: String = chars.iter().skip(d.col as usize).take_while(|c| is_ident_char(**c) || matches!(c, '.' | '!')).collect();
+    let text = text.trim_end_matches('.').to_string();
+    let tidy = |n: &mut Vec<String>| n.retain(|n| !n.contains("expected type `") && !n.contains("found enum `Option") && !n.contains("expected reference") && !n.contains("found reference") && !n.contains("try wrapping the expression in `Some`"));
+    if text == "null" && found == "_?" && !expected.ends_with('?') {
+        rewrite(d, format!("`null` isn't a `{}`: only an optional type (`{}?`) can be null", expected, expected));
+        tidy(&mut d.notes);
+        // `return null` from a function whose result isn't optional: declare it `T?`
+        let ret = enclosing_fun(lines, d.line).and_then(|(l, t)| t.rfind(&format!("): {}", expected)).map(|i| (l, t, i)));
+        if let Some((l, t, i)) = ret {
+            let end = i + 3 + expected.len();
+            if !t[end..].starts_with('?') && !t[end..].starts_with(|c: char| is_ident_char(c) || c == '<') {
+                d.notes.push(help(&format!("declare the result optional (`{}?`) so the function can return `null`; its other values become `Some` by themselves.", expected)));
+                let col = t[..end].chars().count() as u32;
+                d.fixes.push(Fix { title: format!("make the result `{}?`", expected), edits: vec![edit(l, col, col, "?")] });
+            }
+        }
+        return;
+    }
+    if found.ends_with('?') && !expected.ends_with('?') && !text.is_empty() && found.trim_start_matches('&').trim_end_matches('?') != "_" {
+        rewrite(d, format!("`{}` may be null (`{}`), but a `{}` is expected here", text, found.trim_start_matches('&'), expected));
+        tidy(&mut d.notes);
+        d.notes.push(help(&format!("give a default with `?:` (`{} ?: ...`), check it first with `if (val v = {})`, or use `{}!!`, which fails when it is null.", text, text, text)));
     }
 }
 

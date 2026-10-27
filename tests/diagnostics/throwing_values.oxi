@@ -1,4 +1,4 @@
-// A throwing call's result used as a number, and `?` inside a lambda, are explained.
+// A throwing call's result used as a number, and `?` inside a `map` lambda, are explained.
 
 fun value(x: i32): i32 throws {
     if (x < 0) throw "negative"
@@ -10,7 +10,7 @@ fun next(x: i32): i32 throws = value(x) + 1
 
 fun sum(xs: &[&str]): i32 throws {
     var t = 0
-    xs.iter().for_each { val n: i32 = it.parse()?; t += n }
+    t += xs.iter().map { val n: i32 = it.parse()?; n }.sum<i32>()
     // error: 13: `?` inside a lambda passes the error out of the lambda
     t
 }

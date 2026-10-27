@@ -1182,6 +1182,9 @@ impl<'a> Lowerer<'a> {
         if self.narrowing_exit(e) {
             return true;
         }
+        if let Some(l) = self.throwing_for_each(e) {
+            return self.stmt_expr_here(&l);
+        }
         match &e.kind {
             // `a?.b = v` is an `if let`
             ExprKind::Assign(_, target, _) if has_safe_link(target) && matches!(self.resolve_question_dots(target).kind, ExprKind::Field { safe: true, .. }) => {
@@ -1331,6 +1334,8 @@ impl<'a> Lowerer<'a> {
             ExprKind::If { cond, then, else_ } if else_.is_some() => self.if_expr(cond, then, else_.as_deref(), Some(t)),
             ExprKind::When { subject, binding, arms, rust_match } => self.when_with_binding(subject.as_deref(), binding.as_ref(), arms, *rust_match, Some(t), e.span),
             ExprKind::Block(b) => self.block_value(b, t),
+            // a value of the `try` part or of the `catch`
+            ExprKind::TryCatch { body, catch: Some(c) } if t.wrap.is_none() => self.try_catch(body, Some(c), Some(t)),
             // `run { .. }` is a block: its last expression is the value
             _ if self.run_body(e).is_some() => match &self.run_body(e).unwrap().kind {
                 ExprKind::Block(b) => self.block_value(b, t),
@@ -1388,7 +1393,10 @@ impl<'a> Lowerer<'a> {
         }
         // a block ending in a lambda (`{ [a] -> ... }`) for an `impl Fn` parameter stays unboxed
         let unboxed_fn = matches!(ty, Type::Fn { .. }) && !matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local);
-        if matches!(e.kind, ExprKind::If { .. } | ExprKind::When { .. } | ExprKind::Block(_) | ExprKind::LabeledBlock { .. }) && !matches!(&e.kind, ExprKind::If { else_: None, .. }) && !unboxed_fn {
+        if matches!(e.kind, ExprKind::If { .. } | ExprKind::When { .. } | ExprKind::Block(_) | ExprKind::LabeledBlock { .. } | ExprKind::TryCatch { catch: Some(_), .. })
+            && !matches!(&e.kind, ExprKind::If { else_: None, .. })
+            && !unboxed_fn
+        {
             self.tail(e, &Target::ty(ty));
             return;
         }
@@ -3241,6 +3249,52 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `xs.for_each { check(it) }` whose lambda throws, where errors pass on: the `for` loop it
+    /// stands for, so the error leaves the function (Kotlin's `forEach` is inline). Not for a
+    /// lambda that leaves some other way (`return` leaves only the lambda).
+    fn throwing_for_each(&self, e: &Expr) -> Option<Expr> {
+        let ExprKind::MethodCall { recv, name, args, safe: false, generics: None } = &e.kind else { return None };
+        if name != "for_each" || args.len() != 1 || args[0].name.is_some() || !self.passes_errors_on() {
+            return None;
+        }
+        let ExprKind::Lambda { params, body, is_async: false, .. } = &args[0].value.kind else { return None };
+        let pat = match params.as_slice() {
+            [] => Pat::Ident { name: "it".into(), by_ref: false, mutable: false, sub: None, span: e.span },
+            [p] if p.ty.is_none() => p.pat.clone(),
+            _ => return None,
+        };
+        let block = match &body.kind {
+            ExprKind::Block(b) => b.clone(),
+            _ => Block { stmts: vec![Stmt::Expr { expr: (**body).clone(), semi: !body.is_block_like() }], span: body.span },
+        };
+        let (mut fails, mut leaves) = (false, false);
+        visit::walk_block(&block, &mut |x| match &x.kind {
+            ExprKind::Lambda { .. } => false,
+            ExprKind::Throw(_) | ExprKind::Try(_) => {
+                fails = true;
+                true
+            }
+            ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue(_) => {
+                leaves = true;
+                false
+            }
+            _ => true,
+        });
+        fails |= block.stmts.iter().any(|s| matches!(s, Stmt::Expr { expr, .. } if self.is_throwing_call(expr)));
+        if !fails || leaves {
+            return None;
+        }
+        // an iterator as it is, a list by its elements (`&T`, as its `for_each` passes them)
+        let iter = if crate::infer::is_iterator_chain(recv) {
+            (**recv).clone()
+        } else if self.infer_type(recv).as_ref().is_some_and(|t| crate::infer::list_elem(t).is_some()) {
+            Expr::new(ExprKind::MethodCall { recv: recv.clone(), name: "iter".into(), generics: None, args: Vec::new(), safe: false }, recv.span)
+        } else {
+            return None;
+        };
+        Some(Expr::new(ExprKind::For { label: None, pat, iter: Box::new(iter), body: block }, e.span))
+    }
+
     /// A local bound to a reference to a `Copy` value of type `t` (`&mut Point` for `Point`).
     fn copy_ref_local(&self, e: &Expr, t: &Type) -> bool {
         let Some(n) = e.ident() else { return false };
@@ -3721,16 +3775,36 @@ impl<'a> Lowerer<'a> {
     /// bound as it is, one the branch changes through `&mut x`. Returns the new condition and
     /// the types of the unwrapped names.
     fn narrow_cond(&self, cond: &Cond, then: &Block) -> (Option<Cond>, Vec<(String, Type)>) {
-        let Cond::Expr(e) = cond else { return (None, Vec::new()) };
-        let mut parts = Vec::new();
-        and_operands(e, &mut parts);
+        // the operands of `&&`, also between the `val` parts of a let chain
+        // (`x != null && val n = x.parse<i32>().ok()`)
+        let mut parts: Vec<Cond> = Vec::new();
+        let mut flat = |c: &Cond| match c {
+            Cond::Expr(e) => {
+                let mut ops = Vec::new();
+                and_operands(e, &mut ops);
+                parts.extend(ops.into_iter().map(|o| Cond::Expr(o.clone())));
+            }
+            c => parts.push(c.clone()),
+        };
+        match cond {
+            Cond::Chain(cs) => cs.iter().for_each(&mut flat),
+            Cond::Expr(_) => flat(cond),
+            Cond::Let { .. } => return (None, Vec::new()),
+        }
         let mut typed = Vec::new();
         let mut out = Vec::new();
-        for (i, &p) in parts.iter().enumerate() {
+        for (i, part) in parts.iter().enumerate() {
+            let Cond::Expr(p) = part else {
+                out.push(part.clone());
+                continue;
+            };
             // a branch (and rest of the condition) that doesn't use `x` keeps the check (`x.is_some()`)
             let used = |x: &&str| {
                 let mut names = Vec::new();
-                parts[i + 1..].iter().for_each(|c| visit::idents_in(c, &mut names));
+                parts[i + 1..].iter().for_each(|c| match c {
+                    Cond::Expr(e) | Cond::Let { expr: e, .. } => visit::idents_in(e, &mut names),
+                    Cond::Chain(_) => {}
+                });
                 names.iter().any(|n| n == x) || visit::stmts_use(&then.stmts, x)
             };
             match self.null_check(p, BinOp::Ne).filter(used).and_then(|x| self.narrowable(x, then).map(|t| (x, t))) {
@@ -5896,6 +5970,21 @@ impl<'a> Lowerer<'a> {
                     let gt = self.generic_args_text(g);
                     self.e.w(&format!("::{}", gt));
                 }
+                // `log?.push("started")` on a `[String]?`: the text converts, as without `?.`
+                if let Some(types) = recv.filter(|_| resolved.is_none() && generics.is_none()).and_then(|r| self.element_args(r, name, args)) {
+                    self.e.w("(");
+                    for (i, (a, t)) in args.iter().zip(types).enumerate() {
+                        if i > 0 {
+                            self.e.w(", ");
+                        }
+                        match t {
+                            Some(t) => self.coerce(&a.value, &t, TyPos::Generic),
+                            None => self.expr(&a.value, P_LOWEST),
+                        }
+                    }
+                    self.e.w(")");
+                    return;
+                }
                 match resolved {
                     Some((params, home)) => {
                         self.home = Some(home);
@@ -5933,6 +6022,23 @@ impl<'a> Lowerer<'a> {
             ExprKind::Call { callee, .. } => {
                 let ret = callee.ident().and_then(|n| self.fun_info(n)).and_then(|f| f.ret.clone());
                 matches!(ret, Some(Type::Option(inner)) if matches!(*inner, Type::Ref { .. }))
+            }
+            // what an iterator gives: references for `iter()` and the adapters that keep its
+            // items, owned values after `enumerate()`, `map { .. }`, `chars()`, ...
+            ExprKind::MethodCall { recv, name, .. }
+                if matches!(name.as_str(), "find" | "next" | "next_back" | "last" | "nth" | "max" | "min" | "max_by_key" | "min_by_key" | "max_by" | "min_by") && crate::infer::is_iterator_chain(recv) =>
+            {
+                fn items_borrowed(e: &Expr) -> bool {
+                    match &e.kind {
+                        ExprKind::MethodCall { recv, name, .. } => match name.as_str() {
+                            "iter" | "iter_mut" | "keys" | "values" | "values_mut" => true,
+                            "filter" | "rev" | "skip" | "take" | "step_by" | "peekable" | "skip_while" | "take_while" | "chain" | "inspect" => items_borrowed(recv),
+                            _ => false,
+                        },
+                        _ => false,
+                    }
+                }
+                items_borrowed(recv)
             }
             // a method declared to return `&T?` (`fun leader(): &Player?`)
             ExprKind::MethodCall { name, .. } => match self.link_type(e).and_then(|t| option_inner(&t)) {
@@ -6013,7 +6119,13 @@ impl<'a> Lowerer<'a> {
             };
             let flatten = known.unwrap_or_else(|| !last || self.segment_yields_option(seg));
             let method = if flatten { "and_then" } else { "map" };
-            if let Some(lam) = lam {
+            if let Some(mut lam) = lam {
+                // `x?.let { "present" }` ignores the value, which Rust's closure must still take
+                if let ExprKind::Lambda { params, body, .. } = &mut lam.kind {
+                    if params.is_empty() && !visit::uses_it(body) {
+                        params.push(LambdaParam { pat: Pat::Wild, ty: None });
+                    }
+                }
                 self.e.w(&format!(".{}(", method));
                 self.lambda(&lam, None, None);
                 self.e.w(")");
@@ -7078,7 +7190,12 @@ impl<'a> Lowerer<'a> {
                             .iter()
                             .map(|c| match c {
                                 WhenCond::Pat(p) => {
-                                    if matches!(p, Pat::Lit(_) | Pat::Range { .. }) {
+                                    // also the value of an optional subject (`Some(3)` for `3 ->`)
+                                    let value = match p {
+                                        Pat::TupleStruct { path, elems, .. } if path.last().is_some_and(|n| n == "Some") && elems.len() == 1 => &elems[0],
+                                        p => p,
+                                    };
+                                    if matches!(value, Pat::Lit(_) | Pat::Range { .. }) {
                                         has_literal = true;
                                     }
                                     if arm.guard.is_none() && matches!(p, Pat::Wild | Pat::Ident { sub: None, .. }) {
@@ -7315,12 +7432,13 @@ impl<'a> Lowerer<'a> {
         if ends_diverging(&body.stmts) {
             self.try_errs.insert(label.clone(), err_ty.clone());
         }
-        let emit_block = |l: &mut Self, value: bool| {
+        // `ty`: the type of the value the `try` part gives, when a `catch` unwraps it
+        let emit_block = |l: &mut Self, value: bool, ty: Option<Type>| {
             l.e.w(&format!("'{}: ", label));
             if let Some(f) = l.fns.last_mut() {
                 f.tries.push(label.clone());
             }
-            let t = Target { ty: None, wrap: Some(wrap.clone()), fn_result: false };
+            let t = Target { ty, wrap: Some(wrap.clone()), fn_result: false };
             if value {
                 l.block_value(body, &t);
             } else {
@@ -7345,15 +7463,15 @@ impl<'a> Lowerer<'a> {
             None => {
                 if mode.is_none() {
                     self.e.w("let _ = ");
-                    emit_block(self, false);
+                    emit_block(self, false, None);
                     self.e.w(";");
                 } else {
-                    emit_block(self, true);
+                    emit_block(self, true, None);
                 }
             }
             Some(c) => {
                 self.e.w("match ");
-                emit_block(self, mode.is_some());
+                emit_block(self, mode.is_some(), mode.and_then(|t| t.ty.clone()));
                 self.e.w(" {");
                 self.e.indent();
                 self.e.nl();

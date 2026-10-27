@@ -202,10 +202,10 @@ impl<'a, T: Copy> ElvisOr<T> for ::core::option::Option<&'a T> {
     }
 }
 
-impl ElvisOr<&'static str> for ::core::option::Option<String> {
+impl<'d> ElvisOr<&'d str> for ::core::option::Option<String> {
     type Out = String;
     #[inline(always)]
-    fn or_val(self, default: &'static str) -> String {
+    fn or_val(self, default: &'d str) -> String {
         match self {
             Some(v) => v,
             None => String::from(default),
@@ -213,10 +213,10 @@ impl ElvisOr<&'static str> for ::core::option::Option<String> {
     }
 }
 
-impl<'a> ElvisOr<&'static str> for ::core::option::Option<&'a String> {
+impl<'a> ElvisOr<&'a str> for ::core::option::Option<&'a String> {
     type Out = &'a str;
     #[inline(always)]
-    fn or_val(self, default: &'static str) -> &'a str {
+    fn or_val(self, default: &'a str) -> &'a str {
         match self {
             Some(v) => v.as_str(),
             None => default,
@@ -246,10 +246,10 @@ impl<'a, T: Copy, E> ElvisOr<T> for ::core::result::Result<&'a T, E> {
     }
 }
 
-impl<E> ElvisOr<&'static str> for ::core::result::Result<String, E> {
+impl<'d, E> ElvisOr<&'d str> for ::core::result::Result<String, E> {
     type Out = String;
     #[inline(always)]
-    fn or_val(self, default: &'static str) -> String {
+    fn or_val(self, default: &'d str) -> String {
         match self {
             Ok(v) => v,
             Err(_) => String::from(default),

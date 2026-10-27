@@ -19,7 +19,7 @@ fn static_str() -> Type {
 
 /// `Name<_, ..>` with `n` inferred arguments.
 /// The element type of a list, array or slice (`Type::Infer` when it isn't known).
-fn list_elem(t: &Type) -> Option<Type> {
+pub(crate) fn list_elem(t: &Type) -> Option<Type> {
     match t {
         Type::Ref { inner, .. } => list_elem(inner),
         Type::Slice(inner) | Type::Array(inner, _) => Some((**inner).clone()),
@@ -416,6 +416,10 @@ impl<'a> Lowerer<'a> {
                         _ if is_iterator_chain(recv) => Some(Type::Option(Box::new(text_item(recv).unwrap_or(Type::Infer)))),
                         _ => None,
                     },
+                    // an item of an iterator, if there is one
+                    "find" | "max_by_key" | "min_by_key" | "max_by" | "min_by" | "find_map" if is_iterator_chain(recv) => {
+                        Some(Type::Option(Box::new(if name == "find_map" { Type::Infer } else { text_item(recv).unwrap_or(Type::Infer) })))
+                    }
                     // an element of a list, if there is one
                     "find" | "find_last" | "first" | "last" | "get" | "max_by_key" | "min_by_key" => self
                         .infer_type(recv)
@@ -719,7 +723,7 @@ fn text_item(e: &Expr) -> Option<Type> {
     }
 }
 
-fn is_iterator_chain(e: &Expr) -> bool {
+pub(crate) fn is_iterator_chain(e: &Expr) -> bool {
     const STARTS: &[&str] = &["iter", "iter_mut", "into_iter", "chars", "char_indices", "bytes", "lines", "split", "split_whitespace", "keys", "values", "drain"];
     const ADAPTERS: &[&str] = &["map", "filter", "filter_map", "rev", "skip", "take", "step_by", "enumerate", "zip", "cloned", "copied", "flat_map", "take_while", "skip_while", "peekable", "chain"];
     match &e.kind {
