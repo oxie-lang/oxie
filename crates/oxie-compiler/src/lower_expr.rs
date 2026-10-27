@@ -3464,6 +3464,35 @@ impl<'a> Lowerer<'a> {
         Some(Expr::new(ExprKind::For { label: None, pat, iter: Box::new(iter), body: block }, e.span))
     }
 
+    /// `p` with each sub-pattern in a boxed field of an enum case (one that tests more than a
+    /// name: `Num(_)` in `Add(Num(_), x)`) replaced by a new name, given in `checks` with the
+    /// sub-pattern. None when such a sub-pattern binds names, which a guard can't.
+    fn unbox_pattern(&mut self, p: &Pat, checks: &mut Vec<(String, Pat)>) -> Option<Pat> {
+        let Pat::TupleStruct { path, elems, span } = p else { return Some(p.clone()) };
+        let last = path.last()?;
+        let en = if path.len() > 1 { self.enum_at(&path[..path.len() - 1]) } else { self.variant_enum(last) };
+        let Some(crate::sema::VariantShape::Tuple(types)) = en.and_then(|e| e.variant(last)).cloned() else { return Some(p.clone()) };
+        let mut out = Vec::new();
+        for (i, e) in elems.iter().enumerate() {
+            let boxed = types.get(i).is_some_and(|t| t.auto_boxed().is_some());
+            match e {
+                Pat::Wild | Pat::Ident { sub: None, .. } | Pat::Rest => out.push(e.clone()),
+                _ if boxed => {
+                    let mut names = Vec::new();
+                    e.bindings(&mut names);
+                    if !names.is_empty() {
+                        return None;
+                    }
+                    let b = self.fresh("b");
+                    checks.push((b.clone(), e.clone()));
+                    out.push(Pat::Ident { name: b, by_ref: false, mutable: false, sub: None, span: *span });
+                }
+                _ => out.push(self.unbox_pattern(e, checks)?),
+            }
+        }
+        Some(Pat::TupleStruct { path: path.clone(), elems: out, span: *span })
+    }
+
     /// Kotlin's smart cast on an enum case: after `is Shape.Circle`, `s.radius` reads the
     /// case's field. For a `pat` naming a case with named fields that `body` reads through the
     /// variable `subject`: the pattern binding those fields (by reference when `by_ref` and the
@@ -7554,6 +7583,26 @@ impl<'a> Lowerer<'a> {
             }
             None => arms,
         };
+        // `Add(Num(_), Num(_))` where `Add`'s fields are boxed (a recursive enum): Rust can't
+        // match through the box, so the arm binds it and checks the value in its guard
+        let arms: Vec<WhenArm> = arms
+            .into_iter()
+            .map(|mut a| {
+                if let [WhenCond::Pat(p)] = a.conds.as_slice() {
+                    let mut checks = Vec::new();
+                    if let Some(p2) = self.unbox_pattern(p, &mut checks).filter(|_| !checks.is_empty()) {
+                        let text = checks.iter().map(|(b, sub)| format!("matches!({}::Unbox::unboxed(&{}), {})", RT, b, self.pat(sub))).collect::<Vec<_>>().join(" && ");
+                        let check = Expr::new(ExprKind::Raw(text), a.span);
+                        a.guard = Some(match a.guard.take() {
+                            Some(g) => Expr::new(ExprKind::Binary(BinOp::And, Box::new(check), Box::new(Expr::new(ExprKind::Paren(Box::new(g.clone())), g.span))), a.span),
+                            None => check,
+                        });
+                        a.conds = vec![WhenCond::Pat(p2)];
+                    }
+                }
+                a
+            })
+            .collect();
         // `when (x) { target -> }` with a variable `target` compares with it, as in Kotlin (in
         // Rust the name would be a new binding that catches every value); an arm that uses the
         // name binds it, as Rust's `n if n > 9 -> n` does

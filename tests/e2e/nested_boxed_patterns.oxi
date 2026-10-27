@@ -1,0 +1,32 @@
+// Nested patterns through the fields Oxie boxes in a recursive enum.
+
+enum Expr {
+    Num(i64)
+    Add(Expr, Expr)
+    Neg(Expr)
+}
+
+fun is_constant_sum(e: &Expr): bool = when (e) {
+    Add(Num(_), Num(_)) -> true
+    else -> false
+}
+
+fun simplify(e: Expr): String = when (e) {
+    Neg(Neg(_)) -> "double negation"
+    Add(Num(_), x) -> "number plus ${describe(&x)}"
+    Add(_, _) if is_constant_sum(&Expr.Add(Expr.Num(1), Expr.Num(2))) -> "a sum"
+    else -> "other"
+}
+
+fun describe(e: &Expr): String = when (e) {
+    Num(n) -> "$n"
+    else -> "an expression"
+}
+
+fun main() {
+    println(is_constant_sum(&Expr.Add(Expr.Num(1), Expr.Num(2))))
+    println(is_constant_sum(&Expr.Add(Expr.Num(1), Expr.Neg(Expr.Num(2)))))
+    println(simplify(Expr.Neg(Expr.Neg(Expr.Num(3)))))
+    println(simplify(Expr.Add(Expr.Num(1), Expr.Num(5))))
+    println(simplify(Expr.Add(Expr.Neg(Expr.Num(1)), Expr.Num(5))))
+}

@@ -200,6 +200,8 @@ Those are fixed below; the silent ones first.
   values that need a conversion, `fun f() = expr` bodies over text iterators, array literals'
   `map`, `if (val Case(n) = xs.last_mut())`, and `.context()` in a function that throws
   `anyhow::Error` all failed to build.
+* A nested pattern in a field Oxie boxes (`Add(Num(_), Num(_))` in a recursive enum) is checked in
+  the arm's guard; Rust can't match through the box.
 * Type inference looked at a call's receiver several times, so a long method chain (a UI builder)
   took exponential time; `oxie from-rust` hung on such code. Each receiver is inferred once now.
 * A `filter_map` or `find_map` lambda whose body already gives an optional (of a type Oxie doesn't

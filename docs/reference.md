@@ -449,8 +449,9 @@ enum Shape : Display {
   `Expr::Neg(Box::new(x))`, `Node(1, next)` is `Node::new(1, Some(Box::new(next)))`; one written
   `Box.new(x)` is left as it is), and reads see through the box: calls, fields and `&T`
   parameters as in Rust, a `when` on a boxed value matches the value (`match &**x`, or
-  `match *x` for an owned one), and an owned boxed value where its value is expected is taken
-  out (`simplify(*y)`). Lists, maps and boxes already hold their elements on the heap, and a
+  `match *x` for an owned one), a nested pattern in a boxed field (`Add(Num(_), Num(_))`) is
+  checked in the arm's guard (one that binds names there isn't supported: match the field in the
+  arm), and an owned boxed value where its value is expected is taken out (`simplify(*y)`). Lists, maps and boxes already hold their elements on the heap, and a
   `shared class` is a handle, so those need no box.
 
 ```oxie

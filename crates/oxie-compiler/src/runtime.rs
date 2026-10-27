@@ -174,6 +174,37 @@ impl<T, E> Elvis for ::core::result::Result<T, E> {
     }
 }
 
+/// The value in a box a pattern bound, owned or borrowed: `when` arms check nested patterns of
+/// boxed fields with it (`matches!(Unbox::unboxed(&b), Expr::Num(_))`).
+pub trait Unbox {
+    type Inner: ?Sized;
+    fn unboxed(&self) -> &Self::Inner;
+}
+
+impl<T: ?Sized> Unbox for Box<T> {
+    type Inner = T;
+    #[inline(always)]
+    fn unboxed(&self) -> &T {
+        self
+    }
+}
+
+impl<T: ?Sized> Unbox for &Box<T> {
+    type Inner = T;
+    #[inline(always)]
+    fn unboxed(&self) -> &T {
+        self
+    }
+}
+
+impl<T: ?Sized> Unbox for &mut Box<T> {
+    type Inner = T;
+    #[inline(always)]
+    fn unboxed(&self) -> &T {
+        self
+    }
+}
+
 /// Support for `a ?: literal`, including `Option<&i32> ?: 0` and `Option<String> ?: "text"`.
 pub trait ElvisOr<D> {
     type Out;
