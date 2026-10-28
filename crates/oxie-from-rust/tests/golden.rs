@@ -1118,3 +1118,56 @@ fun bump(): u32 {
 "#,
     );
 }
+
+#[test]
+fn types_of_other_files_get_own() {
+    // a parameter of another file's struct or enum is taken by value, so it says `own`; a `Copy`
+    // one is copied either way
+    let model = r#"
+pub struct Item { pub name: String }
+pub enum Zone { Left, Right(String) }
+#[derive(Clone, Copy)]
+pub enum Side { Left, Right }
+"#;
+    let pane = r#"
+use crate::model::{Item, Side, Zone};
+
+pub struct Pane { items: Vec<Item>, zone: Option<Zone>, side: Side }
+
+impl Pane {
+    pub fn add(&mut self, item: Item) { self.items.push(item); }
+    pub fn set_zone(&mut self, zone: Option<Zone>) { self.zone = zone; }
+    pub fn set_side(&mut self, side: Side) { self.side = side; }
+}
+"#;
+    let out: Vec<String> = oxie_from_rust::translate_crate(&[model, pane]).into_iter().map(|t| t.unwrap().oxie).collect();
+    assert!(out[1].contains("fun add(own item: Item)"), "{}", out[1]);
+    assert!(out[1].contains("fun set_zone(own zone: Zone?)"), "{}", out[1]);
+    assert!(out[1].contains("fun set_side(side: Side)"), "{}", out[1]);
+}
+
+#[test]
+fn copy_types_oxie_cant_see_keep_their_derives() {
+    // `Side` comes from another module, so Oxie can't tell `Zone` is `Copy`: its derives are
+    // written out, and `set` stores `zone` without `own` (it isn't lent)
+    let src = r#"
+use super::*;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Zone { Middle, Edge(Side) }
+
+struct Pane { drop: Option<Zone> }
+
+impl Pane {
+    fn set(&mut self, zone: Option<Zone>) {
+        if self.drop != zone {
+            self.drop = zone;
+        }
+    }
+}
+"#;
+    let t = oxie_from_rust::translate(src).unwrap();
+    assert!(t.warnings.is_empty(), "{:?}", t.warnings);
+    assert!(t.oxie.contains("@derive(Clone, Copy, PartialEq, Debug)"), "{}", t.oxie);
+    assert!(t.oxie.contains("fun set(zone: Zone?)"), "{}", t.oxie);
+}

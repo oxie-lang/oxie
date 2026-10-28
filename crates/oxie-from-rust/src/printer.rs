@@ -1010,7 +1010,7 @@ impl<'a> Printer<'a> {
     }
 
     /// Does the parameter take a value that Oxie would lend without `own`: a `String`, `Vec`,
-    /// map, set, `PathBuf` or `Box` (not of a function), a struct or enum of the file that isn't
+    /// map, set, `PathBuf` or `Box` (not of a function), a struct or enum of the crate that isn't
     /// `Copy`, a type parameter of `generics` (those without a `Copy` bound), or an `Option` of
     /// one? (`mut x: T` is `var x: T`, which takes it anyway.)
     fn takes_value(&self, pt: &syn::PatType, generics: &[String]) -> bool {
@@ -1033,7 +1033,8 @@ impl<'a> Printer<'a> {
             "Box" => !arg().is_some_and(|t| matches!(t, syn::Type::TraitObject(o) if o.bounds.iter().any(|b| matches!(b, syn::TypeParamBound::Trait(tr) if tr.path.segments.last().is_some_and(|s| ["Fn", "FnMut", "FnOnce"].contains(&s.ident.to_string().as_str())))))),
             "String" | "Vec" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "PathBuf" => true,
             _ if t.path.segments.len() == 1 && last.arguments.is_empty() && generics.contains(&name) => true,
-            _ => self.info.structs.get(&name).is_some_and(|s| !s.copy) || self.info.enums.get(&name).is_some_and(|e| !e.copy),
+            // a struct or enum of the file, or of another file of the crate
+            _ => self.info.structs.get(&name).is_some_and(|s| !s.copy) || self.info.enums.get(&name).is_some_and(|e| !e.copy) || self.krate.value_types.get(&name) == Some(&false),
         }
     }
 

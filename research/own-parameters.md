@@ -356,5 +356,13 @@ The cost is in generic code: a container's adders and a function that returns on
 arguments (`fun larger<T>(own a: T, own b: T): T`) say `own`, where Rust writes `T` and Kotlin
 nothing. The error names the fix, and writing-oxie.md shows `fun push(own x: T)`.
 
-Not done in phase 2: tuples are still values; editor grammars; `oxie migrate`; the lifetime
-fix; the Kuana acceptance test; the evals (they cost money: ask first).
+**Kuana** (translated whole by `oxie from-rust`, built and tested): no `rust { }` block, 442 of
+443 tests pass, as on 0.5.0 (the other one checks which file a panic names). The translation
+says `own` 325 times in about 3,200 functions. The first run found two translator gaps, both
+fixed: `own` for structs and enums declared in another file of the crate (13 build errors), and
+a `Copy` type whose derive Oxie couldn't infer in the file alone (its variant's type came from
+`use super::*`), which made its parameters lent and two functions fall back to Rust. The editors
+(VS Code, Zed, Kuana) highlight `own`.
+
+Not done in phase 2: tuples are still values; `oxie migrate`; the lifetime fix; the evals (they
+cost money: ask first).

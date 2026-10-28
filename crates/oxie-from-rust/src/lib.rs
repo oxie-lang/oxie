@@ -162,6 +162,11 @@ fn translate_file(src: &str, file: &syn::File, krate: &contexts::Crate, idx: usi
                     eprintln!("oxie error {}:{}: {}", l + 1, c + 1, d.message);
                 }
             }
+            // a type that lost a derive Oxie didn't infer (`Copy`, which decides whether its
+            // parameters are lent) writes its derives out first: that may be what the errors are
+            if syn::parse_file(&rust).is_ok_and(|gen| lost_derives(&orig, &facts::collect(&gen), &mut fixes)) {
+                continue;
+            }
             let mut changed = false;
             for d in &errors {
                 changed |= keep_as_rust(&mut fixes, &ranges, &methods, d.span.start as usize, &format!("Oxie rejected the translation ({})", d.message));
@@ -204,13 +209,7 @@ fn translate_file(src: &str, file: &syn::File, krate: &contexts::Crate, idx: usi
                 }
             }
         }
-        for (k, d) in &orig.derives {
-            if let Some(g) = got.derives.get(k) {
-                if g != d {
-                    changed |= fixes.explicit_derives.insert(k.clone());
-                }
-            }
-        }
+        changed |= lost_derives(&orig, &got, &mut fixes);
         if !changed {
             if !todos.is_empty() {
                 let mut seen = HashSet::new();
@@ -224,6 +223,18 @@ fn translate_file(src: &str, file: &syn::File, krate: &contexts::Crate, idx: usi
         }
     }
     (Translation { oxie: drop_unused_module_imports(&text), warnings }, kept)
+}
+
+/// Marks the types whose derives come out of Oxie unlike the Rust's to write theirs out; true if
+/// there are new ones.
+fn lost_derives(orig: &facts::Facts, got: &facts::Facts, fixes: &mut Fixes) -> bool {
+    let mut changed = false;
+    for (k, d) in &orig.derives {
+        if got.derives.get(k).is_some_and(|g| g != d) {
+            changed |= fixes.explicit_derives.insert(k.clone());
+        }
+    }
+    changed
 }
 
 /// Methods whose parameters and calls whose arguments come out of Oxie unlike the Rust's,

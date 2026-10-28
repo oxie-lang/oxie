@@ -31,6 +31,9 @@ pub struct Crate {
     /// The field names of every struct with named fields, by struct name (of all structs of a
     /// name, together).
     pub struct_fields: HashMap<String, HashSet<String>>,
+    /// Every struct and enum name, and whether all those of the name derive `Copy` (Oxie lends a
+    /// parameter of one that doesn't, unless it says `own`).
+    pub value_types: HashMap<String, bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,7 +175,7 @@ pub fn scan(files: &[&syn::File]) -> Crate {
     for (i, f) in files.iter().enumerate() {
         s.impls(i, &f.items);
     }
-    let mut krate = Crate { struct_fields: std::mem::take(&mut s.struct_fields), ..Crate::default() };
+    let mut krate = Crate { struct_fields: std::mem::take(&mut s.struct_fields), value_types: std::mem::take(&mut s.value_types), ..Crate::default() };
     for (name, (file, decl)) in s.structs {
         // the stubs `stub` writes have no type parameters
         if s.ambiguous.contains(&name) || !decl.generics.params.is_empty() {
@@ -273,11 +276,16 @@ struct Scan {
     /// (type, method) referred to without a call.
     values: HashSet<(syn::Ident, String)>,
     struct_fields: HashMap<String, HashSet<String>>,
+    value_types: HashMap<String, bool>,
 }
 
 impl Scan {
     fn types(&mut self, file: usize, items: &[syn::Item]) {
         for it in items {
+            if let syn::Item::Struct(syn::ItemStruct { ident, attrs, .. }) | syn::Item::Enum(syn::ItemEnum { ident, attrs, .. }) = it {
+                let copy = crate::facts::derives_of(attrs).contains("Copy");
+                *self.value_types.entry(ident.to_string()).or_insert(copy) &= copy;
+            }
             let name = match it {
                 syn::Item::Struct(s) => {
                     if let syn::Fields::Named(n) = &s.fields {
