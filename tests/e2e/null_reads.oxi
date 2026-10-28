@@ -1,0 +1,39 @@
+// Reading after `!!` in a print leaves the optional in place, and `x == null || ..` unwraps `x`
+// in the `else` branch, as Kotlin's smart casts do. `a ?: b` with a value `b` returned as a `T?`
+// is a value.
+
+data class User(name: String, tags: [String])
+
+fun describe(t: String?): String = if (t == null || t.is_empty()) "none" else "text ${t.len()}"
+
+fun first_positive(xs: [i32]?): i32 {
+    if (xs == null || xs.is_empty() || xs[0] < 0) {
+        return 0
+    } else {
+        return xs[0]
+    }
+}
+
+fun up(x: i32): i32? = if (x > 3) null else x + 1
+
+fun step(x: i32?): i32? {
+    if (x == null) return null
+    return up(x) ?: x
+}
+
+fun main() {
+    val o: User? = User("ada", ["x"])
+    println(o!!.name)
+    println("${o!!.name} ${o!!.tags.len()} ${o!!.tags:?}")
+    println(o!!.name, o!!.tags.len())
+    val n = o!!.name
+    println(n)
+
+    println(describe(null))
+    println(describe(Some("".to_string())))
+    println(describe(Some("abc".to_string())))
+    val a: [i32]? = [4, 2]
+    val b: [i32]? = [-1]
+    println("${first_positive(a)} ${first_positive(null)} ${first_positive(b)}")
+    println("${step(2)} ${step(5)} ${step(null)}")
+}

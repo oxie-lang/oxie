@@ -82,6 +82,7 @@ fun main() {
 | `interface I { fun f(): i32 }`, `class C : I { override fun f() = 1 }` | trait and its impl |
 | `&I`, `[I]` (an interface as a type) | `&dyn I`, `Vec<Box<dyn I>>` |
 | `shared class S(var n: i32)`, `@sync shared class` | a handle to one object: `Rc<RefCell<..>>`, `Arc<Mutex<..>>` |
+| `@weak var parent: Node? = null` (in a shared class) | `Weak<..>`: a link back that doesn't keep the object alive |
 | `operator fun plus(o: V): V`, `minus`, `times`, `div`, `rem`, `unaryMinus`, `plusAssign` | `impl Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `AddAssign` |
 | `override fun toString() = "($x, $y)"` | `impl Display` |
 | `fun String.shout(): String = this.to_uppercase()`, `fun i32.is_even(): bool = this % 2 == 0` | extension functions (a trait and its impl, imported everywhere) |
@@ -155,9 +156,20 @@ fun main() {
   `@sync shared class` to use it from several threads. Copying such a value copies a handle,
   and `==` on it compares identity. Inside its methods `this` passed on (`child.parent = this`)
   is a handle; a method that reaches its own object again while it runs panics with an
-  explanation.
+  explanation. Objects that refer to each other (a child's `parent`, its parent's `children`)
+  are never freed unless the link back is `@weak`: `@weak var parent: Node? = null` reads as
+  the object while something else keeps it, and `null` after.
 * **Mutability belongs to the variable.** A `val` object can't call a method that changes it;
-  declare the variable `var`. Oxie works out which methods change their object.
+  declare the variable `var`. Oxie works out which methods change their object, except for an
+  interface's methods: declare one that implementations may change their object in with
+  `mut fun` (`interface Counter { mut fun bump() }`), or an implementation that changes it is an
+  error. In a library, a public method of a public class that changes its object needs
+  `mut fun` too (`pub mut fun bump()`).
+* **A copy is a copy.** A data class whose fields are all numbers, `bool`s, `char`s or other
+  such data classes is `Copy`: `var p = points[0]` copies the point, and `p.x = 5` doesn't
+  change `points[0]` (Oxie warns when the original is read afterwards). Change `points[0].x`
+  directly, or write `points[0].copy()` to keep a copy. Reading a whole field of a
+  `shared class` (`val h = acc.history`) copies it the same way.
 * **No inheritance.** There are no `open`, `abstract` or `sealed` classes and no `: Base()`.
   Share behavior with interfaces (they can have default methods) and composition; use an
   `enum` with data where Kotlin would use a sealed class (`enum class` is accepted as `enum`).
@@ -177,9 +189,10 @@ fun main() {
   `if (val Err(e) = f())`, or `.unwrap()`.
 * **`null` is `Option`.** A `T?` must be unwrapped before use. A null check unwraps a local
   variable or parameter: in `if (x != null) x.foo()`, `if (x != null && x.len() > 2)` and the
-  `else` of `if (x == null)`, `x` is the value (a reference to it), and after
+  `else` of `if (x == null)` or `if (x == null || x.is_empty())`, `x` is the value (a reference
+  to it), and after
   `if (x == null) return` (or `if (a == null || b == null) return`) it is the value. `x!!.len()`
-  reads through `x` without taking it, so `x` stays usable. Fields aren't unwrapped: write `if (val v = &a.field)`, `a.field?.foo()`, or `val v = a.field ?:
+  and `println(x!!.name)` read through `x` without taking it, so `x` stays usable. Fields aren't unwrapped: write `if (val v = &a.field)`, `a.field?.foo()`, or `val v = a.field ?:
   return`. `if (val x = x)` takes the value out of `x`; to use `x` again afterwards, unwrap a
   reference: `if (val v = &x)`. A `when`, `if (val ...)` or `==` on an optional matches its
   value, without `Some(..)`: `when (xs.first()) { 3 -> ...; null -> ...; else -> ... }`,

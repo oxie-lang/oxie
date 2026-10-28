@@ -10,6 +10,6 @@ true
 none
 short
 long
-t is Some("ok")
+t is "ok"
 true
 Some("x") Some("ok")

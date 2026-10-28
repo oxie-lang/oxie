@@ -1,10 +1,12 @@
-// An interface method without a receiver is `&mut self` in every implementation when one of
-// them changes its object, also where it changes nothing. A method that calls it on `this`
-// takes `&mut self` as well: another method of that class, a default method of the interface,
-// or a method calling a default method it inherits.
+// The interface decides whether a method changes its object: `mut fun grow()` is `&mut self` in
+// every implementation, also where it changes nothing, and so is a method whose default body
+// calls one. A method that calls it on `this` takes `&mut self` as well: another method of that
+// class, a default method of the interface, or a method calling a default method it inherits.
+// An implementation can't change its object in a method the interface declares with `fun`
+// (tests/diagnostics/interface_receivers.oxi).
 
 interface Shape {
-    fun grow()
+    mut fun grow()
     fun size(): i32
     fun grow_twice() { grow(); grow() }
 }

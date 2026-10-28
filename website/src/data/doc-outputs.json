@@ -201,8 +201,8 @@
   },
   {
     "file": "docs/reference.md",
-    "output": "root has 1 child\n",
-    "source": "shared class Node(name: String, var children: [Node] = [], var parent: Node? = null) {\n    fun add(child: Node) {\n        child.parent = this          // the handle\n        children.push(child)\n    }\n}\n\nfun main() {\n    val root = Node(\"root\")\n    val leaf = Node(\"leaf\")\n    root.add(leaf.clone())\n    println(\"${leaf.parent?.name ?: \"-\"} has ${root.children.len()} child\")\n}\n"
+    "output": "root has 1 child\nroot/leaf\nfreed root\nfreed leaf\n",
+    "source": "shared class Node(name: String, var children: [Node] = [], @weak var parent: Node? = null) : Drop {\n    fun add(child: Node) {\n        child.parent = this          // the handle\n        children.push(child)\n    }\n\n    fun path(): String = if (parent != null) \"${parent.path()}/$name\" else name.clone()\n\n    override fun drop() {\n        println(\"freed $name\")\n    }\n}\n\nfun main() {\n    val root = Node(\"root\")\n    val leaf = Node(\"leaf\")\n    root.add(leaf.clone())\n    println(\"${leaf.parent?.name ?: \"-\"} has ${root.children.len()} child\")\n    println(leaf.path())\n}   // frees both nodes; without `@weak` neither would be freed\n"
   },
   {
     "file": "docs/reference.md",

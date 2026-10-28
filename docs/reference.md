@@ -178,7 +178,13 @@ fun short(x: i32) = x * 2
   keeps it a method). Its other calls pass the fields too.
 * **Modifiers**: `async fun`, `unsafe fun`, `const fun`, `extern "C" fun`.
 * **Automatic lifetimes**: when a function returns a reference and Rust cannot infer which
-  parameter it borrows from, Oxie ties the result to all reference parameters
+  parameter it borrows from, Oxie ties the result to the parameters its value comes from: the
+  variables at the root of each returned value (`m.get(key)` and `m[key]` borrow `m`,
+  `items.find { .. }` borrows `items`), so `lookup(scores, name.to_lowercase())` can pass a
+  temporary key (`fun lookup(m: &[String: i32], key: &str): &i32?` →
+  `fn lookup<'a>(m: &'a HashMap<String, i32>, key: &str) -> Option<&'a i32>`). When a value
+  could come from anywhere (it is a call's, or a method's that may return its arguments), the
+  result is tied to all reference parameters
   (`fun longest(a: &str, b: &str): &str` → `fn longest<'a>(a: &'a str, b: &'a str) -> &'a str`).
   With no reference parameters the result is `'static`. Types with lifetime parameters get
   `<'_>` in signatures, and count as references here (`fun first(p: &Parser): Token` →
@@ -335,12 +341,16 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
     `from`, `from_str`, `try_from` or `from_iter`;
   * `&self` otherwise.
   Override with `mut fun`, `static fun`, or an explicit `self`, `&self`, `&mut self`,
-  `mut self`, `self: Box<Self>` or `mut self: Box<Self>` first parameter. Interface methods take
-  the receiver their implementations need.
+  `mut self`, `self: Box<Self>` or `mut self: Box<Self>` first parameter. A method that
+  implements an interface method takes the interface's receiver (see
+  [Interfaces](#interfaces-and-impl-blocks)).
+* In a library, a public method of a public class that changes its object says so with
+  `mut fun`: its users call it, so its signature mustn't change with its body. Without `mut`,
+  one that changes its object is an error with the fix (`pub mut fun bump()`).
 * A method called through its type takes the receiver as its first argument, as in Rust:
   `Counter.get(c)`, `Counter.add(&mut c, 2)`.
 * **`data class`** additionally derives `Debug`, `Clone`, `PartialEq`, and `Copy`, `Eq`,
-  `Hash` when every field type supports them, and supports `x.copy(field = value)`: a clone with
+  `Hash` when every field type supports them, and supports `x.copy()` (a copy) and `x.copy(field = value)`: a clone with
   the fields replaced, or, when body properties are computed from the others or there are `init`
   blocks, the object built again with the constructor (as Kotlin's `copy` does), so
   `Rect(2, 3).copy(w = 10).area` is computed for the new `w`.
@@ -375,6 +385,7 @@ class Name<T>(val a: A, var b: B = default, private c: C) : Interface, Hash {
 ```oxie
 shared class Name(var a: A) : Interface { ... }   // Rc<RefCell<..>> handle
 @sync shared class Name(var a: A) { ... }         // Arc<Mutex<..>>, usable across threads
+shared class Node(@weak var parent: Node? = null)  // a link that doesn't keep its object alive
 ```
 
 * The class is generated as `NameData` (the struct, constructor and methods as for a `class`)
@@ -399,13 +410,33 @@ shared class Name(var a: A) : Interface { ... }   // Rc<RefCell<..>> handle
   handle as a last parameter `__this`, and `this` is `__this.clone()`.
 * A method that reaches its own object again through another handle while it runs (a parameter
   that is the same object, a callback that reads it) panics at that line with an explanation.
-  An `@sync` object panics the same way instead of waiting for its own lock forever.
+  An `@sync` object panics the same way instead of waiting for its own lock forever. A value
+  read through the object in a print (`"${m.data.len()} ${m.get("a")}"`) ends its borrow
+  before the next value is computed.
+* Reading a whole field (`val h = acc.history`) copies it. Changing such a copy (`h.push(5)`),
+  where Kotlin would change the object's list, gets a warning: change the field in place
+  (`acc.history.push(5)`), or write `.clone()` to keep a copy.
+* Objects that refer to each other in a cycle (a child's `parent` and its parent's `children`)
+  would keep each other alive and never be freed. Mark the link back `@weak`: a `@weak` field
+  holds an optional shared-class object (`@weak var parent: Node? = null`) without keeping it
+  alive. Reading it gives the object while something else keeps it, and `null` once it is
+  freed; a null check (`if (parent != null)`, `if (parent == null) return`) gives the object
+  for the rest of the branch. An object that only a `@weak` field refers to is freed at once.
+  The field is a `Weak<RefCell<NodeData>>` (`std::sync::Weak<Mutex<..>>` with `@sync`): reads
+  are `parent.upgrade().map(Node)`, assignments `Rc::downgrade(&node.0)`, and `Debug` prints it
+  as `(Weak)`.
 
 ```oxie
-shared class Node(name: String, var children: [Node] = [], var parent: Node? = null) {
+shared class Node(name: String, var children: [Node] = [], @weak var parent: Node? = null) : Drop {
     fun add(child: Node) {
         child.parent = this          // the handle
         children.push(child)
+    }
+
+    fun path(): String = if (parent != null) "${parent.path()}/$name" else name.clone()
+
+    override fun drop() {
+        println("freed $name")
     }
 }
 
@@ -414,7 +445,8 @@ fun main() {
     val leaf = Node("leaf")
     root.add(leaf.clone())
     println("${leaf.parent?.name ?: "-"} has ${root.children.len()} child")
-}
+    println(leaf.path())
+}   // frees both nodes; without `@weak` neither would be freed
 ```
 
 ## Enums
@@ -491,12 +523,19 @@ interface Named : Display {
 ```
 
 * `interface` (or `trait`) → `trait`; an interface without members may omit `{}`. Interfaces
-  have no properties: declare `fun name(): String` and implement it in each class. Methods take `&self` unless declared otherwise (or their
-  default body or an implementation needs `&mut self`). Its supertypes may include a lifetime
-  bound: `interface Ext : IntoElement + 'static`.
+  have no properties: declare `fun name(): String` and implement it in each class. Methods take
+  `&self` unless declared otherwise (`mut fun bump()`, or an explicit receiver) or their default
+  body needs `&mut self`. The interface decides: every implementation takes its receiver, so
+  code that calls a method through the interface never depends on one implementation. An
+  implementation that changes its object in a method the interface declares with plain `fun` is
+  an error that says to write `mut fun` in the interface (a `shared class` changes its data
+  behind `&self`, so its implementations may). Its supertypes may include a lifetime bound:
+  `interface Ext : IntoElement + 'static`.
 * A class lists interfaces after `:` and implements methods with `override fun`; the
   matching `impl Trait for Class` is generated. Methods named like the trait's (and `type`
-  members) go to the right trait even without `override`.
+  members) go to the right trait even without `override`. It may also implement the methods of
+  the interfaces its interfaces extend without listing them (`class Sq : Shape` with
+  `override fun name()` of `interface Shape : Named` gets `impl Named for Sq` too).
 * Rust `impl Type { }` and `impl Trait for Type { }` blocks are supported, also for types not
   declared in Oxie (`impl Display for Point { fun fmt(f: &mut Formatter): fmt::Result = ... }`).
   Inside, methods follow the same receiver rules and fields are available implicitly when the
@@ -513,7 +552,8 @@ fun Vec<i32>.bump(by: i32) { for (x in self.iter_mut()) *x += by }   // `&mut se
 Each becomes a trait with one method plus its `impl` for the receiver type; every file of the
 crate imports these traits automatically. Inside, `this`/`self` is the receiver; for Oxie
 classes their fields can be used directly. Calls fill in defaults, take named arguments and
-convert text as for functions; their parameters are not lent. An extension of an interface (`fun Shape.describe()`)
+convert text as for functions, and their parameters are borrowed unless they say `own`, as a
+function's are. An extension of an interface (`fun Shape.describe()`)
 applies to every type that implements it: `impl<T: Shape + ?Sized> ShapeDescribe for T`.
 
 ### Operators
@@ -681,8 +721,8 @@ the declared type of a variable, field, parameter or return value:
   When `b` is optional too, `a ?: b` is optional (`a.or(b)`, `a.or_else(|| f())` for a call),
   so `a ?: b ?: 0` tries each in turn.
 * `x!!` — unwrap. On a variable or field followed by a method call (`name!!.len()`) it unwraps
-  a reference (`name.as_ref().unwrap()`), so `name` stays usable, and so does a comparison
-  (`x > best!!`). On a value that can't be null it does nothing, with a warning, as in Kotlin.
+  a reference (`name.as_ref().unwrap()`), so `name` stays usable, and so do a comparison
+  (`x > best!!`) and a field read in a print (`println(user!!.name)`). On a value that can't be null it does nothing, with a warning, as in Kotlin.
 * `if (val v = opt) { }` / `while (val v = opt)` — `if let Some(v)` / `while let Some(v)`;
   with a pattern (`if (val Ok(v) = r)`) the pattern is used as written, except a tuple of names,
   which unwraps an optional pair (`if (val (k, v) = split(s))`); a tuple with a case or a literal
@@ -690,7 +730,8 @@ the declared type of a variable, field, parameter or return value:
   meaning.
 * A null check unwraps a local variable or parameter whose type Oxie knows to be `T?`, when the
   branch doesn't assign it: in `if (x != null) { }` (also as a part of an `&&` chain) and in the
-  `else` of `if (x == null)`, `x` is the value, `if let Some(x) = &x` (a reference; a `Copy`
+  `else` of `if (x == null)` (also of `if (x == null || x.is_empty())`, `x == null` first), `x`
+  is the value, `if let Some(x) = &x` (a reference; a `Copy`
   value is copied, and `&mut x` is used when the branch changes it). After
   `if (x == null) return` or `if (a == null || b == null) return` (or `throw`, `continue`,
   `break`), they are the values for the rest of the block: `let Some(x) = x else { return };`.
@@ -969,7 +1010,8 @@ optimizer treat them like private Rust functions; mark library APIs `pub`.
 
 `@name` and `@name(args)` become `#[name]` / `#[name(args)]`: `@derive(Serialize)`,
 `@serde(rename_all = "camelCase")`, `@inline`, `@cfg(test)`, `@tokio::main`, ... Rust's `#[...]`
-syntax works too. Oxie-specific: `@no_auto_derive` (classes/enums), `@from` (error enum cases).
+syntax works too. Oxie-specific: `@no_auto_derive` (classes/enums), `@from` (error enum cases),
+`@sync` and `@weak` (shared classes and their fields, see [Shared classes](#shared-classes)).
 Attributes also work on statements (see [Statements](#statements)). A class property that exists
 only in some builds (`@cfg(test) var built: usize`) is no constructor parameter: it starts with
 its default value, or the type's `Default`.

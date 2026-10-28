@@ -34,6 +34,9 @@ pub struct Crate {
     /// Every struct and enum name, and whether all those of the name derive `Copy` (Oxie lends a
     /// parameter of one that doesn't, unless it says `own`).
     pub value_types: HashMap<String, bool>,
+    /// A library's: its public methods that change their object say `mut fun`, which Oxie
+    /// requires of a library's API.
+    pub library: bool,
 }
 
 #[derive(Debug, Clone)]

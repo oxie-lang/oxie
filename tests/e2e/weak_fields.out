@@ -1,0 +1,25 @@
+root has 1 child
+root/leaf
+root/mid
+depth 1, root root, above root
+freed temp
+true
+adopted by mid
+root/mid/leaf
+leaf
+end of trees
+freed orphan
+freed mid
+freed root
+freed leaf
+rex of ann
+1 friend
+PetData { name: "max", owner: (Weak), friends: [] }
+rex of ann
+end of pets
+freed owner ann
+freed pet rex
+freed pet max
+2
+linked
+null

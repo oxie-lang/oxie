@@ -3,7 +3,7 @@
 import std::collections::HashMap
 
 class Counter(var n: i32 = 0) { fun bump() { n += 1 } }
-interface Shape { fun grow(); fun size(): i32 }
+interface Shape { mut fun grow(); fun size(): i32 }
 class Sq(var side: i32) : Shape {
     override fun grow() { side += 1 }
     override fun size(): i32 = side

@@ -89,9 +89,11 @@ The compiler is a library (`oxie-compiler`) with no dependencies. `oxie-build` c
   A method is `&mut self` if its body assigns into `self` (directly or through implicit
   fields), calls a known mutating method on a field, takes `&mut` of a field, or calls a
   `&mut self` method of the same type or of its interfaces. Interface methods without an
-  explicit receiver take `&mut self` if their default body or any implementation needs it, and
+  explicit receiver take `&mut self` if they say `mut fun` or their default body needs it, and
   then all implementations use it, also one that changes nothing (and so the methods calling
-  it). The first use that changes `self` is kept as the reason (`MethodInfo::recv_why`: "it
+  it). An implementation never changes the interface's receiver: one that changes its object in
+  a `&self` method is recorded in `Crate::iface_conflicts` and reported where it is lowered
+  (not a `shared class`'s data, whose handle implements the interface). The first use that changes `self` is kept as the reason (`MethodInfo::recv_why`: "it
   assigns `hits`", with its span);
 * **automatic derives**: a fixpoint deciding `Copy` and `Eq + Hash` for data classes and enums
   from their field types.
@@ -234,6 +236,9 @@ Notable translations:
   crate calls, and identity `PartialEq`/`Hash` are emitted. Expression lowering routes `obj.field` reads, assignments
   and calls on fields of known shared types through getters, setters or a single borrow,
   evaluating arguments before a mutable borrow; shared places used by value get `.clone()`.
+  A `@weak` field (`FieldInfo::weak`) is a `Weak` in the data: the constructor and setter
+  downgrade, the getter upgrades, and inside the class's methods `Lowerer::weak_read` /
+  `weak_assign` convert reads and assignments of it, and null checks bind the upgraded handle.
 
 ## Source maps and diagnostics
 

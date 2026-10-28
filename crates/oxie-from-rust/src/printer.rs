@@ -1622,6 +1622,10 @@ impl<'a> Printer<'a> {
                 }
                 Recv::Value | Recv::Typed => write_recv = true,
             }
+            // a library's public method that changes its object says so
+            if self.krate.library && recv == Recv::RefMut && !write_recv && matches!(vis, syn::Visibility::Public(_)) && matches!(kind, FunKind::Method { overrides: false, .. }) {
+                prefix.push_str("mut ");
+            }
         }
         // Oxie lends the parameters it writes the signatures of (not an interface's or an
         // operator's), unless they say `own`

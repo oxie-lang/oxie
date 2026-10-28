@@ -202,6 +202,13 @@ pub struct Field {
     pub span: Span,
 }
 
+impl Field {
+    /// `@weak`: a shared class's field that doesn't keep the object it refers to alive.
+    pub fn is_weak(&self) -> bool {
+        self.attrs.iter().any(|a| a.name() == "weak")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum VariantFields {
     Unit,

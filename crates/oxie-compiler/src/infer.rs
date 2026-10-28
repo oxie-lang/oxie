@@ -193,7 +193,7 @@ impl<'a> Lowerer<'a> {
                 }
                 None
             }
-            SelfValue => Some(ty("Self")),
+            SelfValue => Some(self.ext_self.clone().unwrap_or_else(|| ty("Self"))),
             Binary(op, l, r) => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or => Some(ty("bool")),
                 BinOp::Add if matches!(l.kind, Str(_) | Template(_)) || matches!(r.kind, Str(_) | Template(_)) => Some(ty("String")),

@@ -1055,7 +1055,12 @@ impl<'a> Analysis<'a> {
                 ExprKind::For { pat, iter, body, .. } if on_p(iter) => {
                     let mut names = Vec::new();
                     pat.bindings(&mut names);
-                    if names.iter().any(|n| crate::visit::writes_through(body, n, &|_| false)) {
+                    // a shared class's handle changes its object behind `&`
+                    let shared = || {
+                        let elem = loop_elem(&c.ty).and_then(|t| t.single_name());
+                        elem.is_some_and(|n| self.stage.types().and_then(|(k, _)| k.class_in(n, &c.module)).is_some_and(|cl| cl.is_shared))
+                    };
+                    if !shared() && names.iter().any(|n| crate::visit::writes_through(body, n, &|_| false)) {
                         change(iter, format!("the loop changes the elements of `{}`", place_text(iter)))
                     } else {
                         None
@@ -1504,7 +1509,7 @@ fn lend(files: &mut [(&[String], &mut File)], stage: Stage) -> Vec<ParamNote> {
         for fun in &funs {
             let f = fun.decl;
             let fixed = fun.owner.is_some_and(|(_, _, fixed)| fixed);
-            if fixed || fun.owner.is_none() && f.name == "main" || f.receiver.is_some() || f.mods.is_const || f.mods.abi.is_some() {
+            if fixed || fun.owner.is_none() && f.name == "main" || f.mods.is_const || f.mods.abi.is_some() {
                 continue;
             }
             let tparams = fun.tparams();

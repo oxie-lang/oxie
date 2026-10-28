@@ -1,0 +1,28 @@
+// `@weak` fields: the data holds a `Weak`, reads upgrade it, writes downgrade the handle.
+
+shared class Node(name: String, var children: [Node] = [], @weak var parent: Node? = null) {
+    fun add(child: Node) {
+        child.parent = this
+        children.push(child)
+    }
+
+    fun path(): String {
+        if (parent != null) {
+            return "${parent.path()}/$name"
+        }
+        return name.clone()
+    }
+
+    fun detach() {
+        parent = null
+    }
+}
+
+fun main() {
+    val root = Node("root")
+    val leaf = Node("leaf")
+    root.add(leaf.clone())
+    println(leaf.path())
+    leaf.detach()
+    println(leaf.parent == null)
+}

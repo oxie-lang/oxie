@@ -61,7 +61,9 @@ pub fn explain(d: &mut MappedDiag, sources: &Sources) {
             let name = first.trim_start_matches('*').split(['.', '[']).next().unwrap_or("").to_string();
             rewrite(d, format!("`{}` is a read-only reference (`&`), so it can't be changed through it", name));
             d.notes.retain(|n| !n.contains("`mut "));
-            loop_over_mut(d, &lines, &name);
+            if !loop_over_mut(d, &lines, &name) {
+                interface_method_hint(d, &lines, &name);
+            }
         }
         "E0373" => lambda_outlives(d, &lines, &names),
         "E0597" => {
@@ -582,7 +584,7 @@ fn borrow_mut(d: &mut MappedDiag, sources: &Sources, lines: &[&str], first: &str
     if d.message.contains("behind a `&` reference") {
         rewrite(d, format!("`{}` is a read-only reference (`&`), so it can't be changed through it", name));
         d.notes.retain(|n| !n.contains("`mut") && !n.contains("mutable reference"));
-        if loop_over_mut(d, lines, &name) {
+        if loop_over_mut(d, lines, &name) || interface_method_hint(d, lines, &name) {
             return;
         }
         if let Some((pl, pc, fname, index)) = param_decl(lines, &name, d.line) {
@@ -3081,6 +3083,23 @@ fn enclosing_fun<'a>(lines: &[&'a str], line: u32) -> Option<(u32, &'a str)> {
     (0..=(line as usize).min(lines.len().saturating_sub(1))).rev().find(|&l| lines[l].trim_start().starts_with("fun ") || lines[l].contains(" fun ")).map(|l| (l as u32, lines[l]))
 }
 
+/// For `this` changed in an `override fun` (behind `&self`): the interface declares the method
+/// with plain `fun`, which every implementation takes as `&self`. True if it said so.
+fn interface_method_hint(d: &mut MappedDiag, lines: &[&str], name: &str) -> bool {
+    if name != "this" && name != "self" {
+        return false;
+    }
+    let Some((_, text)) = enclosing_fun(lines, d.line) else { return false };
+    let Some(rest) = text.split("override fun ").nth(1) else { return false };
+    let method: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    d.notes.retain(|n| !n.contains("mutable reference in the `impl` method"));
+    d.notes.push(help(&format!(
+        "`{}` implements an interface method declared with plain `fun`, which takes `&self` in every implementation. If implementations may change their object, write `mut fun {}` in the interface.",
+        method, method
+    )));
+    true
+}
+
 /// Position of the ` {` that opens the enclosing function's body (to insert ` throws`).
 fn enclosing_fun_brace(lines: &[&str], line: u32) -> Option<(u32, u32)> {
     let (l, text) = enclosing_fun(lines, line)?;
@@ -3194,7 +3213,8 @@ fn stored_reason(sources: &Sources, current: &Path, f: &str, index: usize) -> Op
 }
 
 /// When the borrow that ends too early is an argument of a function declared in the crate whose
-/// result Oxie tied to all its reference parameters, a hint with the signature that leaves this
+/// result Oxie tied to all its reference parameters (it couldn't tell where the result comes
+/// from), a hint with the signature that leaves this
 /// argument out. Only a hint: Oxie can't tell whether the result really doesn't borrow from it.
 fn lifetime_hint(d: &mut MappedDiag, sources: &Sources, lines: &[&str]) {
     let Some((f, index)) = call_around(lines.get(d.line as usize).copied().unwrap_or(""), d.col as usize) else { return };
@@ -3205,7 +3225,7 @@ fn lifetime_hint(d: &mut MappedDiag, sources: &Sources, lines: &[&str]) {
         None => String::new(),
     };
     d.notes.push(help(&format!(
-        "`{}` returns a reference, and Oxie ties it to all of its reference parameters, so the result can't outlive this argument. If the result doesn't borrow from it, name the lifetime yourself{}: `{}`.",
+        "`{}` returns a reference, and Oxie ties it to this argument too, since it can't tell from the function's body that the result doesn't come from it, so the result can't outlive this argument. If the result doesn't borrow from it, name the lifetime yourself{}: `{}`.",
         f, place, sig
     )));
 }

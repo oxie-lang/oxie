@@ -1,0 +1,17 @@
+// `@weak` holds an optional shared-class object, in a shared class.
+
+shared class Node(name: String) {
+    @weak var parent: Node? = null
+}
+
+class Plain(@weak var node: Node? = null) // error: 7: `@weak` is for fields of a `shared class`, and `Plain` is a plain class
+
+shared class Tree(
+    @weak var root: Node, // error: 10: a `@weak` field is optional: `root: Node?`
+    @weak var label: String? = null, // error: 11: a `@weak` field holds an optional `shared class` object, not `String?`
+)
+
+fun main() {
+    println(Node("a").parent == null)
+    println(Plain().node == null)
+}

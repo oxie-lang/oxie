@@ -1,0 +1,129 @@
+// `@weak` fields of shared classes: a link back that doesn't keep its object alive, so objects
+// that refer to each other are freed. Reading one gives the object while it exists, else null.
+import std.thread
+
+shared class Node(name: String, var children: [Node] = [], @weak var parent: Node? = null) : Drop {
+    fun add(child: Node) {
+        child.parent = this
+        children.push(child)
+    }
+
+    // a null check gives the object for the branch
+    fun path(): String {
+        if (parent != null) {
+            return "${parent.path()}/$name"
+        }
+        return name.clone()
+    }
+
+    fun root(): Node = if (parent == null) this else parent!!.root()
+
+    fun grandparent(): Node? {
+        if (parent == null) return null
+        return parent.parent ?: parent
+    }
+
+    fun depth(): i32 {
+        if (parent == null) return 0
+        return parent.depth() + 1
+    }
+
+    fun detach() {
+        parent = null
+    }
+
+    fun adopt(p: Node) {
+        this.parent = p
+        val q = this.parent
+        println("adopted by ${q?.name ?: "-"}")
+    }
+
+    override fun drop() {
+        println("freed $name")
+    }
+}
+
+// with `@sync`, the link is `std::sync::Weak`; a body property can be weak too
+@sync shared class Owner(name: String, var pets: [Pet] = []) : Drop {
+    fun adopt(p: Pet) {
+        p.owner = this
+        pets.push(p)
+    }
+
+    mut fun drop() {
+        println("freed owner $name")
+    }
+}
+
+// printing it with `Debug` shows the link as `(Weak)`, so it doesn't print the owner again
+@sync shared class Pet(name: String) : Drop, Debug {
+    @weak var owner: Owner? = null
+
+    var friends: [Pet] = []
+
+    fun describe(): String = "$name of ${owner?.name ?: "nobody"}"
+
+    // changing the objects of a list of handles doesn't change the list
+    fun befriend(others: [Pet]) {
+        for (o in others) o.friends.push(this)
+    }
+
+    mut fun drop() {
+        println("freed pet $name")
+    }
+}
+
+shared class Link<T>(value: T) {
+    @weak var next: Link<T>? = null
+
+    fun follow(): T? where T: Clone = next?.value
+}
+
+fun trees() {
+    val root = Node("root")
+    val leaf = Node("leaf")
+    root.add(leaf.clone())
+    val mid = Node("mid", parent = root.clone())
+    println("${leaf.parent?.name ?: "-"} has ${root.children.len()} child")
+    println(leaf.path())
+    println(mid.path())
+    println("depth ${leaf.depth()}, root ${leaf.root().name}, above ${leaf.grandparent()?.name ?: "-"}")
+    // nothing else keeps `temp` alive, so it is freed at once and the link is null
+    val orphan = Node("orphan", parent = Node("temp"))
+    println(orphan.parent == null)
+    leaf.adopt(mid.clone())
+    println(leaf.path())
+    leaf.detach()
+    println(leaf.path())
+    println("end of trees")
+}
+
+fun pets() {
+    val o = Owner("ann")
+    val p = Pet("rex")
+    o.adopt(p.clone())
+    println(p.describe())
+    val q = Pet("max")
+    q.befriend([p.clone()])
+    println("${p.friends.len()} friend")
+    println("${q:?}")
+    val h = thread.spawn(move { p.describe() })
+    println(h.join().unwrap())
+    println("end of pets")
+}
+
+fun links() {
+    val a = Link(1)
+    val b = Link(2)
+    a.next = b.clone()
+    println(a.follow())
+    if (a.next != null) println("linked")
+    a.next = null
+    println(a.follow())
+}
+
+fun main() {
+    trees()
+    pets()
+    links()
+}

@@ -7,7 +7,7 @@ interface Shape { fun area(): f64 }
 class Sq(side: f64) : Shape { override fun area() = side * side }
 
 interface Counter {
-    fun bump()
+    mut fun bump()
     fun count(): i32
 }
 class Clicks(var n: i32 = 0) : Counter {

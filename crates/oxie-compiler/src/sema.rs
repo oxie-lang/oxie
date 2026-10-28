@@ -55,6 +55,8 @@ pub struct FieldInfo {
     pub ty: Type,
     pub default: Option<Expr>,
     pub in_ctor: bool,
+    /// `@weak` (a field of a shared class holding `Weak` instead of the handle)
+    pub weak: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +227,9 @@ pub struct Crate {
     /// The names that default values of parameters read (`timeout: Duration = default_timeout()`):
     /// calls fill these values in, so a private item with such a name is visible in the crate.
     pub default_reads: HashSet<String>,
+    /// Implementations that change their object in an interface method that doesn't (`&self`),
+    /// by (type key, method): the interface, and what changes it (where).
+    pub iface_conflicts: HashMap<(String, String), (String, String, Option<Span>)>,
 }
 
 /// What `Crate` keys by module when several modules declare a name.
@@ -1539,7 +1544,7 @@ fn collect_items(k: &mut Crate, module: &[String], items: &[Item]) {
                     let fields = t
                         .fields
                         .iter()
-                        .map(|f| FieldInfo { name: f.name.clone(), ty: f.ty.clone(), default: f.default.clone(), in_ctor: f.in_ctor })
+                        .map(|f| FieldInfo { name: f.name.clone(), ty: f.ty.clone(), default: f.default.clone(), in_ctor: f.in_ctor, weak: f.is_weak() })
                         .collect();
                     let mut methods = HashMap::new();
                     let mut user_new = false;
@@ -1829,6 +1834,10 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                                     }
                                 }
                             }
+                            // `Drop::drop` takes `&mut self`, whatever the body does
+                            if f.name == "drop" && t.supertypes.iter().any(|st| st.last_name() == Some("Drop")) {
+                                trecv = Some(Recv::RefMut);
+                            }
                             out.push(MethodRef { owner: owner.clone(), fun: f, trait_recv: trecv, implements, module: module.to_vec() });
                         }
                     }
@@ -1853,7 +1862,8 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                     for m in &imp.members {
                         if let ItemKind::Fun(f) = &m.kind {
                             let mi = tinfo.and_then(|t| t.methods.get(&f.name));
-                            let trecv = mi.filter(|m| m.explicit).map(|m| m.recv);
+                            let drop = f.name == "drop" && imp.trait_.as_ref().and_then(|t| t.last_name()) == Some("Drop");
+                            let trecv = mi.filter(|m| m.explicit).map(|m| m.recv).or(drop.then_some(Recv::RefMut));
                             let implements = mi.filter(|m| !m.explicit).and(tinfo.map(|t| t.name.clone()));
                             out.push(MethodRef { owner: owner.clone(), fun: f, trait_recv: trecv, implements, module: module.to_vec() });
                         }
@@ -1903,10 +1913,12 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
     let mut mut_params_in: HashMap<Vec<String>, HashMap<String, Vec<usize>>> = HashMap::new();
     // why an inferred receiver is `&mut self`, from the last round
     let mut whys: HashMap<(String, String), (String, Option<Span>)> = HashMap::new();
-    // An interface method is `&mut self` if its default body or any implementation needs it; then all
-    // implementations use it. Kept across rounds (interface, method) -> the type that needed it, so
-    // that an implementation which changes nothing stays `&mut self` for the methods calling it.
+    // An interface method is `&mut self` if it says so (`mut fun`) or its default body needs it;
+    // then all implementations use it. Its implementations never change it: one that changes its
+    // object in a `&self` method is an error there (`iface_conflicts`). Kept across rounds
+    // (interface, method) -> the interface.
     let mut trait_mut: HashMap<(String, String), String> = HashMap::new();
+    let mut conflicts: HashMap<(String, String), (String, String, Option<Span>)> = HashMap::new();
     let trait_why = |t: &str, name: &str, by: &str| {
         if by == t {
             format!("the default method `{}.{}` changes its object, so every implementation takes `&mut self`", t, name)
@@ -1976,16 +1988,36 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
             let returns_self = m.fun.ret.as_ref().is_some_and(|t| t.single_name() == Some("Self") || t.single_name() == Some(name));
             // implementations of an interface method that is `&mut self` stay `&mut self`
             let by = m.implements.as_ref().and_then(|t| trait_mut.get(&(t.clone(), m.fun.name.clone())).map(|by| (t, by)));
-            let recv = if facts.mutates_self || by.is_some() {
+            // an implementation takes the interface's receiver, whatever its body does; not a
+            // shared class's data, whose handle implements the interface and changes the data
+            // behind `&self`
+            let shared = k.classes.get(&m.owner).is_some_and(|c| c.is_shared);
+            let implementation = m.implements.as_ref().filter(|t| **t != m.owner && !shared);
+            let key = (m.owner.clone(), m.fun.name.clone());
+            // reported when the change is certain (it assigns a field); a call Oxie only guesses
+            // changes the object (`doc.read(cx)` of a type it can't see) is left to rustc, which
+            // knows the method
+            if let Some(t) = implementation {
+                match (&facts.mut_cause, by) {
+                    (Some((at, why)), None) if why.starts_with("it assigns ") || why.starts_with("it changes ") => conflicts.insert(key.clone(), (t.clone(), why.clone(), Some(*at))),
+                    _ => conflicts.remove(&key),
+                };
+            }
+            let recv = if implementation.is_some() {
+                if by.is_some() {
+                    Recv::RefMut
+                } else {
+                    Recv::Ref
+                }
+            } else if facts.mutates_self || by.is_some() {
                 Recv::RefMut
             } else if !facts.uses_self && returns_self && m.trait_recv.is_none() && m.implements.is_none() {
                 Recv::Static
             } else {
                 Recv::Ref
             };
-            let key = (m.owner.clone(), m.fun.name.clone());
             let recv = if rank(decided[&key]) > rank(recv) { decided[&key] } else { recv };
-            match (facts.mut_cause, by) {
+            match (facts.mut_cause.filter(|_| implementation.is_none()), by) {
                 (Some((at, why)), _) => whys.insert(key.clone(), (why, Some(at))),
                 (None, Some((t, by))) => whys.insert(key.clone(), (trait_why(t, &m.fun.name, by), None)),
                 // kept `&mut self` from a method with the same owner and name, and its reason
@@ -1997,11 +2029,10 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
                 changed = true;
             }
         }
-        // the first `&mut self` implementation (or default body) of an interface method spreads to the
-        // others; not a shared class's, whose handle changes the data behind `&self`
+        // a default body that changes its object makes the interface method `&mut self`
         for m in &methods {
-            if let Some(t) = &m.implements {
-                if decided[&(m.owner.clone(), m.fun.name.clone())] == Recv::RefMut && !k.classes.get(&m.owner).is_some_and(|c| c.is_shared) {
+            if let Some(t) = m.implements.as_ref().filter(|t| **t == m.owner) {
+                if decided[&(m.owner.clone(), m.fun.name.clone())] == Recv::RefMut {
                     trait_mut.entry((t.clone(), m.fun.name.clone())).or_insert_with(|| m.owner.clone());
                 }
             }
@@ -2021,6 +2052,17 @@ fn infer_receivers(k: &mut Crate, units: &[SourceUnit]) {
             break;
         }
     }
+    // an implementation that says `mut fun` itself, of an interface method that doesn't
+    for m in &methods {
+        if let Some(t) = m.implements.as_ref().filter(|t| **t != m.owner) {
+            let says_mut = m.fun.mods.is_mut || matches!(m.fun.self_param, Some(SelfParam::RefMut));
+            let shared = k.classes.get(&m.owner).is_some_and(|c| c.is_shared);
+            if says_mut && !shared && decided.get(&(t.clone(), m.fun.name.clone())) != Some(&Recv::RefMut) {
+                conflicts.insert((m.owner.clone(), m.fun.name.clone()), (t.clone(), "it is declared `mut fun`".into(), Some(m.fun.name_span)));
+            }
+        }
+    }
+    k.iface_conflicts = conflicts;
     for ((owner, name), recv) in decided {
         let why = (recv == Recv::RefMut).then(|| whys.remove(&(owner.clone(), name.clone()))).flatten();
         let mi = if let Some(c) = k.classes.get_mut(&owner) {
@@ -2660,24 +2702,32 @@ class Counter(var n: i32 = 0, var hits: Vec<i32> = vec[]) {
     }
 
     #[test]
-    fn interface_methods_say_which_implementation_changes_its_object() {
+    fn implementations_take_the_interfaces_receiver() {
+        // `Circle.grow` changes its object, but `Shape.grow` doesn't say `mut`: an error there,
+        // and every implementation stays `&self`
         let src = r#"
 interface Shape { fun grow() }
 class Circle(var r: i32) : Shape { override fun grow() { r += 1 } }
 class Dot() : Shape { override fun grow() {} }
+shared class Ring(var r: i32) : Shape { override fun grow() { r += 1 } }
 "#;
-        assert_eq!(receivers(src, "Circle")["grow"].1, Some(("it changes `r`".into(), Some("r".into()))));
-        let (recv, why) = receivers(src, "Dot")["grow"].clone();
-        assert_eq!(recv, Recv::RefMut);
-        assert_eq!(why, Some(("the interface method `Shape.grow` changes its object in `Circle`, so every implementation takes `&mut self`".into(), None)));
+        let (file, _) = crate::parser::parse_file(src);
+        let k = collect(&[SourceUnit { module: Vec::new(), file: &file }], "main", HashSet::new(), false);
+        let (iface, why, at) = &k.iface_conflicts[&("Circle".to_string(), "grow".to_string())];
+        assert_eq!((iface.as_str(), why.as_str()), ("Shape", "it changes `r`"));
+        assert_eq!(at.map(|s| &src[s.start as usize..s.end as usize]), Some("r"));
+        assert_eq!(k.iface_conflicts.len(), 1, "a shared class changes its data behind `&self`");
+        assert_eq!(receivers(src, "Circle")["grow"].0, Recv::Ref);
+        assert_eq!(receivers(src, "Dot")["grow"].0, Recv::Ref);
+        assert_eq!(receivers(src, "Shape")["grow"].0, Recv::Ref);
     }
 
     #[test]
     fn calling_an_interface_method_that_changes_its_object_changes_this() {
-        // `Dot.grow` and `Point.grow` change nothing, but are `&mut self` like `Circle.grow`
+        // `Dot.grow` and `Point.grow` change nothing, but are `&mut self` as `Shape.grow` says
         let src = r#"
 interface Shape {
-    fun grow()
+    mut fun grow()
     fun grow_twice() { grow(); grow() }
 }
 class Dot() : Shape {
@@ -2692,7 +2742,7 @@ impl Point { fun twice() { this.grow() } }
 "#;
         let calls = |name: &str, call: &str| Some((format!("it calls `{}()`, which changes `this`", name), Some(call.to_string())));
         let dot = receivers(src, "Dot");
-        assert_eq!(dot["grow"].1, Some(("the interface method `Shape.grow` changes its object in `Circle`, so every implementation takes `&mut self`".into(), None)));
+        assert_eq!(dot["grow"].0, Recv::RefMut);
         assert_eq!(dot["twice"], (Recv::RefMut, calls("grow", "grow()")));
         assert_eq!(dot["thrice"], (Recv::RefMut, calls("twice", "twice()")));
         assert_eq!(receivers(src, "Point")["twice"], (Recv::RefMut, calls("grow", "this.grow()")));

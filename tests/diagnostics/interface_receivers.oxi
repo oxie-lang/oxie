@@ -1,0 +1,29 @@
+// An implementation can't change its object in a method its interface declares without `mut`:
+// the interface decides the receiver, so calls through it never depend on one implementation.
+
+interface Shape {
+    fun area(): f64
+    mut fun grow()
+    fun describe(): String = "area ${area()}"
+}
+
+class Square(var side: f64) : Shape {
+    override fun area() = side * side
+    override fun grow() { side += 1.0 }
+}
+
+class Blob(var r: f64, var calls: i32 = 0) : Shape {
+    override fun area(): f64 {
+        calls += 1 // error: 17: `Blob.area` can't change its object: the interface method `Shape.area` doesn't
+        return 3.14 * r * r
+    }
+    override fun grow() {}
+}
+
+fun describe(s: &Shape) = println("area ${s.area()}")
+
+fun main() {
+    var sq = Square(3.0)
+    sq.grow()
+    describe(sq)
+}

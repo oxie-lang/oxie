@@ -55,7 +55,7 @@ fn translate_dir(dir: &Path, out: &Path) -> Result<ExitCode, String> {
     let srcs: Vec<String> = files.iter().map(|f| std::fs::read_to_string(f).map_err(|e| format!("{}: {}", f.display(), e))).collect::<Result<_, _>>()?;
     let refs: Vec<&str> = srcs.iter().map(String::as_str).collect();
     let mut failed = false;
-    let translations = oxie_from_rust::translate_crate(&refs);
+    let translations = oxie_from_rust::translate_crate_as(&refs, dir.join("lib.rs").is_file());
     let translated: Vec<&PathBuf> = files.iter().zip(&translations).filter(|(_, t)| t.is_ok()).map(|(f, _)| f).collect();
     for (f, t) in files.iter().zip(&translations) {
         let name = f.display();

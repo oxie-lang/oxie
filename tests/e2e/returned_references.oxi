@@ -1,0 +1,32 @@
+// A returned reference borrows from the parameters its value comes from (`m.get(key)` from `m`),
+// not from every reference parameter: an argument that is a temporary, or a variable that ends
+// before the result, is fine for the others.
+
+data class Item(name: String, price: i32)
+
+fun lookup(m: &[String: i32], key: &str): &i32? = m.get(key)
+
+fun find(items: [Item], name: String): &Item? = items.find { it.name == name }
+
+fun cheaper(a: &Item, b: &Item, label: &str): &Item {
+    println("comparing for $label")
+    return if (a.price <= b.price) a else b
+}
+
+fun main() {
+    val m: [String: i32] = ["ada": 1]
+    val hit = lookup(m, "ADA".to_lowercase())
+    println(hit)
+
+    val items: [Item] = [Item("pen", 2), Item("ink", 5)]
+    var best: &Item? = null
+    for (q in ["ink", "pen"]) {
+        val wanted = q.to_string()
+        val it = find(items, wanted)
+        if (best == null) best = it
+    }
+    println(best?.price)
+
+    val c = cheaper(items[0], items[1], "today".to_uppercase())
+    println(c.name)
+}

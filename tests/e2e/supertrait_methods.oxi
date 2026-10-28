@@ -1,0 +1,22 @@
+// A class implements the methods of the interfaces its interfaces extend without listing them:
+// `class Sq : Shape` with `interface Shape : Named` implements `Named` too.
+
+interface Named { fun name(): String }
+interface Shape : Named {
+    fun area(): f64
+    fun describe(): String = "${name()} of area ${area()}"
+}
+class Sq(side: f64) : Shape {
+    override fun name() = "square"
+    override fun area() = side * side
+}
+
+fun show(s: &Shape) = println(s.describe())
+fun greet(n: &Named) = println("hello ${n.name()}")
+
+fun main() {
+    val s = Sq(2.0)
+    println("${s.name()} ${s.area()}")
+    show(s)
+    greet(s)
+}

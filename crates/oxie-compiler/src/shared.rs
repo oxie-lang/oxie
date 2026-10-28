@@ -22,6 +22,7 @@
 //! `a.items.push(x)` / `a.items.len()` borrow the object for that one call.
 
 use super::*;
+use crate::lower_expr::strip_paren;
 
 const COPY_TYPES: &[&str] = &[
     "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "bool", "char", "Int", "Long", "Double", "Float", "Boolean", "Char",
@@ -117,10 +118,14 @@ impl<'a> Lowerer<'a> {
             let external = self.k.has_lib && vis.starts_with("pub ") && fvis.starts_with("pub ");
             // kept where something may call it, without `#[allow(dead_code)]` where this class's is called
             let keep = |l: &Self, name: &str| l.crate_calls.is_none() || external || l.crate_calls(name);
+            let weak = self.weak_parts(ty).filter(|_| f.is_weak());
             if !method_names.contains(&f.name.as_str()) && keep(self, &f.name) {
                 let allow = self.unused_allowed(&format!("{}::{}", t.name, f.name));
                 self.e.nl();
-                if self.is_cloneable(ty, &tparams) {
+                if weak.is_some() {
+                    let place = format!("self.0.{}.{}", read, name);
+                    self.e.w(&format!("{}{}fn {}(&self) -> {} {{\n    {}\n}}", allow, fvis, name, fty, self.weak_upgrade(&place, ty)));
+                } else if self.is_cloneable(ty, &tparams) {
                     let bound = match ty.single_name() {
                         Some(n) if tparams.iter().any(|p| p == n) => format!(" where {}: {}", n, clone),
                         _ => String::new(),
@@ -138,7 +143,8 @@ impl<'a> Lowerer<'a> {
             let setter = format!("set_{}", f.name);
             if !method_names.contains(&setter.as_str()) && keep(self, &setter) {
                 self.e.nl();
-                self.e.w(&format!("{}{}fn {}(&self, value: {}) {{\n    self.0.{}.{} = value;\n}}", self.unused_allowed(&format!("{}::{}", t.name, setter)), fvis, esc(&setter), self.ty(ty, TyPos::Field), write, name));
+                let value = weak.as_ref().map_or("value".to_string(), |w| Self::weak_from("value", w));
+                self.e.w(&format!("{}{}fn {}(&self, value: {}) {{\n    self.0.{}.{} = {};\n}}", self.unused_allowed(&format!("{}::{}", t.name, setter)), fvis, esc(&setter), self.ty(ty, TyPos::Field), write, name, value));
                 self.e.nl();
             }
         }
@@ -146,7 +152,9 @@ impl<'a> Lowerer<'a> {
         let inherent: Vec<&Item> = t.members.iter().filter(|m| !forwarded.iter().any(|(_, ms)| ms.iter().any(|x| std::ptr::eq(*x, *m)))).collect();
         for m in inherent {
             let ItemKind::Fun(f) = &m.kind else { continue };
-            if f.mods.is_operator || (f.mods.is_override && (f.name == "toString" || f.name == "to_string")) {
+            // `Drop` is the data's: the handle has nothing to forward
+            let drop = f.name == "drop" && f.params.is_empty() && t.supertypes.iter().any(|s| s.last_name() == Some("Drop"));
+            if f.mods.is_operator || (f.mods.is_override && (f.name == "toString" || f.name == "to_string")) || drop {
                 continue;
             }
             let recv = self.recv_of(&t.name, f);
@@ -321,6 +329,9 @@ impl<'a> Lowerer<'a> {
                 return false; // the getter already returns a copy of the handle
             }
         }
+        if self.weak_read(e).is_some() {
+            return false; // upgraded, so already a copy of the handle
+        }
         let optional_handle = || matches!(self.infer_type(e), Some(Type::Option(t)) if t.single_name().and_then(|n| self.class_info(n)).is_some_and(|c| c.is_shared));
         self.is_place(e) && !matches!(e.kind, ExprKind::SelfValue) && (self.shared_class_of(e).is_some() || optional_handle())
     }
@@ -384,6 +395,18 @@ impl<'a> Lowerer<'a> {
             ExprKind::Index(r, _) | ExprKind::MethodCall { recv: r, safe: false, .. } => self.shared_base(r),
             _ => None,
         }
+    }
+
+    /// Does `e` read through a shared handle's field in one chain (`m.data.len()`), whose borrow
+    /// Rust keeps until the end of the statement? A plain field read goes through the getter,
+    /// which ends its borrow inside.
+    pub(crate) fn holds_shared_borrow(&self, e: &Expr) -> bool {
+        let mut e = e;
+        while let ExprKind::Paren(x) = &e.kind {
+            e = x;
+        }
+        let getter = matches!(&e.kind, ExprKind::Field { recv, name, safe: false } if self.shared_field(recv, name).is_some());
+        !getter && self.shared_base(e).is_some()
     }
 
     /// Replaces the shared `obj.field` at the bottom of a chain with a borrowed base.
@@ -544,6 +567,104 @@ impl<'a> Lowerer<'a> {
         true
     }
 
+    // ------------------------------------------------------------------ @weak fields
+
+    /// The Rust of a `@weak` field of type `ty` (`Node?`), or None when `ty` isn't an optional
+    /// shared class.
+    pub(crate) fn weak_parts(&self, ty: &Type) -> Option<WeakParts> {
+        let Type::Option(inner) = ty else { return None };
+        let Type::Path { global, segs, span } = &**inner else { return None };
+        let c = self.class_info(&segs.last()?.name).filter(|c| c.is_shared)?;
+        let (ptr, weak, cell) = if c.is_sync { ("std::sync::Arc", "std::sync::Weak", "std::sync::Mutex") } else { ("std::rc::Rc", "std::rc::Weak", "std::cell::RefCell") };
+        let mut data = segs.clone();
+        data.last_mut()?.name = Self::shared_data_name(&c.name);
+        let data = self.ty(&Type::Path { global: *global, segs: data, span: *span }, TyPos::Field);
+        let mut handle = segs.clone();
+        handle.last_mut()?.generics = None;
+        let handle = self.ty(&Type::Path { global: *global, segs: handle, span: *span }, TyPos::Plain);
+        let weak = self.std_name(weak);
+        Some(WeakParts { ty: format!("{}<{}<{}>>", weak, self.std_name(cell), data), new: format!("{}::new", weak), downgrade: format!("{}::downgrade", self.std_name(ptr)), handle })
+    }
+
+    /// The type of the `@weak` field `name` of the class being lowered (seen from its methods).
+    pub(crate) fn own_weak_field(&self, name: &str) -> Option<Type> {
+        let c = self.class.as_ref()?;
+        if c.is_static || self.shared_handle_ty.is_none() || self.is_local(name) {
+            return None;
+        }
+        let info = self.class_info(&c.name)?;
+        info.fields.iter().find(|f| f.name == name && f.weak).map(|f| f.ty.clone())
+    }
+
+    /// A read of a `@weak` field inside its class's methods (`parent`, `this.parent`): its type.
+    pub(crate) fn weak_read(&self, e: &Expr) -> Option<Type> {
+        match &strip_paren(e).kind {
+            ExprKind::Path { segs, generics: None, global: false } if segs.len() == 1 && self.implicit_field(&segs[0]).is_some() => self.own_weak_field(&segs[0]),
+            ExprKind::Field { recv, name, safe: false } if matches!(recv.kind, ExprKind::SelfValue) => self.own_weak_field(name),
+            _ => None,
+        }
+    }
+
+    /// `self.parent.upgrade().map(Node)`: the field `place` read as an optional handle.
+    pub(crate) fn weak_upgrade(&self, place: &str, ty: &Type) -> String {
+        match self.weak_parts(ty) {
+            Some(w) => format!("{}.upgrade().map({})", place, w.handle),
+            None => place.to_string(),
+        }
+    }
+
+    /// `this.parent` inside the class: the upgraded handle. Returns true if `e` was handled.
+    pub(crate) fn weak_field_read(&mut self, e: &Expr) -> bool {
+        let ExprKind::Field { name, .. } = &e.kind else { return false };
+        let (Some(ty), Some(c)) = (self.weak_read(e), self.class.as_ref()) else { return false };
+        let place = format!("{}.{}", c.self_name, esc(name));
+        self.e.mark(e.span);
+        self.e.w(&self.weak_upgrade(&place, &ty));
+        true
+    }
+
+    /// The value `e` of type `ty` (`Node?`) as the `Weak` a `@weak` field holds: `Weak::new()`
+    /// for `null`, `Rc::downgrade(&node.0)` for a handle.
+    pub(crate) fn weak_value(&mut self, e: &Expr, ty: &Type) -> String {
+        let Some(w) = self.weak_parts(ty) else { return self.capture(e, P_LOWEST) };
+        if matches!(strip_paren(e).kind, ExprKind::Null) {
+            return format!("{}()", w.new);
+        }
+        if self.shared_class_of(e).is_some() {
+            // only borrowed for the downgrade, so no copy of the handle
+            let h = self.capture(e, P_POSTFIX);
+            let h = h.strip_suffix(".clone()").unwrap_or(&h);
+            return format!("{}(&{}.0)", w.downgrade, h);
+        }
+        let saved = std::mem::replace(&mut self.e, Emitter::new());
+        self.coerce(e, ty, TyPos::Field);
+        let v = std::mem::replace(&mut self.e, saved).buf;
+        Self::weak_from(&v, &w)
+    }
+
+    /// `value.map_or_else(Weak::new, |n| Rc::downgrade(&n.0))` for an optional handle `value`.
+    pub(crate) fn weak_from(value: &str, w: &WeakParts) -> String {
+        format!("{}.map_or_else({}, |n| {}(&n.0))", value, w.new, w.downgrade)
+    }
+
+    /// `parent = v` / `this.parent = v` inside the class. Returns true if handled.
+    pub(crate) fn weak_assign(&mut self, op: Option<BinOp>, target: &Expr, value: &Expr) -> bool {
+        let Some(ty) = self.weak_read(target) else { return false };
+        let name = match &strip_paren(target).kind {
+            ExprKind::Path { segs, .. } => segs[0].clone(),
+            ExprKind::Field { name, .. } => name.clone(),
+            _ => return false,
+        };
+        if op.is_some() {
+            return false;
+        }
+        let self_name = self.class.as_ref().map_or("self".to_string(), |c| c.self_name.clone());
+        let v = self.weak_value(value, &ty);
+        self.e.mark(target.span);
+        self.e.w(&format!("{}.{} = {}", self_name, esc(&name), v));
+        true
+    }
+
     fn assign_field_type(&self, recv: &Expr, field: &str) -> Option<Type> {
         let t = self.infer_type(recv)?;
         let name = match &t {
@@ -552,6 +673,18 @@ impl<'a> Lowerer<'a> {
         };
         self.class_info(&name)?.fields.iter().find(|f| f.name == field).map(|f| f.ty.clone())
     }
+}
+
+/// What a `@weak` field of a shared class is written with.
+pub(crate) struct WeakParts {
+    /// `Weak<RefCell<NodeData>>`
+    pub(crate) ty: String,
+    /// `Weak::new`
+    pub(crate) new: String,
+    /// `Rc::downgrade`
+    pub(crate) downgrade: String,
+    /// `Node`, the handle's constructor
+    pub(crate) handle: String,
 }
 
 /// Does a call in the chain `e` change what it is called on (`entry`, `iter_mut`, `push`)?

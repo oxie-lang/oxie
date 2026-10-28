@@ -1,0 +1,23 @@
+// A value read through a shared object (`m.data.len()`) ends its borrow before the next value
+// of the same print calls a method of the object: an `@sync` object's lock isn't taken twice,
+// and a `shared class` method that changes the object finds it free.
+
+@sync shared class Table(var data: [String: i32] = [:]) {
+    fun get(k: &str): i32 = data.get(k).copied().unwrap_or(0)
+}
+
+shared class Counter(var hits: [i32] = []) {
+    fun bump(): usize {
+        hits.push(1)
+        return hits.len()
+    }
+}
+
+fun main() {
+    val t = Table()
+    t.data.insert("a".to_string(), 1)
+    println("${t.data.len()} ${t.get("a")}")
+    val c = Counter()
+    println("${c.hits.len()} then ${c.bump()}")
+    println(c.hits.len(), c.bump())
+}

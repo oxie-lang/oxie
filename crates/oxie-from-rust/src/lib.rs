@@ -44,6 +44,12 @@ pub fn translate(src: &str) -> Result<Translation, String> {
 /// get their contexts from all the files: a method in another file's `impl` block drops the
 /// same parameters as one declared next to the class.
 pub fn translate_crate(srcs: &[&str]) -> Vec<Result<Translation, String>> {
+    translate_crate_as(srcs, false)
+}
+
+/// `translate_crate` for a library (`library`), whose public methods that change their object
+/// say `mut fun`, or a program.
+pub fn translate_crate_as(srcs: &[&str], library: bool) -> Vec<Result<Translation, String>> {
     let parsed: Vec<Result<syn::File, String>> = srcs
         .iter()
         .map(|src| {
@@ -58,6 +64,7 @@ pub fn translate_crate(srcs: &[&str]) -> Vec<Result<Translation, String>> {
     let empty = syn::File { shebang: None, attrs: Vec::new(), items: Vec::new() };
     let files: Vec<&syn::File> = parsed.iter().map(|p| p.as_ref().unwrap_or(&empty)).collect();
     let mut krate = contexts::scan(&files);
+    krate.library = library;
     let mut out = Vec::new();
     // a method kept as Rust takes its contexts as written, which the files that call it must
     // know: translate again until nothing more is kept

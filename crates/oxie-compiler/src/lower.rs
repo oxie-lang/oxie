@@ -401,6 +401,10 @@ pub struct Lowerer<'a> {
     pub param_notes: HashMap<(Span, usize), crate::params::ParamNote>,
     /// The parameters of the function being lowered that Oxie lends (see `params.rs`).
     pub(crate) lent: Vec<String>,
+    /// The file belongs to a library, whose `pub` items other crates use.
+    pub(crate) api: bool,
+    /// The receiver type of the extension function being lowered, when it isn't an Oxie type.
+    pub(crate) ext_self: Option<Type>,
     /// Functions declared in the blocks being lowered, with their parameters: calls go to them
     /// rather than to the crate's functions with their names.
     pub(crate) local_funs: Vec<(String, Vec<sema::ParamInfo>)>,
@@ -684,6 +688,8 @@ impl<'a> Lowerer<'a> {
             keep_args: false,
             param_notes: HashMap::new(),
             lent: Vec::new(),
+            api: false,
+            ext_self: None,
             local_funs: Vec::new(),
             aliases: HashSet::new(),
             fn_aliases: HashMap::new(),
@@ -2515,12 +2521,14 @@ impl<'a> Lowerer<'a> {
                 self.class = Some(ctx);
             }
         }
+        let saved_ext = std::mem::replace(&mut self.ext_self, self.class.is_none().then(|| recv_ty.clone()));
         if let Some(body) = &f.body {
             self.e.w(" ");
             self.fun_body(f, body);
         } else {
             self.error(f.name_span, "extension functions need a body");
         }
+        self.ext_self = saved_ext;
         self.class = saved_class;
         self.this_by_ref = saved_by_ref;
         self.this_by_value = saved_by_value;
@@ -2531,9 +2539,50 @@ impl<'a> Lowerer<'a> {
         self.e.nl();
     }
 
+    /// The error for an implementation of a `&self` interface method that changes its object: the
+    /// interface decides the receiver, so a change in one implementation never reaches the code
+    /// calling the method through the interface.
+    fn iface_conflict(&mut self, f: &FunDecl) {
+        let Some(class) = self.class.as_ref().map(|c| c.name.clone()) else { return };
+        let body = match &f.body {
+            Some(FunBody::Block(b)) => b.span,
+            Some(FunBody::Expr(e)) => e.span,
+            None => return,
+        };
+        let found = self.k.iface_conflicts.iter().find(|((owner, name), (_, _, at))| {
+            *name == f.name && owner.rsplit("::").next() == Some(class.as_str()) && at.is_some_and(|at| at.start >= f.name_span.start && at.end <= body.end)
+        });
+        let Some((_, (iface, why, at))) = found else { return };
+        let (iface, why, at) = (iface.clone(), why.clone(), at.unwrap_or(f.name_span));
+        let why = why.strip_prefix("it ").map_or(why.clone(), |w| format!("It {}", w));
+        let d = Diag::error(at, format!("`{}.{}` can't change its object: the interface method `{}.{}` doesn't", class, f.name, iface, f.name)).with_help(format!(
+            "{}. An interface decides whether its methods change their object, so code calling them through `{}` never depends on one implementation. If implementations may change it, write `mut fun {}` in `{}`.",
+            why, iface, f.name, iface
+        ));
+        self.diags.push(d);
+    }
+
+    /// The error for a public method of a library that changes its object without `mut fun`: its
+    /// signature (`&mut self`) would change with its body, and break the library's users.
+    fn public_change(&mut self, it: &Item, f: &FunDecl, why: Option<&(String, Option<Span>)>) {
+        let class = self.class.as_ref().map_or(String::new(), |c| format!("{}.", c.name));
+        let because = why.map_or(String::new(), |(w, _)| format!("It takes `&mut self` because {}. ", w));
+        let mut d = Diag::error(f.name_span, format!("`{}{}` is public and changes its object, so it must say so: `mut fun {}`", class, f.name, f.name)).with_help(format!(
+            "{}A library's public methods are its API: without `mut`, a change inside one would turn it from `&self` into `&mut self` and break the code of the library's users, with nothing here showing it.",
+            because
+        ));
+        // `fun` is right before the name, unless type parameters come between
+        let fun_at = f.name_span.start.saturating_sub(4);
+        if f.generics.params.is_empty() && fun_at >= it.span.start {
+            d = d.with_fix("add `mut`", vec![(Span::empty_at(fun_at), "mut ".into())]);
+        }
+        self.diags.push(d);
+    }
+
     /// Emits a method inside an impl/trait block.
     pub(crate) fn method(&mut self, it: &Item, f: &FunDecl, recv: Recv, vis_allowed: bool, rename: Option<&str>) {
         let trait_ret = self.pending_trait_ret.take();
+        self.iface_conflict(f);
         let lifetimes: Vec<String> = f.generics.params.iter().filter_map(|g| if let GenericParam::Lifetime { name, .. } = g { Some(name.clone()) } else { None }).collect();
         // an inferred `&mut self` says why
         let recv_why = (recv == Recv::RefMut && f.self_param.is_none() && !f.mods.is_mut).then(|| self.class.as_ref()?.methods.get(&f.name)?.recv_why.clone()).flatten();
@@ -2571,6 +2620,9 @@ impl<'a> Lowerer<'a> {
         let header = self.fn_header(f);
         let g = self.generics_decl(&f.generics);
         let iface_sig = self.in_trait_items || f.mods.is_override || self.class.as_ref().is_some_and(|c| c.trait_methods.as_ref().is_some_and(|t| t.contains(&f.name)));
+        if self.api && self.members_pub && vis == "pub " && recv == Recv::RefMut && f.self_param.is_none() && !f.mods.is_mut && !iface_sig && !self.trait_impl {
+            self.public_change(it, f, recv_why.as_ref());
+        }
         let saved_sig = std::mem::replace(&mut self.iface_sig, iface_sig);
         self.push_scope();
         let self_ref = recv_text.as_deref().is_some_and(|r| r.starts_with('&'));
@@ -2655,6 +2707,22 @@ impl<'a> Lowerer<'a> {
         ClassCtx { name: name.to_string(), fields, methods, self_name: "self".into(), is_static: false, generics: Vec::new(), trait_methods: Some(trait_methods), consts }
     }
 
+    /// `@weak` on a field that isn't an optional shared class of a shared class.
+    fn weak_misuse(&mut self, t: &TypeDecl, f: &Field, ty: &Type) {
+        let shared = |l: &Self, ty: &Type| ty.single_name().and_then(|n| l.class_info(n)).is_some_and(|c| c.is_shared);
+        let d = if !t.shared {
+            Diag::error(f.span, format!("`@weak` is for fields of a `shared class`, and `{}` is a plain class", t.name))
+                .with_help(format!("a plain class owns its fields, so nothing can refer back to it; make it `shared class {}` for objects that refer to each other", t.name))
+        } else if shared(self, ty) {
+            Diag::error(f.span, format!("a `@weak` field is optional: `{}: {}?`", f.name, crate::symbols::type_text(ty)))
+                .with_help("it is `null` once the object it refers to is freed")
+        } else {
+            Diag::error(f.span, format!("a `@weak` field holds an optional `shared class` object, not `{}`", crate::symbols::type_text(ty)))
+                .with_help("only objects of shared classes can be referred to without keeping them alive")
+        };
+        self.diags.push(d);
+    }
+
     fn field_type(&mut self, f: &Field) -> Type {
         if f.ty != Type::Infer {
             return f.ty.clone();
@@ -2729,9 +2797,18 @@ impl<'a> Lowerer<'a> {
                         self.e.nl();
                         self.e.mark(f.span);
                         self.docs(&f.docs);
-                        self.attrs(&f.attrs, &[]);
+                        let attrs: Vec<Attr> = f.attrs.iter().filter(|a| a.name() != "weak").cloned().collect();
+                        self.attrs(&attrs, &[]);
                         let fv = self.vis(&f.vis, ItemCtx::Top);
-                        let tt = self.ty(ty, TyPos::Field);
+                        let tt = match self.weak_parts(ty).filter(|_| f.is_weak() && t.shared) {
+                            Some(w) => w.ty,
+                            None => {
+                                if f.is_weak() {
+                                    self.weak_misuse(t, f, ty);
+                                }
+                                self.ty(ty, TyPos::Field)
+                            }
+                        };
                         self.e.w(&format!("{}{}: {},", fv, esc(&f.name), tt));
                     }
                     self.e.dedent();
@@ -2923,7 +3000,8 @@ impl<'a> Lowerer<'a> {
     fn split_members<'t>(&mut self, t: &'t TypeDecl) -> (Vec<String>, Vec<Type>, Vec<Vec<&'t Item>>, Vec<&'t Item>) {
         let mut derived = Vec::new();
         let mut impl_traits: Vec<Type> = Vec::new();
-        for st in &t.supertypes {
+        let supertypes = self.with_supertraits(t);
+        for st in &supertypes {
             let name = st.last_name().unwrap_or("");
             let has_member = t.members.iter().any(|m| self.member_trait_candidates(m, t).iter().any(|c| c == name));
             if DERIVABLE.contains(&name) && !has_member && matches!(st, Type::Path { segs, .. } if segs.len() == 1 && segs[0].generics.is_none()) {
@@ -2974,6 +3052,26 @@ impl<'a> Lowerer<'a> {
         (derived, impl_traits, by_trait, inherent)
     }
 
+    /// The supertypes of `t`, and the Oxie interfaces they extend that `t` implements methods of
+    /// without listing them (`class Sq : Shape` with `name()` of `interface Shape : Named`): Rust
+    /// implements those in `impl Named for Sq`.
+    fn with_supertraits(&self, t: &TypeDecl) -> Vec<Type> {
+        let mut out = t.supertypes.clone();
+        let mut stack: Vec<String> = t.supertypes.iter().filter_map(|st| st.last_name()).filter_map(|n| self.k.traits.get(n)).flat_map(|ti| ti.supertraits.clone()).collect();
+        while let Some(n) = stack.pop() {
+            let Some(ti) = self.k.traits.get(&n) else { continue };
+            if out.iter().any(|st| st.last_name() == Some(n.as_str())) {
+                continue;
+            }
+            let implemented = t.members.iter().any(|m| matches!(&m.kind, ItemKind::Fun(f) if f.mods.is_override && ti.methods.contains_key(&f.name)));
+            if implemented && ti.generics.is_empty() {
+                out.push(Type::simple(&n));
+            }
+            stack.extend(ti.supertraits.iter().cloned());
+        }
+        out
+    }
+
     /// Names of supertypes (Oxie or std traits) that declare this member.
     fn member_trait_candidates(&self, m: &Item, t: &TypeDecl) -> Vec<String> {
         let mut out = Vec::new();
@@ -2982,7 +3080,7 @@ impl<'a> Lowerer<'a> {
             ItemKind::TypeAlias { name, .. } => (name.as_str(), true),
             _ => return out,
         };
-        for st in &t.supertypes {
+        for st in &self.with_supertraits(t) {
             let Some(sn) = st.last_name() else { continue };
             if let Some(ti) = self.k.traits.get(sn) {
                 if (!is_type && ti.methods.contains_key(name)) || (is_type && ti.assoc_types.iter().any(|a| a == name)) {
@@ -3076,8 +3174,15 @@ impl<'a> Lowerer<'a> {
                 self.e.nl();
                 // a field that exists only in some builds (`@cfg(test)`) is set only there
                 self.e.w(&cfg_attrs(&f.attrs));
-                if f.in_ctor || as_locals.contains(&f.name) {
+                let weak = self.weak_parts(ty).filter(|_| f.is_weak() && t.shared);
+                if let (Some(w), true) = (&weak, f.in_ctor || as_locals.contains(&f.name)) {
+                    // a `@weak` field keeps a `Weak` of the handle it's given
+                    self.e.w(&format!("{}: {},", esc(&f.name), Self::weak_from(&esc(&f.name), w)));
+                } else if f.in_ctor || as_locals.contains(&f.name) {
                     self.e.w(&format!("{},", esc(&f.name)));
+                } else if let (Some(_), Some(d)) = (&weak, &f.default) {
+                    let v = self.weak_value(d, ty);
+                    self.e.w(&format!("{}: {},", esc(&f.name), v));
                 } else {
                     self.e.w(&format!("{}: ", esc(&f.name)));
                     match &f.default {
@@ -4299,7 +4404,20 @@ fn ret_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> usize) -> Fun
         }
     }
     let ret_mut = has_mut_ref(ret);
+    // the parameters the result can come from, when the body tells: the others keep lifetimes of
+    // their own, so `lookup(map, key.to_lowercase())` doesn't keep the temporary `key` borrowed
+    let refs_of = |t: &Type| {
+        let mut n = 0;
+        count(t, &mut n, lt);
+        n
+    };
+    let sources = if f.mods.is_override { None } else { ret_sources(f) }.filter(|s| f.params.iter().any(|p| p.name().is_some_and(|n| s.contains(n)) && refs_of(&p.ty) > 0));
     for p in &mut f2.params {
+        if let (Some(s), Some(n)) = (&sources, p.name()) {
+            if !s.contains(n) {
+                continue;
+            }
+        }
         match &mut p.ty {
             // `c: &mut Cursor` of a type that borrows (`Cursor<'a>`): the result borrows what the
             // cursor borrows, not the cursor, which `&'a mut Cursor<'a>` would keep borrowed as
@@ -4317,6 +4435,75 @@ fn ret_lifetimes(f: &FunDecl, self_ref: bool, lt: &dyn Fn(&str) -> usize) -> Fun
     }
     set(f2.ret.as_mut().unwrap(), &l, lt);
     f2
+}
+
+/// The names a function's result can borrow from: the variables at the root of every value it
+/// returns (`m.get(key)` borrows `m`, `items.find { .. }` borrows `items`), or `None` when one of
+/// them could borrow from anything (a call, an unknown method).
+fn ret_sources(f: &FunDecl) -> Option<HashSet<String>> {
+    // methods whose result borrows only from the object they are called on
+    const OWN_RESULT: &[&str] = &[
+        "get", "get_mut", "first", "last", "first_mut", "last_mut", "find", "filter", "iter", "iter_mut", "unwrap", "expect", "as_ref", "as_mut", "as_deref", "as_deref_mut", "as_str",
+        "as_slice", "as_path", "trim", "trim_start", "trim_end", "max_by_key", "min_by_key", "max_by", "min_by", "max", "min", "next", "peek", "get_key_value", "values", "keys", "rev",
+        "skip", "take", "step_by", "split_first", "split_last", "strip_prefix", "strip_suffix", "chars", "lines", "split", "split_whitespace", "borrow", "deref",
+    ];
+    fn block(b: &Block, out: &mut HashSet<String>) -> bool {
+        match b.stmts.last() {
+            Some(Stmt::Expr { expr, semi: false }) => root(expr, out),
+            // a block that ends otherwise returns through `return` (or never)
+            _ => true,
+        }
+    }
+    fn root(e: &Expr, out: &mut HashSet<String>) -> bool {
+        match &e.kind {
+            ExprKind::Path { .. } => match e.ident() {
+                Some(n) => {
+                    out.insert(n.to_string());
+                    true
+                }
+                None => false,
+            },
+            ExprKind::Str(_) | ExprKind::RawStr(_) | ExprKind::Null | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Char(_) => true,
+            ExprKind::Paren(x) | ExprKind::Unwrap(x) | ExprKind::Try(x) | ExprKind::Unary(UnOp::Ref | UnOp::RefMut | UnOp::Deref, x) => root(x, out),
+            ExprKind::Field { recv, .. } | ExprKind::Index(recv, _) => root(recv, out),
+            ExprKind::MethodCall { recv, name, .. } if OWN_RESULT.contains(&name.as_str()) => root(recv, out),
+            ExprKind::Elvis(a, b) => root(a, out) && root(b, out),
+            ExprKind::If { then, else_, .. } => block(then, out) && else_.as_ref().is_none_or(|x| root(x, out)),
+            ExprKind::When { arms, .. } => arms.iter().all(|a| root(&a.body, out)),
+            ExprKind::Block(b) => block(b, out),
+            ExprKind::Return(Some(x)) => root(x, out),
+            ExprKind::Return(None) | ExprKind::Throw(_) | ExprKind::Continue(_) | ExprKind::Break { .. } => true,
+            _ => false,
+        }
+    }
+    let mut out = HashSet::new();
+    let ok = match f.body.as_ref()? {
+        FunBody::Expr(e) => root(e, &mut out),
+        FunBody::Block(b) => block(b, &mut out),
+    };
+    // and every `return` (not those of lambdas)
+    let mut returns_ok = true;
+    let mut check = |e: &Expr| -> bool {
+        match &e.kind {
+            ExprKind::Lambda { .. } => false,
+            ExprKind::Return(Some(x)) => {
+                returns_ok &= root(x, &mut out);
+                true
+            }
+            _ => true,
+        }
+    };
+    match f.body.as_ref()? {
+        FunBody::Expr(e) => visit::walk_expr(e, &mut check),
+        FunBody::Block(b) => {
+            for s in &b.stmts {
+                visit::walk_stmt(s, &mut check);
+            }
+        }
+    }
+    // every root is a parameter, and one at least
+    let params: HashSet<&str> = f.params.iter().filter_map(|p| p.name()).collect();
+    (ok && returns_ok && !out.is_empty() && out.iter().all(|n| params.contains(n.as_str()))).then_some(out)
 }
 
 /// Replaces the name `from` with `to` everywhere in `e`.

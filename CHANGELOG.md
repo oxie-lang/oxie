@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+What a method or function signature says no longer changes with code elsewhere: an
+interface decides whether its methods change their object, a library's public methods say so
+themselves, and a returned reference borrows only from the parameters it comes from.
+
+### Upgrading
+
+* An interface method changes its object only when the interface says so: `mut fun bump()`
+  (or its default body changes it). Oxie used to make it `&mut self` in every implementation
+  as soon as one implementation changed its object, which could break code calling the method
+  through the interface in another file. An implementation that changes its object in a method
+  the interface declares with plain `fun` is now an error at that implementation, telling to
+  write `mut fun` in the interface. A `shared class` changes its data behind `&self`, so its
+  implementations are fine as they are. Oxie's tests needed `mut fun` in 5 interfaces.
+* In a library, a public method of a public class that changes its object must say `mut fun`
+  (`pub mut fun bump()`): it used to turn into `&mut self` silently, changing the library's API.
+  The error comes with the fix.
+* Extension functions borrow their parameters unless they say `own`, as other functions do:
+  `fun String.wrap(with: String)` takes `&str`, and `fun Vec<String>.add(n: String)` copies the
+  text it keeps.
+
+### Changes
+
+* A function returning a reference ties it to the parameters its value comes from (`m.get(key)`
+  borrows `m`, `items.find { .. }` borrows `items`), not to every reference parameter, so a
+  temporary or short-lived argument for the others works: `lookup(scores, name.to_lowercase())`.
+  When Oxie can't tell (the value is a call's), it still ties the result to all of them.
+* `if (x == null || x.is_empty()) a else b` unwraps `x` in `b`, as `if (x == null) a else b` does.
+* `println(user!!.name)` and `"${user!!.name}"` read through `user` without taking it.
+* A class implements the methods of the interfaces its interfaces extend without listing them:
+  `class Sq : Shape` with `override fun name()` from `interface Shape : Named`.
+* `x.copy()` without arguments copies a data class.
+* A loop over `xs.iter().rev()` (or `.skip(n)`, `.filter { }`, ...) lends its elements' method
+  calls their arguments, as a loop over `xs.iter()` does.
+* A value read through a shared object in a print (`"${m.data.len()} ${m.get("a")}"`) ends its
+  borrow before the next value: an `@sync` object no longer panics there, waiting for its own
+  lock.
+* New warnings where Kotlin would change the original: changing a copy of a `Copy` data class
+  (`var p = points[0]; p.x = 5` while `points[0]` is read afterwards), and changing a whole field
+  read from a `shared class` (`var h = acc.history; h.push(1)`). Each offers the explicit copy
+  as a fix.
+* `@weak` fields: a `shared class` field marked `@weak` (`@weak var parent: Node? = null`)
+  refers to another shared object without keeping it alive, so objects that refer to each other
+  are freed. It reads as the object while it exists and `null` after, and a null check unwraps
+  it for the branch. Oxie generates `Weak` with `upgrade` and `downgrade` for it.
+* `override fun drop()` of `Drop` takes `&mut self` whatever its body does (it used to be
+  `&self`, which Rust rejects), and a `shared class` implementing `Drop` no longer forwards
+  `drop` from its handle.
+* `return a ?: b` in a function returning `T?`, where `b` is a value, wraps the result in `Some`.
+* A loop that changes the objects of a list of `shared class` handles
+  (`for (o in others) o.friends.push(this)`) no longer counts as changing the list, so a
+  borrowed `[Pet]` parameter works.
+
 ## 0.6.0 - 2026-10-28
 
 A parameter is borrowed unless it says `own`. Oxie used to decide from a function's body whether

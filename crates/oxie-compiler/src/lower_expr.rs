@@ -522,6 +522,7 @@ impl<'a> Lowerer<'a> {
         }
         for (i, s) in stmts.iter().enumerate() {
             self.e.nl();
+            self.copy_then_change(s, &stmts[i + 1..]);
             if Some(i) == tail_idx {
                 if let Stmt::Expr { expr, .. } = s {
                     self.e.mark(expr.span);
@@ -1313,6 +1314,66 @@ impl<'a> Lowerer<'a> {
     }
 
     /// `{ stmts }` in statement mode.
+    /// The warning for `var v = <a copy>` that the statements after it change, where Kotlin would
+    /// change the original: a field of a shared object (`var h = acc.history`), or a value of a
+    /// `Copy` data class (`var p = ps[0]`) whose original is read afterwards.
+    fn copy_then_change(&mut self, s: &Stmt, rest: &[Stmt]) {
+        let Stmt::Let { pat: Pat::Ident { name, mutable: true, sub: None, .. }, init: Some(init), .. } = s else { return };
+        let init = strip_paren(init);
+        let Some(ty) = self.infer_type(init) else { return };
+        let rest_block = Block { stmts: rest.to_vec(), span: init.span };
+        let changing = self.changing_methods(Some(&ty));
+        // `v.x = 1`, `v.push(..)`: `writes_through` also counts `v = ..`, which isn't a change of the copy
+        let mut assigned_whole = false;
+        visit::walk_block(&rest_block, &mut |e| {
+            assigned_whole |= matches!(&e.kind, ExprKind::Assign(None, place, _) if place.ident() == Some(name.as_str()));
+            !assigned_whole
+        });
+        if assigned_whole || !visit::writes_through(&rest_block, name, &|m| changing.contains(m)) {
+            return;
+        }
+        fn text(e: &Expr) -> String {
+            match &e.kind {
+                ExprKind::Field { recv, name, .. } => format!("{}.{}", text(recv), name),
+                ExprKind::Index(recv, i) => format!("{}[{}]", text(recv), text(i)),
+                ExprKind::Paren(x) => text(x),
+                ExprKind::Int(n) => n.clone(),
+                ExprKind::SelfValue => "this".into(),
+                _ => e.ident().unwrap_or("..").to_string(),
+            }
+        }
+        // a field of a shared object: its getter's copy
+        if let ExprKind::Field { recv, name: field, safe: false } = &init.kind {
+            if self.shared_field(recv, field).is_some() && !self.copy_elem(&ty) {
+                let (obj, place) = (text(recv), text(init));
+                let d = crate::diag::Diag::warning(init.span, format!("`{}` is a copy of `{}`: changing it doesn't change `{}`", name, place, obj)).with_help(format!(
+                    "Reading a field of a shared object copies the field. To change the object's `{}`, change it in place (`{}.push(..)`); to keep a copy, say so: `{}.clone()`.",
+                    field, place, place
+                ));
+                self.diags.push(d.with_fix("copy it with `.clone()`", vec![(Span::empty_at(init.span.end), ".clone()".into())]));
+                return;
+            }
+        }
+        // a value of a `Copy` data class, copied from a place whose root is read afterwards
+        let auto_copy = ty.single_name().is_some_and(|n| self.k.derives.get(n).is_some_and(|d| d.iter().any(|x| x == "Copy")) && self.class_info(n).is_some_and(|c| c.is_data && !c.is_shared));
+        let mut root = init;
+        while let ExprKind::Field { recv, safe: false, .. } | ExprKind::Index(recv, _) = &root.kind {
+            root = strip_paren(recv);
+        }
+        let Some(root_name) = root.ident().filter(|r| self.is_local(r) && *r != name) else { return };
+        if !auto_copy || !matches!(init.kind, ExprKind::Path { .. } | ExprKind::Field { .. } | ExprKind::Index(..)) || !visit::stmts_use(rest, root_name) {
+            return;
+        }
+        let place = text(init);
+        let d = crate::diag::Diag::warning(init.span, format!("`{}` is a copy of `{}`: changing it doesn't change `{}`", name, place, place)).with_help(format!(
+            "`{}` is a `Copy` data class (all its fields are), so assigning it copies the value, where Kotlin would share the object. To change the original, change `{}` itself; to keep a copy, say so: `{}.copy()`.",
+            ty.single_name().unwrap_or_default(),
+            place,
+            place
+        ));
+        self.diags.push(d.with_fix("copy it with `.copy()`", vec![(Span::empty_at(init.span.end), ".copy()".into())]));
+    }
+
     pub(crate) fn block_stmt(&mut self, b: &Block) {
         self.e.w("{");
         self.e.indent();
@@ -1565,6 +1626,12 @@ impl<'a> Lowerer<'a> {
             Type::Option(inner) if pos == TyPos::Param && matches!(&**inner, Type::Ref { mutable: false, .. }) && self.lent_optional_arg(e, inner) => {}
             Type::Option(inner) => match &e.kind {
                 ExprKind::Null => self.e.w("None"),
+                // `a ?: b` with a value `b` (not a `T?`) is a value: `Some(..)`
+                ExprKind::Elvis(_, r) if !r.diverges() && !matches!(r.kind, ExprKind::Null) && !matches!(self.infer_type(r), None | Some(Type::Option(_)) | Some(Type::Infer)) => {
+                    self.e.w("Some(");
+                    self.expr(e, P_LOWEST);
+                    self.e.w(")");
+                }
                 // an interface value for a `Shape?` field or variable: `Some(Box::new(s))`
                 _ if matches!(pos, TyPos::Field | TyPos::Generic | TyPos::Local)
                     && matches!(&**inner, Type::Path { segs, .. } if segs.len() == 1 && self.is_trait_name(&segs[0].name) && self.boxes_into(e, &segs[0].name)) =>
@@ -2510,8 +2577,10 @@ impl<'a> Lowerer<'a> {
                 return self.expr_inner(&e);
             }
         }
-        // fields of shared-class handles
+        // fields of shared-class handles, and `@weak` fields inside their class
         match &e.kind {
+            Field { safe: false, .. } if self.weak_field_read(e) => return,
+            Assign(op, target, value) if self.weak_assign(*op, target, value) => return,
             Field { safe: false, .. } | Index(..) | MethodCall { safe: false, .. } if self.shared_access(e) => return,
             Assign(op, target, value) if self.shared_assign(*op, target, value) => return,
             _ => {}
@@ -2602,7 +2671,7 @@ impl<'a> Lowerer<'a> {
             }
             Binary(op @ (BinOp::Or | BinOp::And), l, r) if self.null_guard(*op, l, r).is_some() => {
                 let (x, ty, by_value) = self.null_guard(*op, l, r).unwrap();
-                self.e.w(&esc(&x));
+                self.e.w(&self.narrow_source(&x));
                 if !by_value {
                     self.e.w(".as_ref()");
                 }
@@ -3049,7 +3118,7 @@ impl<'a> Lowerer<'a> {
                     }
                     (Pat::Ident { by_ref: false, sub: None, .. }, None) if lent.is_some() => lent.clone().map(|(t, copy)| if lent_copy && copy { t } else { Type::Ref { lifetime: None, mutable: false, inner: Box::new(t) } }),
                     // `for (s in &names)` and `names.iter()`: references to the elements
-                    (Pat::Ident { by_ref: false, sub: None, .. }, None) => match &strip_paren(iter).kind {
+                    (Pat::Ident { by_ref: false, sub: None, .. }, None) => match &same_elements(strip_paren(iter)).kind {
                         Unary(op @ (UnOp::Ref | UnOp::RefMut), x) => self.elem_type(x).map(|t| Type::Ref { lifetime: None, mutable: *op == UnOp::RefMut, inner: Box::new(t) }),
                         MethodCall { recv, name, args, .. } if args.is_empty() && matches!(name.as_str(), "iter" | "iter_mut") => {
                             self.elem_type(recv).map(|t| Type::Ref { lifetime: None, mutable: name == "iter_mut", inner: Box::new(t) })
@@ -4243,8 +4312,9 @@ impl<'a> Lowerer<'a> {
                     let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
                     let changing = self.changing_methods(Some(&inner));
                     let mutable = visit::writes_through(then, x, &|m| changing.contains(m));
-                    // a `Copy` value the branch changes is changed in place, not in a copy
-                    let by_value = !mutable && crate::sema::is_copy_simple(&inner, &copy);
+                    // a `Copy` value the branch changes is changed in place, not in a copy; a
+                    // `@weak` field's handle is upgraded into a value
+                    let by_value = (!mutable && crate::sema::is_copy_simple(&inner, &copy)) || self.own_weak_field(x).is_some();
                     let var = Expr::new(ExprKind::Path { segs: vec![x.to_string()], generics: None, global: false }, p.span);
                     let expr = if by_value { var } else { Expr::new(ExprKind::Unary(if mutable { UnOp::RefMut } else { UnOp::Ref }, Box::new(var)), p.span) };
                     let ty = if by_value { inner } else { Type::Ref { lifetime: None, mutable, inner: Box::new(inner) } };
@@ -4283,7 +4353,7 @@ impl<'a> Lowerer<'a> {
         let body = Block { stmts: vec![Stmt::Expr { expr: r.clone(), semi: false }], span: r.span };
         let inner = self.narrowable(x, &body)?;
         let copy: std::collections::HashSet<String> = self.k.derives.iter().filter(|(_, d)| d.iter().any(|x| x == "Copy")).map(|(n, _)| n.clone()).collect();
-        let by_value = crate::sema::is_copy_simple(&inner, &copy);
+        let by_value = crate::sema::is_copy_simple(&inner, &copy) || self.own_weak_field(x).is_some();
         let ty = if by_value { inner } else { Type::Ref { lifetime: None, mutable: false, inner: Box::new(inner) } };
         Some((x.to_string(), ty, by_value))
     }
@@ -4301,10 +4371,13 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// The value type of a local `T?` named `x` that `body` doesn't assign, so a null check can
-    /// unwrap it.
+    /// The value type of a local `T?` named `x` (or a `@weak` field of the class) that `body`
+    /// doesn't assign, so a null check can unwrap it.
     fn narrowable(&self, x: &str, body: &Block) -> Option<Type> {
-        let t = self.local(x)?.clone()?;
+        let t = match self.local(x) {
+            Some(t) => t.clone()?,
+            None => self.own_weak_field(x)?,
+        };
         let inner = match t {
             Type::Option(inner) => *inner,
             Type::Path { ref segs, .. } if segs.len() == 1 && segs[0].name == "Option" => match segs[0].generics.as_deref() {
@@ -4321,6 +4394,14 @@ impl<'a> Lowerer<'a> {
             !assigned
         });
         (!assigned).then_some(inner)
+    }
+
+    /// What a null check on `x` unwraps: the variable, or a `@weak` field's upgraded handle.
+    fn narrow_source(&self, x: &str) -> String {
+        match (self.own_weak_field(x), self.implicit_field(x)) {
+            (Some(ty), Some(place)) => self.weak_upgrade(&place, &ty),
+            _ => esc(x),
+        }
     }
 
     /// `if (x == null) return` (or `throw`, `continue`, `break`) on a local `T?`: `x` is the
@@ -4347,7 +4428,7 @@ impl<'a> Lowerer<'a> {
             .enumerate()
             .map(|(i, x)| format!("Some({})", if self.unused_after_check.contains(x) { "_".to_string() } else if changed[i] && !in_place[i] { format!("mut {}", esc(x)) } else { esc(x) }))
             .collect();
-        let vals: Vec<String> = names.iter().enumerate().map(|(i, x)| format!("{}{}", if in_place[i] { "&mut " } else { "" }, esc(x))).collect();
+        let vals: Vec<String> = names.iter().enumerate().map(|(i, x)| format!("{}{}", if in_place[i] { "&mut " } else { "" }, self.narrow_source(x))).collect();
         if names.len() == 1 {
             self.e.w(&format!("let {} = {} else ", pats[0], vals[0]));
         } else {
@@ -4631,7 +4712,10 @@ impl<'a> Lowerer<'a> {
                 let (recv, field) = f.split_at(f.rfind('.').map_or(0, |i| i + 1));
                 self.e.w(recv);
                 self.e.mark(span);
-                self.e.w(field);
+                match self.own_weak_field(n) {
+                    Some(ty) => self.e.w(&self.weak_upgrade(field, &ty)),
+                    None => self.e.w(field),
+                }
                 return;
             }
             // a constant of the class or companion object being lowered
@@ -5613,9 +5697,15 @@ impl<'a> Lowerer<'a> {
             t => t,
         });
         let recv_name = recv_name.as_ref().and_then(|t| t.single_name().map(String::from));
+        // an extension of an interface extends the classes and enums that implement it
+        let ifaces = recv_name.as_deref().and_then(|n| self.class_info(n).map(|c| c.interfaces.clone()).or_else(|| self.enum_info(n).map(|e| e.interfaces.clone()))).unwrap_or_default();
         match all.as_slice() {
             [(_, f)] if recv_name.is_none() => Some(f.clone()),
-            _ => all.iter().find(|(t, _)| recv_name.is_some() && t.single_name().map(String::from) == recv_name).map(|(_, f)| f.clone()),
+            _ => all
+                .iter()
+                .find(|(t, _)| recv_name.is_some() && t.single_name().map(String::from) == recv_name)
+                .or_else(|| all.iter().find(|(t, _)| t.single_name().is_some_and(|n| ifaces.iter().any(|i| i == n))))
+                .map(|(_, f)| f.clone()),
         }
     }
 
@@ -5887,7 +5977,7 @@ impl<'a> Lowerer<'a> {
                     self.format_args(parts);
                     for a in &rest[1..] {
                         self.e.w(", ");
-                        self.expr(&a.value, P_LOWEST);
+                        self.fmt_arg(&a.value);
                     }
                 }
                 ExprKind::Str(parts) if rest.len() == 1 => {
@@ -5898,11 +5988,12 @@ impl<'a> Lowerer<'a> {
                         if i > 0 {
                             self.e.w(", ");
                         }
-                        self.expr(&a.value, P_LOWEST);
+                        self.fmt_arg(&a.value);
                     }
                 }
-                // `println(xs)`: a list prints like `"$xs"`
-                _ if rest.iter().any(|a| self.template_form(&a.value) != Form::Display) => {
+                // `println(xs)`: a list prints like `"$xs"`; so do values read through a shared
+                // object (`println(c.hits.len(), c.bump())`), whose borrows end before later calls
+                _ if rest.iter().any(|a| self.template_form(&a.value) != Form::Display) || rest.len() > 1 && rest.iter().any(|a| self.holds_shared_borrow(&a.value)) => {
                     let sep = if matches!(name, "println" | "print" | "eprintln" | "eprint") { " " } else { "" };
                     let mut parts = Vec::new();
                     for (i, a) in rest.iter().enumerate() {
@@ -5919,7 +6010,7 @@ impl<'a> Lowerer<'a> {
                     self.e.w(&format!("\"{}\"", fmt));
                     for a in rest {
                         self.e.w(", ");
-                        self.expr(&a.value, P_LOWEST);
+                        self.fmt_arg(&a.value);
                     }
                 }
             }
@@ -5996,10 +6087,31 @@ impl<'a> Lowerer<'a> {
             });
             inside
         });
+        // a value read through a shared object's borrow (`m.data.len()`) before a call that may
+        // borrow it again (`m.get("a")`): read in a `let` of its own, which ends the borrow there,
+        // as a `@sync` object's lock must end before the next one
+        let calls_at = args.iter().rposition(|(a, _)| {
+            let mut call = false;
+            visit::walk_expr(a, &mut |x| {
+                call |= matches!(x.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. });
+                !call
+            });
+            call
+        });
+        let own_let: Vec<bool> = args
+            .iter()
+            .enumerate()
+            .map(|(i, (a, or_null))| calls_at.is_some_and(|c| i < c) && !or_null && self.holds_shared_borrow(a) && self.infer_type(a).is_some_and(|t| self.copy_elem(&t) || t.single_name() == Some("String")))
+            .collect();
         for (i, (a, or_null)) in args.into_iter().enumerate() {
             self.e.w(", ");
             let copied = changes_at.is_some_and(|c| i < c) && !or_null && self.this_field_type(a).is_some_and(|t| self.copy_elem(&t));
-            if copied {
+            if own_let[i] {
+                let v = self.fresh("v");
+                self.e.w(&format!("{{ let {} = ", v));
+                self.expr(a, P_LOWEST);
+                self.e.w(&format!("; {} }}", v));
+            } else if copied {
                 self.e.w("{");
                 self.expr(a, P_LOWEST);
                 self.e.w("}");
@@ -6010,12 +6122,21 @@ impl<'a> Lowerer<'a> {
                 self.expr(a, P_UNARY);
                 self.e.w(")");
             } else {
-                self.expr(a, P_LOWEST);
+                self.fmt_arg(a);
             }
         }
         for n in named {
             let f = self.implicit_field(&n).unwrap();
             self.e.w(&format!(", {} = {}", n, f));
+        }
+    }
+
+    /// A value a format macro prints, which only reads it: a field read after `!!` (`o!!.name`)
+    /// leaves the optional in place (`o.as_ref().unwrap().name`).
+    fn fmt_arg(&mut self, a: &Expr) {
+        match self.unwrap_places(a, "as_ref").filter(|_| matches!(strip_paren(a).kind, ExprKind::Field { .. })) {
+            Some(r) => self.expr(&r, P_LOWEST),
+            None => self.expr(a, P_LOWEST),
         }
     }
 
@@ -6360,6 +6481,23 @@ impl<'a> Lowerer<'a> {
             self.expr(&args[0].value, P_LOWEST);
             self.e.w(")");
             return;
+        }
+        // `p.copy()` of a data class: a copy as it is (`p.clone()`, or `p` for a `Copy` one)
+        if name == "copy" && args.is_empty() {
+            if let Some(t) = self.infer_type(recv).map(|t| match t {
+                Type::Ref { inner, .. } => *inner,
+                t => t,
+            }) {
+                if self.type_owner(&t).and_then(|o| self.class_at(&o)).is_some_and(|c| c.is_data && !c.is_shared) {
+                    if self.copy_elem(&t) {
+                        self.expr(recv, P_POSTFIX);
+                    } else {
+                        self.expr(recv, P_POSTFIX);
+                        self.e.w(".clone()");
+                    }
+                    return;
+                }
+            }
         }
         // data class copy(field = value)
         if name == "copy" && !args.is_empty() && args.iter().all(|a| a.name.is_some()) && self.copy_by_constructor(recv, args, span) {
@@ -7525,6 +7663,30 @@ impl<'a> Lowerer<'a> {
                     return;
                 }
             }
+            // `if (x == null || x.is_empty()) a else b` unwraps `x` in `b` too: `if (x != null &&
+            // !(x.is_empty())) b else a`
+            let mut ops = Vec::new();
+            or_operands(strip_paren(c), &mut ops);
+            if let [first, rest @ ..] = ops.as_slice() {
+                if let Some(x) = self.null_check(first, BinOp::Eq).filter(|_| !rest.is_empty()) {
+                    let other = match &el.kind {
+                        ExprKind::Block(b) => b.clone(),
+                        _ => Block { stmts: vec![Stmt::Expr { expr: el.clone(), semi: false }], span: el.span },
+                    };
+                    let optional_use = other.stmts.iter().any(|st| matches!(st, Stmt::Expr { expr, .. } if uses_as_optional(expr, x)));
+                    if visit::stmts_use(&other.stmts, x) && !optional_use && self.narrowable(x, &other).is_some() {
+                        let ExprKind::Binary(_, l, r) = &strip_paren(first).kind else { unreachable!() };
+                        let mut swapped = Expr::new(ExprKind::Binary(BinOp::Ne, l.clone(), r.clone()), first.span);
+                        for o in rest {
+                            let not = Expr::new(ExprKind::Unary(UnOp::Not, Box::new(Expr::new(ExprKind::Paren(Box::new((*o).clone())), o.span))), o.span);
+                            swapped = Expr::new(ExprKind::Binary(BinOp::And, Box::new(swapped), Box::new(not)), c.span);
+                        }
+                        let first_branch = Expr::new(ExprKind::Block(then.clone()), then.span);
+                        self.if_expr(&Cond::Expr(swapped), &other, Some(&first_branch), mode);
+                        return;
+                    }
+                }
+            }
         }
         // `x != null` unwraps `x` in the branch
         let (narrowed, typed) = self.narrow_cond(cond, then);
@@ -8534,7 +8696,7 @@ fn field_text(e: &Expr) -> String {
     }
 }
 
-fn strip_paren(e: &Expr) -> &Expr {
+pub(crate) fn strip_paren(e: &Expr) -> &Expr {
     match &e.kind {
         ExprKind::Paren(x) => strip_paren(x),
         _ => e,
@@ -8713,4 +8875,18 @@ fn through_type(m: &crate::sema::MethodInfo, args: &[Arg]) -> Vec<ParamInfo> {
         params.insert(0, ParamInfo { name: Some("self".into()), ty: Type::Infer, default: None, context: None, generics: Vec::new(), boxed: false, lent: false, cfg: false, stored: false });
     }
     params
+}
+
+/// The iterator under adapters that keep its elements (`names.iter().rev()`, `.skip(1)`,
+/// `.filter { .. }`): the elements of `xs.iter().rev()` are those of `xs.iter()`.
+fn same_elements(e: &Expr) -> &Expr {
+    match &e.kind {
+        ExprKind::MethodCall { recv, name, .. } if matches!(name.as_str(), "rev" | "skip" | "take" | "step_by" | "filter" | "skip_while" | "take_while" | "peekable" | "cycle" | "fuse") => {
+            match &strip_paren(recv).kind {
+                ExprKind::MethodCall { .. } => same_elements(strip_paren(recv)),
+                _ => e,
+            }
+        }
+        _ => e,
+    }
 }

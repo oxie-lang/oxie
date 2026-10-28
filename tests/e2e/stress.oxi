@@ -6,7 +6,7 @@ import std::thread
 // ---- generic interface with an associated type and generic methods
 interface Repository<T> {
     fun find(id: u32): &T?
-    fun save(item: T): u32
+    mut fun save(item: T): u32
     fun count(): usize
 }
 

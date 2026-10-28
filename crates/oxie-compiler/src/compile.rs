@@ -235,6 +235,7 @@ pub fn compile(inputs: Vec<Input>, opts: &Options) -> Output {
             l.crate_attrs_allowed = opts.script;
             l.source_words = Some(words[i].clone());
             l.crate_calls = has_root.then_some(&calls);
+            l.api = has_lib && p.input.rel_path != std::path::Path::new("main.oxi");
             l.lower_file(&p.file);
             missed.extend(l.calls.iter().filter(|c| !calls.contains(*c)).cloned());
             lowered.push((l.e, l.diags, l.root_lints));
@@ -587,6 +588,32 @@ mod tests {
         let out = compile(vec![input], &opts);
         assert!(!out.has_errors(), "{:?}", out.diags);
         out.files[0].decisions.iter().map(|d| (src[d.span.start as usize..d.span.end as usize].to_string(), d.chosen.clone(), d.why.clone())).collect()
+    }
+
+    /// The messages of the diagnostics of `severity` that compiling `inputs` gives, by file.
+    fn messages(inputs: &[(&str, &str)], severity: Severity) -> Vec<(String, String)> {
+        let inputs = inputs.iter().map(|(rel, text)| Input { rel_path: PathBuf::from(rel), abs_path: PathBuf::from(rel), text: text.to_string() }).collect();
+        let opts = Options { crate_name: "main".into(), extern_crates: HashSet::new(), out_dir: PathBuf::from("/oxie"), script: false, root_attrs: Vec::new() };
+        let out = compile(inputs, &opts);
+        out.diags.iter().flat_map(|(path, _, ds)| ds.iter().filter(|d| d.severity == severity).map(move |d| (path.display().to_string(), d.message.clone()))).collect()
+    }
+
+    #[test]
+    fn public_methods_of_a_library_say_mut() {
+        // a library's users call `current`: its signature can't follow its body
+        let lib = "pub class Counter {\n    var hits = 0\n    pub fun current(): i32 {\n        hits += 1\n        return hits\n    }\n    pub mut fun bump() { hits += 1 }\n    private fun inner() { hits += 1 }\n}\nclass Hidden {\n    var n = 0\n    pub fun touch() { n += 1 }\n}\n";
+        let main = "class Local {\n    var n = 0\n    pub fun touch() { n += 1 }\n}\nfun main() {}\n";
+        let errors = messages(&[("lib.oxi", lib), ("main.oxi", main)], Severity::Error);
+        assert_eq!(errors, [("lib.oxi".to_string(), "`Counter.current` is public and changes its object, so it must say so: `mut fun current`".to_string())]);
+        // a program has no users but itself
+        assert!(messages(&[("main.oxi", &format!("{lib}fun main() {{}}\n"))], Severity::Error).is_empty());
+    }
+
+    #[test]
+    fn changing_a_copy_warns_where_kotlin_would_share() {
+        let src = "data class Pos(var x: i32, var y: i32)\nshared class Acc(var history: [i64] = [])\nfun main() {\n    var ps: [Pos] = [Pos(1, 1)]\n    var p = ps[0]\n    p.x = 5\n    println(ps[0].x)\n    var q = ps[0].copy()\n    q.x = 6\n    println(ps[0].x)\n    val a = Acc()\n    var h = a.history\n    h.push(1)\n    var kept = a.history.clone()\n    kept.push(2)\n    println(\"${p.x} ${q.x} ${h:?} ${kept:?}\")\n}\n";
+        let warnings: Vec<String> = messages(&[("main.oxi", src)], Severity::Warning).into_iter().map(|(_, m)| m).filter(|m| m.contains("copy")).collect();
+        assert_eq!(warnings, ["`p` is a copy of `ps[0]`: changing it doesn't change `ps[0]`", "`h` is a copy of `a.history`: changing it doesn't change `a`"]);
     }
 
     #[test]

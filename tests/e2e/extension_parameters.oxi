@@ -1,0 +1,28 @@
+// The parameters of extension functions are borrowed unless they say `own`, as those of other
+// functions: text a function keeps is copied, and calls lend their arguments.
+
+data class User(name: String, age: i32)
+interface Shape { fun area(): f64 }
+class Sq(side: f64) : Shape { override fun area() = side * side }
+
+fun String.wrap(with: String): String = "$with$this$with"
+fun Vec<String>.add_copy(n: String) = self.push(n)
+fun Vec<String>.add_name(own n: String) = self.push(n)
+fun User.older_than(other: User): bool = age > other.age
+fun Shape.bigger(other: Shape): bool = area() > other.area()
+fun i32.plus_or_zero(o: i32?): i32 = this + (o ?: 0)
+
+fun main() {
+    val star = "*".to_string()
+    println("hi".to_string().wrap(star))
+    println(star)
+    var names: [String] = []
+    names.add_copy(star)
+    names.add_name("ann".to_string())
+    println("$names $star")
+    val a = User("a", 3)
+    val b = User("b", 4)
+    println("${a.older_than(b)} ${b.name}")
+    println(Sq(2.0).bigger(Sq(1.0)))
+    println(3.plus_or_zero(Some(4)))
+}

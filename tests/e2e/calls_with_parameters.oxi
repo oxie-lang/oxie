@@ -3,7 +3,7 @@
 // arguments work, text is converted and references are lent.
 
 interface Logger {
-    fun log(msg: &str)
+    mut fun log(msg: &str)
     fun level(): i32 = 1
     fun tagged(msg: &str, tag: &str = "info"): String = "[$tag] $msg"
 }

@@ -1,0 +1,22 @@
+// A loop over `xs.iter().rev()` (or `.skip(1)`, `.filter { }`) binds references to the elements,
+// as over `xs.iter()`: calls lend their arguments to methods of the elements, and `copy()` of a
+// data class is a copy of it.
+
+class Greeter(prefix: String) {
+    fun greet(name: String) = println("$prefix $name")
+}
+
+data class Pos(var x: i32, var y: i32)
+data class Named(name: String, pos: Pos)
+
+fun main() {
+    val gs: [Greeter] = [Greeter("hi"), Greeter("yo")]
+    for (g in gs.iter().rev()) g.greet("ann".to_string())
+    for (g in gs.iter().skip(1)) g.greet("bob".to_string())
+    val ps: [Pos] = [Pos(1, 2)]
+    var p = ps[0].copy()
+    p.x = 9
+    val n = Named("a", Pos(0, 0))
+    val m = n.copy()
+    println("${ps[0].x} ${p.x} ${m.name}")
+}
