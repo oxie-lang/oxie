@@ -11,7 +11,7 @@ snippets = ["./snippets/oxie.json"]
 # editors/tree-sitter-oxie (set by ../build-zed-extension.sh).
 [grammars.oxie]
 repository = "https://github.com/oxie-lang/oxie"
-rev = "a3a355d3368bee053c47e2f5356d37e9f4e58ff9"
+rev = "0e1b96b309df3e8db82ccc55b257b48ba65493fa"
 path = "editors/tree-sitter-oxie"
 
 [language_servers.oxie]
