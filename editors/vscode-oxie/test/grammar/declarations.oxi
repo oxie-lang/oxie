@@ -44,6 +44,11 @@ fun String.shout(): String = this.to_uppercase()
 //        ^ keyword.operator.access.dot.oxie
 //         ^^^^^ entity.name.function.oxie
 //                           ^^^^ variable.language.this.oxie
+fun keep(own item: Item, own: i32) = items.push(item)
+//       ^^^ storage.modifier.own.oxie
+//           ^^^^ variable.parameter.oxie
+//                       ^^^ variable.parameter.oxie
+//                       ^^^ - storage.modifier.own.oxie
 fun apply(f: (i32) -> i32, x: i32) = f(x)
 //        ^ variable.parameter.oxie
 //                 ^^ keyword.operator.arrow.skinny.oxie

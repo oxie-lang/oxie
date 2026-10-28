@@ -49,6 +49,8 @@
 (annotation name: (annotation_name (identifier) @attribute))
 
 (parameter_name (identifier) @variable.parameter)
+; `own` before a parameter's name (a soft keyword: a parameter may be named `own`)
+((parameters (identifier) @keyword . (parameter)) (#eq? @keyword "own"))
 (property_name (identifier) @property)
 
 (member_access name: (identifier) @property)

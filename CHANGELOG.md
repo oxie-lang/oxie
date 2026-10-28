@@ -43,6 +43,7 @@ signature alone says whether a call keeps the caller's value.
   parameter, a value is passed as `Some(&x)` and `null` as `None`.
 * A class or enum that derives `Copy` itself (`@derive(Clone, Copy)`) is passed as a copy, like
   one Oxie derives `Copy` for.
+* The VS Code, Zed and Kuana extensions highlight `own`.
 
 ## 0.5.0 - 2026-10-27
 

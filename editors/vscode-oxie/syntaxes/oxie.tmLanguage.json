@@ -351,12 +351,13 @@
         { "include": "#comments" },
         { "include": "#attributes" },
         {
-          "match": "\\b(?:(val|var)\\s+|(mut)\\s+)?((?:r#)?[_[:alpha:]][_[:alnum:]]*)\\s*(:)(?!:)",
+          "match": "\\b(?:(val|var)\\s+|(mut)\\s+|(own)\\s+)?((?:r#)?[_[:alpha:]][_[:alnum:]]*)\\s*(:)(?!:)",
           "captures": {
             "1": { "name": "keyword.other.oxie storage.type.oxie" },
             "2": { "name": "storage.modifier.mut.oxie" },
-            "3": { "name": "variable.parameter.oxie" },
-            "4": { "name": "keyword.operator.key-value.oxie" }
+            "3": { "name": "storage.modifier.own.oxie" },
+            "4": { "name": "variable.parameter.oxie" },
+            "5": { "name": "keyword.operator.key-value.oxie" }
           }
         },
         { "include": "#parens" },
