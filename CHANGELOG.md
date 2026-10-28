@@ -1,12 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-10-28
 
 A parameter is borrowed unless it says `own`. Oxie used to decide from a function's body whether
 a parameter declared as a value (`name: String`, `u: User`) was lent or taken, and that decision
 also depended on code elsewhere: a call Oxie couldn't follow, a function used as a value, or
 `pub` in a library changed it, and the errors appeared at calls nobody had touched. Now the
 signature alone says whether a call keeps the caller's value.
+
+Code written for 0.5 builds again once the functions that keep a parameter say `own`: each one
+is an error naming the parameter, with the fix. Oxie's own tests and examples needed it in 46
+places, mostly adders and setters that store what they are given, and generic containers. The
+Kuana editor, translated whole by `oxie from-rust` (which writes `own` itself, 325 times there),
+builds and passes 442 of its 443 tests, as with 0.5.0.
 
 ### Upgrading
 

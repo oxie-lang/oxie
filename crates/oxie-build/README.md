@@ -5,7 +5,7 @@ before each build. `oxie new` sets it up for you:
 
 ```toml
 [build-dependencies]
-oxie-build = "0.5"
+oxie-build = "0.6"
 ```
 
 ```rust
