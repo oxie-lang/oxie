@@ -1,4 +1,4 @@
-pub fun consume(v: Vec<i32>): usize = v.len()
+pub fun consume(own v: Vec<i32>): usize = v.len()
 
 fun main() {
     val nums = vec[1, 2, 3]
